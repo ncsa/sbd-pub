@@ -260,16 +260,23 @@ namespace sbd {
 
     
     if( mpi_rank_t == 0 ) {
-      std::vector<size_t> DetT(array_size);
-      for(size_t ia=helper[0].braAlphaStart; ia < helper[0].braAlphaEnd; ia++) {
-	for(size_t ib=helper[0].braBetaStart; ib < helper[0].braBetaEnd; ib++) {
-	  size_t i = (ia - helper[0].braAlphaStart) * braBetaSize
-	           +  ib - helper[0].braBetaStart;
-	  if( ( i % mpi_size_h ) == mpi_rank_h ) {
-	    DetFromAlphaBeta(adet[ia],bdet[ib],bit_length,norb,DetT);
-	    ZeroDiffCorrelation(DetT,W[i],bit_length,norb,onebody,twobody);
-	  }
-	}
+#pragma omp parallel
+      {
+        // round-robin assignment of work to threads
+        size_t thread_id = omp_get_thread_num();
+        size_t ia_start = thread_id + helper[0].braAlphaStart;
+        size_t ia_end   = helper[0].braAlphaEnd;
+        std::vector<size_t> DetT(array_size);
+        for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
+          for(size_t ib = helper[0].braBetaStart; ib < helper[0].braBetaEnd; ib++) {
+            size_t i = (ia - helper[0].braAlphaStart) * braBetaSize
+                     +  ib - helper[0].braBetaStart;
+            if( ( i % mpi_size_h ) == mpi_rank_h ) {
+              DetFromAlphaBeta(adet[ia],bdet[ib],bit_length,norb,DetT);
+              ZeroDiffCorrelation(DetT,W[i],bit_length,norb,onebody_t[thread_id],twobody_t[thread_id]);
+            }
+          }
+        }
       }
     }
 
