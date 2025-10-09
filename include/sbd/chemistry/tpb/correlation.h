@@ -253,10 +253,8 @@ namespace sbd {
     size_t array_size = (2*norb + bit_length - 1 ) / bit_length;
 
     size_t num_threads = 1;
-#pragma omp parallel
-    {
-      num_threads = omp_get_num_threads();
-    }
+    num_threads = omp_get_max_threads();
+    
     std::vector<std::vector<std::vector<ElemT>>> onebody_t(num_threads,onebody);
     std::vector<std::vector<std::vector<ElemT>>> twobody_t(num_threads,twobody);
 
@@ -280,19 +278,14 @@ namespace sbd {
       size_t ketAlphaSize = helper[task].ketAlphaEnd-helper[task].ketAlphaStart;
       size_t ketBetaSize  = helper[task].ketBetaEnd-helper[task].ketBetaStart;
       
+      if( helper.size() != 0 ) {
 #pragma omp parallel
-      {
-	size_t chunk_size = 0;
-	size_t thread_id = omp_get_thread_num();
-	if( helper.size() != 0 ) {
-	  chunk_size = (helper[0].braAlphaEnd-helper[0].braAlphaStart) / num_threads;
-	  
-	  size_t ia_start = (thread_id+0) * chunk_size + helper[task].braAlphaStart;
-	  size_t ia_end   = (thread_id+1) * chunk_size + helper[task].braAlphaStart;
-	  if( thread_id == num_threads - 1 ) {
-	    ia_end = helper[task].braAlphaEnd;
-	  }
-	  
+        {
+	  // round-robin assignment of work to threads
+          size_t thread_id = omp_get_thread_num();
+          size_t ia_start = thread_id + helper[task].braAlphaStart;
+          size_t ia_end   = helper[task].braAlphaEnd;
+
 	  size_t array_size = (2*norb + bit_length - 1 ) / bit_length;
 	  std::vector<size_t> DetI(array_size);
 	  auto DetJ = DetI;
@@ -301,7 +294,7 @@ namespace sbd {
 	  
 	  if( helper[task].taskType == 2 ) { // beta range are same
 	    
-	    for(size_t ia = ia_start; ia < ia_end; ia++) {
+	    for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
 	      for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 		
 		size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -336,7 +329,7 @@ namespace sbd {
 	    
 	  } else if ( helper[task].taskType == 1 ) { // alpha range are same
 	    
-	    for(size_t ia = ia_start; ia < ia_end; ia++) {
+	    for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
 	      for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 		
 		size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -371,7 +364,7 @@ namespace sbd {
 	    
 	  } else {
 	    
-	    for(size_t ia = ia_start; ia < ia_end; ia++) {
+	    for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
 	      for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 		
 		size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -397,9 +390,10 @@ namespace sbd {
 	      } // end for(size_t ib=ib_start; ib < ib_end; ib++)
 	    } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	  } // if ( helper[task].taskType ==  )
-	} // end if( helper.size() != 0 )
 
-      } // end #pragma omp parallel
+        } // end #pragma omp parallel
+
+      } // end if( helper.size() != 0 )
       
       if( helper[task].taskType == 0 && task != helper.size()-1 ) {
 	int adetslide = helper[task].adetShift-helper[task+1].adetShift;

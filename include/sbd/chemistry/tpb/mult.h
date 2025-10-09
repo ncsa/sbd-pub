@@ -469,6 +469,7 @@ namespace sbd {
       size_t ketBetaSize  = helper[task].ketBetaEnd-helper[task].ketBetaStart;
 #pragma omp parallel
       {
+        // round-robin assignment of work to threads
 	size_t thread_id = omp_get_thread_num();
 	size_t ia_start = thread_id + helper[task].braAlphaStart;
 	size_t ia_end   = helper[task].braAlphaEnd;
