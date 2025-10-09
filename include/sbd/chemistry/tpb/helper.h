@@ -145,8 +145,6 @@ namespace sbd {
 
     size_t braAlphaSize = braAlphaEnd-braAlphaStart;
     size_t braBetaSize  = braBetaEnd-braBetaStart;
-    size_t ketAlphaSize = ketAlphaEnd-ketAlphaStart;
-    size_t ketBetaSize  = ketBetaEnd-ketBetaStart;
     helper.SinglesFromAlpha.resize(braAlphaSize);
     helper.DoublesFromAlpha.resize(braAlphaSize);
     helper.SinglesFromBeta.resize(braBetaSize);

@@ -5,15 +5,6 @@
 #ifndef SBD_CHEMISTRY_BASIC_DETERMINANTS_H
 #define SBD_CHEMISTRY_BASIC_DETERMINANTS_H
 
-#ifdef SBD_TRADMODE
-static int *block_v=(int *) 0;
-static int *bit_pos_v=(int *) 0;
-static int *new_block_A_v=(int *) 0;
-static int *new_bit_pos_A_v=(int *) 0;
-static int *new_block_B_v=(int *) 0;
-static int *new_bit_pos_B_v=(int *) 0;
-#endif
-
 namespace sbd {
 
 #ifdef SBD_TRADMODE
