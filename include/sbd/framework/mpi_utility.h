@@ -431,7 +431,7 @@ namespace sbd {
   void MpiAllreduce(std::vector<ElemT> & A, MPI_Op op, MPI_Comm comm) {
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     std::vector<ElemT> B(A);
-    MPI_Allreduce(B.data(),A.data(),A.size(),DataT,op,comm);
+    MPI_Allreduce_c(B.data(),A.data(),A.size(),DataT,op,comm);
   }
 
   template <typename ElemT>

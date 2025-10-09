@@ -11,10 +11,10 @@ namespace sbd {
   void GetTotalD(const std::vector<ElemT> & hii,
 		 std::vector<ElemT> & dii,
 		 MPI_Comm h_comm) {
-    int size_d = hii.size();
+    size_t size_d = hii.size();
     dii.resize(static_cast<size_t>(size_d),ElemT(0.0));
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
-    MPI_Allreduce(hii.data(),dii.data(),size_d,DataT,MPI_SUM,h_comm);
+    MPI_Allreduce_c(hii.data(),dii.data(),size_d,DataT,MPI_SUM,h_comm);
   }
 
   template <typename ElemT, typename RealT>
