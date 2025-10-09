@@ -168,8 +168,8 @@ namespace sbd {
 	  load_det_size[0] = load_adet_size;
 	  load_det_size[1] = load_bdet_size;
 	} else {
-	  load_det_size[0] = 0;
-	  load_det_size[1] = 0;
+          std::cerr << "failed to open input file " << filename << ", exiting ..." << std::endl;
+          MPI_Abort(MPI_COMM_WORLD, 0);
 	}
       } // end read-in from file
 
@@ -488,8 +488,8 @@ namespace sbd {
 	  load_det_size[0] = load_adet_size;
 	  load_det_size[1] = load_bdet_size;
 	} else {
-	  load_det_size[0] = 0;
-	  load_det_size[1] = 0;
+          std::cerr << "failed to open input file " << filename << ", exiting ..." << std::endl;
+          MPI_Abort(MPI_COMM_WORLD, 0);
 	}
       } // end read-in from file
 

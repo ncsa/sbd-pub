@@ -152,31 +152,48 @@ namespace sbd {
     helper.SinglesFromBeta.resize(braBetaSize);
     helper.DoublesFromBeta.resize(braBetaSize);
 
+    // count single and double excitations to save memory
 #pragma omp parallel for
     for(size_t ia=braAlphaStart; ia < braAlphaEnd; ia++) {
-      helper.SinglesFromAlpha[ia-braAlphaStart].reserve(ketAlphaSize);
-      helper.DoublesFromAlpha[ia-braAlphaStart].reserve(ketAlphaSize);
+      size_t scount = 0; size_t dcount = 0;
       for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
-	int d = difference(adets[ia],adets[ja],bit_length,norb);
-	if( d == 2 ) {
-	  helper.SinglesFromAlpha[ia-braAlphaStart].push_back(ja);
-	} else if ( d == 4 ) {
-	  helper.DoublesFromAlpha[ia-braAlphaStart].push_back(ja);
-	}
-      }
+        int d = difference(adets[ia],adets[ja],bit_length,norb);
+        if ( d == 2 ) scount++;
+        else if ( d == 4 ) dcount++;
+      }   
+
+      helper.SinglesFromAlpha[ia-braAlphaStart].reserve(scount);
+      helper.DoublesFromAlpha[ia-braAlphaStart].reserve(dcount);
+
+      for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+        int d = difference(adets[ia],adets[ja],bit_length,norb);
+        if ( d == 2 ) { 
+          helper.SinglesFromAlpha[ia-braAlphaStart].push_back(ja);
+        } else if ( d == 4 ) { 
+          helper.DoublesFromAlpha[ia-braAlphaStart].push_back(ja);
+        }
+      }   
     }
 
 #pragma omp parallel for
     for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
-      helper.SinglesFromBeta[ib-braBetaStart].reserve(ketBetaSize);
-      helper.DoublesFromBeta[ib-braBetaStart].reserve(ketBetaSize);
+      size_t scount = 0; size_t dcount = 0;
       for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
-	int d = difference(bdets[ib],bdets[jb],bit_length,norb);
-	if( d == 2 ) {
-	  helper.SinglesFromBeta[ib-braBetaStart].push_back(jb);
-	} else if ( d == 4 ) {
-	  helper.DoublesFromBeta[ib-braBetaStart].push_back(jb);
-	}
+        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+        if ( d == 2 ) scount++;
+        else if ( d == 4 ) dcount++;
+      }
+
+      helper.SinglesFromBeta[ib-braBetaStart].reserve(scount);
+      helper.DoublesFromBeta[ib-braBetaStart].reserve(dcount);
+
+      for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+        if ( d == 2 ) {
+          helper.SinglesFromBeta[ib-braBetaStart].push_back(jb);
+        } else if ( d == 4 ) {
+          helper.DoublesFromBeta[ib-braBetaStart].push_back(jb);
+        }
       }
     }
   }

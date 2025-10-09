@@ -17,59 +17,91 @@ static int *new_bit_pos_B_v=(int *) 0;
 namespace sbd {
 
 #ifdef SBD_TRADMODE
-  std::vector<size_t> DetFromAlphaBeta(const std::vector<size_t>& A,
-				       const std::vector<size_t>& B,
-				       const size_t bit_length,
-				       const size_t L) {
-    size_t D_size = (2*L+bit_length-1)/bit_length;
-    std::vector<size_t> D(D_size,0);
-    int iL = L;
-    int ibit_length = bit_length;
-#pragma omp single
-    if (!block_v) {
-	block_v = (int *)calloc(L,sizeof(int));
-	bit_pos_v = (int *)calloc(L,sizeof(int));
-	new_block_A_v = (int *)calloc(L,sizeof(int));
-	new_bit_pos_A_v = (int *)calloc(L,sizeof(int));
-	new_block_B_v = (int *)calloc(L,sizeof(int));
-	new_bit_pos_B_v = (int *)calloc(L,sizeof(int));
-    	for(int i=0; i < iL; ++i) {
-          block_v[i] = i / ibit_length;
-          bit_pos_v[i] = i % ibit_length;
-          new_block_A_v[i] = (2*i) / ibit_length;
-          new_bit_pos_A_v[i] = (2*i) % ibit_length;
-          new_block_B_v[i] = (2*i+1) / ibit_length;
-          new_bit_pos_B_v[i] = (2*i+1) % ibit_length;
-	}
+
+  std::vector<size_t> DetFromAlphaBeta(const std::vector<size_t> & A,
+                                       const std::vector<size_t> & B,
+                                       const size_t bit_length,
+                                       const size_t L) {
+    int dsize = (2*L + bit_length - 1) / bit_length;
+    std::vector<size_t> D(dsize);
+    int fsize = L / bit_length;
+    int half = bit_length / 2;
+    int extra = L - fsize*bit_length;
+    int case1 = (extra > 0) && (extra <= half);
+    int case2 = (extra > 0) && (extra >  half);
+    for (int j = 0; j < fsize; j++) {
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
     }
-    for(int i=0; i < iL; ++i) {    
-      if ( A[block_v[i]] & (size_t(1) << bit_pos_v[i]) ) {
-	D[new_block_A_v[i]] |= size_t(1) << new_bit_pos_A_v[i];
-      }
-      if( B[block_v[i]] & (size_t(1) << bit_pos_v[i]) ) {
-	D[new_block_B_v[i]] |= size_t(1) << new_bit_pos_B_v[i];
-      }
+    if (case1) {
+       int j = fsize;
+       D[2*j] = 0;
+       for (int i = 0; i < extra; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+    }
+    if (case2) {
+       int j = fsize;
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+       for (int i = 0; i < extra - half; i++) {
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
     }
     return D;
   }
 
   void DetFromAlphaBeta(const std::vector<size_t> & A,
-			const std::vector<size_t> & B,
-			const size_t bit_length,
-			const size_t L,
-			std::vector<size_t> & D) {
-    std::fill(D.begin(),D.end(),static_cast<size_t>(0));
-    int iL = L;
-    int ibit_length = bit_length;
-    for(int i=0; i < iL; ++i) {
-      if ( A[block_v[i]] & (size_t(1) << bit_pos_v[i]) ) {
-	D[new_block_A_v[i]] |= size_t(1) << new_bit_pos_A_v[i];
-      }
-      if( B[block_v[i]] & (size_t(1) << bit_pos_v[i]) ) {
-	D[new_block_B_v[i]] |= size_t(1) << new_bit_pos_B_v[i];
-      }
+                        const std::vector<size_t> & B,
+                        const size_t bit_length,
+                        const size_t L,
+                        std::vector<size_t> & D) {
+    int fsize = L / bit_length;
+    int half = bit_length / 2;
+    int extra = L - fsize*bit_length;
+    int case1 = (extra > 0) && (extra <= half);
+    int case2 = (extra > 0) && (extra >  half);
+    for (int j = 0; j < fsize; j++) {
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
+    }
+    if (case1) {
+       int j = fsize;
+       D[2*j] = 0; 
+       for (int i = 0; i < extra; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+    }
+    if (case2) {
+       int j = fsize;
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+       for (int i = 0; i < extra - half; i++) {
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
     }
   }
+  
 #else
   std::vector<size_t> DetFromAlphaBeta(const std::vector<size_t>& A,
 				       const std::vector<size_t>& B,

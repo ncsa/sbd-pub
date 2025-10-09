@@ -71,6 +71,10 @@ namespace sbd {
 	  sbd_data.threshold = std::atof(argv[i+1]);
 	  i++;
 	}
+        if( std::string(argv[i]) == "--max_time" ) { 
+          sbd_data.max_time = std::atof(argv[i+1]);
+          i++;
+        }
 	if( std::string(argv[i]) == "--shuffle" ) {
 	  sbd_data.do_shuffle = std::atoi(argv[i+1]);
 	  i++;
