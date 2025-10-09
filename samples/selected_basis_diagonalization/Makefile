@@ -18,6 +18,6 @@ diag: clean main.o $(OBJECTS)
 	$(CCCOM) $(CCFLAGS) -o diag main.o $(OBJECTS) $(LIBFLAGS)
 
 clean:
-	rm -f *.o
+	rm -f main.o
 
 ###############################################################

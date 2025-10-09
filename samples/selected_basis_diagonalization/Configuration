@@ -1,5 +1,5 @@
 # Path to the SBD library
-SBD_PATH=../../
+SBD_PATH=../..
 
 # mpi c++ compiler
 CCCOM=mpicxx
