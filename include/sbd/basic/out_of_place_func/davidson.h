@@ -14,7 +14,11 @@ namespace sbd {
     size_t size_d = hii.size();
     dii.resize(static_cast<size_t>(size_d),ElemT(0.0));
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+#if MPI_VERSION >= 4
     MPI_Allreduce_c(hii.data(),dii.data(),size_d,DataT,MPI_SUM,h_comm);
+#else
+    MPI_Allreduce(hii.data(),dii.data(),size_d,DataT,MPI_SUM,h_comm);
+#endif
   }
 
   template <typename ElemT, typename RealT>
