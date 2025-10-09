@@ -431,7 +431,11 @@ namespace sbd {
   void MpiAllreduce(std::vector<ElemT> & A, MPI_Op op, MPI_Comm comm) {
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     std::vector<ElemT> B(A);
+#if MPI_VERSION >= 4
     MPI_Allreduce_c(B.data(),A.data(),A.size(),DataT,op,comm);
+#else
+    MPI_Allreduce(B.data(),A.data(),A.size(),DataT,op,comm);
+#endif
   }
 
   template <typename ElemT>
@@ -482,6 +486,7 @@ namespace sbd {
     std::vector<MPI_Request> req_data(2);
     std::vector<MPI_Status> sta_data(2);
 
+#if MPI_VERSION >= 4
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     if( send_size != 0 ) {
       MPI_Isend_c(A.data(),send_size,DataT,mpi_dist,1,comm,&req_data[0]);
@@ -489,6 +494,15 @@ namespace sbd {
     if( recv_size != 0 ) {
       MPI_Irecv_c(B.data(),recv_size,DataT,mpi_source,1,comm,&req_data[1]);
     }
+#else
+    MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+    if( send_size != 0 ) {
+      MPI_Isend(A.data(),send_size,DataT,mpi_dist,1,comm,&req_data[0]);
+    }
+    if( recv_size != 0 ) {
+      MPI_Irecv(B.data(),recv_size,DataT,mpi_source,1,comm,&req_data[1]);
+    }
+#endif
 
     if( send_size != 0 && recv_size != 0 ) {
       MPI_Waitall(2,req_data.data(),sta_data.data());
