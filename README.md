@@ -1,32 +1,59 @@
-# Libary for selected basis diagonalization
+# Library for Selected Basis Diagonalization (SBD)
 
-This is a header-only library for diagonalizing quantum systems in a selected basis, with a focus on handling wavefunction vectors that are too large to fit in the memory of a single node.
-The library leverages MPI-based parallelization to distribute the wavefunction across multiple nodes.
-Sample usage examples are provided in the `/samples` directory.
+High-performance quantum chemistry library for diagonalizing quantum systems in a selected basis, with a focus on handling wavefunction vectors that are too large to fit in the memory of a single node. The library leverages MPI-based parallelization to distribute the wavefunction across multiple nodes.
 
-## Author
+## Key Features
 
-- Tomonori Shirakawa, RIKEN Center for Computational Science
+- Header-only C++ library (no installation required)
+- Parallel Davidson algorithm implementation
+- MPI-based distributed computing
+- GPU acceleration support (AMD ROCm via OpenMP target offload)
+- Support for large-scale quantum chemistry problems
+- Example applications and usage samples in `/samples` and `/applications` directories
+
+## Authors
+
+- Tomonori Shirakawa, RIKEN Center for Computational Science (original library author)
+- Juha Jäykkä, AMD Silo AI (GPU acceleration)
+- Zachary Streeter, AMD (GPU acceleration)
+- Igor Pasichnyk, AMD (performance analysis and benchmarking)
 
 ## Version
 
 - v1.0.0 (This version is tagged as initial public release).
 
-## Requirement
+## Installation
 
+This is a header-only C++ library, so no installation is required. Simply include the library headers in your project:
+
+```cpp
+#include "sbd/sbd.h"
+```
+
+### Requirements
+
+- C++17 compliant compiler
 - Message Passing Interface (MPI)
 - OpenMP
 - BLAS and LAPACK
+- For GPU support: AMD ROCm (tested with ROCm 6.1.1)
 
-## Install
+## Applications and Examples
 
-- This code is provided as a header-only llibrary, so no installation is required.
+### Full-Featured Application
 
-## How to Compile the Sample Codes
+A complete quantum chemistry ground state solver application is available in `applications/selected_basis_diagonalization/`. This application demonstrates production use of the library with:
 
-- The sample code for parallelized selected basis diagonalization is located in `sample/selected_basis_diagonalization`.
-- Edit the configuration file to suit your environment and build it with the make command.
-- For more information and options for the executable, see README.md in the same directory.
+- MPI parallelization across multiple nodes
+- GPU acceleration via OpenMP target offload
+- Davidson iterative eigensolver
+- Support for FCIDUMP integral files
+
+**Build and usage instructions:** See `applications/selected_basis_diagonalization/README.md`
+
+### Sample Code
+
+Additional sample codes for understanding library usage are located in `samples/selected_basis_diagonalization/`. These examples demonstrate basic library usage patterns and algorithm implementations.
 
 ## Documentation
 
@@ -38,9 +65,14 @@ doxygen ./doc/Doxyfile
 
 
 ## Note
-This repository contains code that is part of ongoing research and is related to a paper that has not yet been published.
-The code is shared publicly for transparency and to support academic collaboration.  
-Please do not cite this work until the related paper is published.
+
+This repository contains research code related to the following papers:
+
+* Closed-loop calculations of electronic structure on a quantum processor and a classical supercomputer at full scale (https://arxiv.org/abs/2511.00224)
+* Scaling Sample-Based Quantum Diagonalization on GPU-Accelerated Systems using OpenMP Offload (TODO)
+
+The code is shared publicly to support transparency and academic collaboration.
+If you use this repository in your research, please cite the corresponding papers.
 
 ## Licence
 
