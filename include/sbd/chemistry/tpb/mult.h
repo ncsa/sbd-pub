@@ -86,6 +86,7 @@ void mult(const std::vector<ElemT> &hii,
 
 #pragma omp parallel
     {
+      thread_id = omp_get_thread_num();
       // k_end[thread_id] = k_start[thread_id] + len[task][thread_id];
       // for(size_t k=k_start[thread_id]; k < k_end[thread_id]; k++) {
       for (size_t k = 0; k < len[task][thread_id]; k++) {
@@ -108,8 +109,8 @@ void mult(const std::vector<ElemT> &hii,
   auto time_mult_end = std::chrono::high_resolution_clock::now();
 
   auto time_comm_start = std::chrono::high_resolution_clock::now();
-  MpiAllreduce(Wb, MPI_SUM, t_comm);
-  MpiAllreduce(Wb, MPI_SUM, h_comm);
+  if (mpi_size_t > 1) MpiAllreduce(Wb, MPI_SUM, t_comm);
+  if (mpi_size_h > 1) MpiAllreduce(Wb, MPI_SUM, h_comm);
   auto time_comm_end = std::chrono::high_resolution_clock::now();
 
   auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -156,6 +157,7 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   MPI_Comm_size(t_comm, &mpi_size_t);
   int mpi_rank_t;
   MPI_Comm_rank(t_comm, &mpi_rank_t);
+
   size_t braAlphaSize = 0;
   size_t braBetaSize = 0;
   if (helper.size() != 0) {
@@ -177,20 +179,16 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   T.reserve(max_det_size);
   R.reserve(max_det_size);
   if (helper.size() != 0) {
-    Mpi2dSlide(Wk, T, adet_comm_size, bdet_comm_size, -helper[0].adetShift,
-               -helper[0].bdetShift, b_comm);
+    Mpi2dSlide(Wk, T, adet_comm_size, bdet_comm_size, -helper[0].adetShift,-helper[0].bdetShift, b_comm);
   }
   auto time_copy_end = std::chrono::high_resolution_clock::now();
 
 #ifdef USE_DET_CACHE_OMP
-  // Precompute determinant cache on GPU
+  // Precompute determinant cache 
   auto time_cache_start = std::chrono::high_resolution_clock::now();
-  static DeterminantCacheOMP<ElemT> det_cache(adets, bdets, bit_length, norbs,
-                                              h_comm);
+  static DeterminantCacheOMP<ElemT> det_cache(adets, bdets, bit_length, norbs, h_comm);
   auto time_cache_end = std::chrono::high_resolution_clock::now();
-  auto time_cache_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                              time_cache_end - time_cache_start)
-                              .count();
+  auto time_cache_count = std::chrono::duration_cast<std::chrono::microseconds>(time_cache_end - time_cache_start).count();
   double time_cache = 1.0e-6 * time_cache_count;
 #ifdef SBD_DEBUG_MULT
   std::cout << " mult: time for cache precompute = " << time_cache << std::endl;
@@ -214,49 +212,6 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
 
   double time_slid = 0.0;
 
-#ifdef USE_HIJ_OMP_OFFLOAD
-  // Step 1: Flatten I1/I2 integrals once and keep on GPU for all tasks
-  size_t I1_size = (2 * norbs) * (2 * norbs);
-  size_t I2_size =
-      (norbs * (norbs + 1) / 2) * ((norbs * (norbs + 1) / 2) + 1) / 2;
-  size_t I2_Direct_size = norbs * norbs;
-  size_t I2_Exchange_size = norbs * norbs;
-  std::vector<ElemT> I1_flat(I1_size);
-  std::vector<ElemT> I2_flat(I2_size);
-  std::vector<ElemT> I2_Direct_flat(I2_Direct_size);
-  std::vector<ElemT> I2_Exchange_flat(I2_Exchange_size);
-
-  // Flatten I1 (spin orbitals: 2*norbs × 2*norbs)
-  for (size_t i = 0; i < 2 * norbs; i++) {
-    for (size_t j = 0; j < 2 * norbs; j++) {
-      I1_flat[i * (2 * norbs) + j] = I1.Value(i, j);
-    }
-  }
-
-  // Flatten I2 (use existing compact storage)
-  for (size_t ij = 0; ij < I2_size; ij++) {
-    I2_flat[ij] = I2.store[ij];
-  }
-
-  // Flatten DirectMat and ExchangeMat (spatial orbitals: norbs × norbs)
-  for (size_t i = 0; i < norbs; i++) {
-    for (size_t j = 0; j < norbs; j++) {
-      I2_Direct_flat[i + norbs * j] = I2.DirectValue(i, j);
-      I2_Exchange_flat[i + norbs * j] = I2.ExchangeValue(i, j);
-    }
-  }
-
-  // Transfer to GPU and keep resident
-  ElemT *I1_ptr = I1_flat.data();
-  ElemT *I2_ptr = I2_flat.data();
-  ElemT *I2_Direct_ptr = I2_Direct_flat.data();
-  ElemT *I2_Exchange_ptr = I2_Exchange_flat.data();
-#pragma omp target enter data map(to : I1_ptr[0 : I1_size],                    \
-                                      I2_ptr[0 : I2_size],                     \
-                                      I2_Direct_ptr[0 : I2_Direct_size],       \
-                                      I2_Exchange_ptr[0 : I2_Exchange_size])
-#endif
-
   for (size_t task = 0; task < helper.size(); task++) {
 
 #ifdef SBD_DEBUG_MULT
@@ -278,513 +233,337 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
     size_t ketAlphaSize = helper[task].ketAlphaEnd - helper[task].ketAlphaStart;
     size_t ketBetaSize = helper[task].ketBetaEnd - helper[task].ketBetaStart;
 
-    // GPU offload doesn't need outer CPU parallelism
-    // Collection loops in GPU code path are sequential (inside #ifdef
-    // USE_HIJ_OMP_OFFLOAD) Parallel region only helps CPU code path
-#ifndef USE_HIJ_OMP_OFFLOAD
-#pragma omp parallel
-#endif
-    {
-      size_t ia_start = helper[task].braAlphaStart;
-      size_t ia_end = helper[task].braAlphaEnd;
+    size_t ia_start = helper[task].braAlphaStart;
+    size_t ia_end = helper[task].braAlphaEnd;
 
+    // FIX: GPU offload doesn't need outer CPU parallelism
+#ifdef USE_HIJ_OMP_OFFLOAD
+
+    // Note: USE_DET_CACHE_OMP is required for GPU code, optional for CPU code
 #ifdef USE_DET_CACHE_OMP
       auto DetI = det_cache.GetDeterminant(0, 0);
       auto DetJ = DetI;
-#else
-      auto DetI = DetFromAlphaBeta(adets[0], bdets[0], bit_length, norbs);
-      auto DetJ = DetI;
 #endif
+
       std::vector<int> c(2, 0);
       std::vector<int> d(2, 0);
 
+      // Direct loop offload using helper arrays 
+      size_t det_size = det_cache.GetDeterminantSize();
+      size_t n_alpha = adets.size();
+      size_t n_beta = bdets.size();
+      const size_t *det_cache_ptr = det_cache.GetCachePointer();
+
+      // Get helper array pointers
+      size_t nAlpha = helper[task].braAlphaEnd - helper[task].braAlphaStart;
+      size_t *SinglesFromAlphaLen = helper[task].SinglesFromAlphaLen;
+      size_t *DoublesFromAlphaLen = helper[task].DoublesFromAlphaLen;
+      const size_t *SinglesFromAlphaOffset = helper[task].SinglesFromAlphaOffset.data();
+      const size_t *DoublesFromAlphaOffset = helper[task].DoublesFromAlphaOffset.data();
+
+      // Use pre-flattened arrays from helper construction (no per-mult() // flattening)
+      size_t singles_alpha_total = helper[task].SinglesFromAlpha_flat.size();
+      size_t doubles_alpha_total = helper[task].DoublesFromAlpha_flat.size();
+      const size_t *SinglesFromAlpha_ptr = helper[task].SinglesFromAlpha_flat.data();
+      const size_t *DoublesFromAlpha_ptr = helper[task].DoublesFromAlpha_flat.data();
+
+      // Get helper array pointers
+      size_t nBeta = helper[task].braBetaEnd - helper[task].braBetaStart;
+      size_t *SinglesFromBetaLen = helper[task].SinglesFromBetaLen;
+      size_t *DoublesFromBetaLen = helper[task].DoublesFromBetaLen;
+      const size_t *SinglesFromBetaOffset = helper[task].SinglesFromBetaOffset.data();
+      const size_t *DoublesFromBetaOffset = helper[task].DoublesFromBetaOffset.data();
+
+      // Use pre-flattened arrays from helper construction (no per-mult() // flattening)
+      size_t singles_beta_total = helper[task].SinglesFromBeta_flat.size();
+      size_t doubles_beta_total = helper[task].DoublesFromBeta_flat.size();
+      const size_t *SinglesFromBeta_ptr = helper[task].SinglesFromBeta_flat.data();
+      const size_t *DoublesFromBeta_ptr = helper[task].DoublesFromBeta_flat.data();
+
+      // Task parameters
+      size_t braAlphaStart = helper[task].braAlphaStart;
+      size_t braAlphaEnd = helper[task].braAlphaEnd;
+      size_t braBetaStart = helper[task].braBetaStart;
+      size_t braBetaEnd = helper[task].braBetaEnd;
+      size_t ketAlphaStart = helper[task].ketAlphaStart;
+      size_t ketBetaStart = helper[task].ketBetaStart;
+
+      // block partition the braBeta loop over rank in the row communicator
+      size_t ibBeg, ibEnd, nwork, extra, ncut;
+      nwork = (braBetaEnd - braBetaStart) / mpi_size_h;
+      extra = (braBetaEnd - braBetaStart) - mpi_size_h*nwork;
+      ncut = mpi_size_h - extra;
+      if (mpi_rank_h < ncut) {
+         ibBeg = braBetaStart + mpi_rank_h*nwork;
+         ibEnd = ibBeg + nwork;
+      }
+      else {
+         ibBeg = braBetaStart + ncut*nwork + (mpi_rank_h - ncut)*(nwork + 1);
+         ibEnd = ibBeg + (nwork + 1);
+      }
+
+      size_t det_cache_size = n_alpha * n_beta * det_size;
+
+      // Wb and T pointers
+      ElemT *Wb_ptr = Wb.data();
+      const ElemT *T_ptr = T.data();
+      size_t Wb_size = Wb.size();
+      size_t T_size = T.size();
+
+#pragma omp target enter data map(to: T_ptr[0 : T_size], Wb_ptr[0 : Wb_size])
+
       if (helper[task].taskType == 2) { // beta range are same
-
-#ifdef USE_HIJ_OMP_OFFLOAD
-        // Direct loop offload using helper arrays (replaces batching)
-        size_t det_size = det_cache.GetDeterminantSize();
-        size_t n_alpha = adets.size();
-        size_t n_beta = bdets.size();
-        const size_t *det_cache_ptr = det_cache.GetCachePointer();
-
-        // Get helper array pointers
-        size_t nAlpha = helper[task].braAlphaEnd - helper[task].braAlphaStart;
-        size_t *SinglesFromAlphaLen = helper[task].SinglesFromAlphaLen;
-        size_t *DoublesFromAlphaLen = helper[task].DoublesFromAlphaLen;
-        const size_t *SinglesFromAlphaOffset =
-            helper[task].SinglesFromAlphaOffset.data();
-        const size_t *DoublesFromAlphaOffset =
-            helper[task].DoublesFromAlphaOffset.data();
-
-        // Use pre-flattened arrays from helper construction (no per-mult()
-        // flattening)
-        size_t singles_total = helper[task].SinglesFromAlpha_flat.size();
-        size_t doubles_total = helper[task].DoublesFromAlpha_flat.size();
-        const size_t *SinglesFromAlpha_ptr =
-            helper[task].SinglesFromAlpha_flat.data();
-        const size_t *DoublesFromAlpha_ptr =
-            helper[task].DoublesFromAlpha_flat.data();
-
-        // Task parameters
-        size_t braAlphaStart = helper[task].braAlphaStart;
-        size_t braAlphaEnd = helper[task].braAlphaEnd;
-        size_t braBetaStart = helper[task].braBetaStart;
-        size_t braBetaEnd = helper[task].braBetaEnd;
-        size_t ketAlphaStart = helper[task].ketAlphaStart;
-        size_t ketBetaStart = helper[task].ketBetaStart;
-
-        // Wb and T pointers
-        ElemT *Wb_ptr = Wb.data();
-        const ElemT *T_ptr = T.data();
-
-        size_t det_cache_size = n_alpha * n_beta * det_size;
-        size_t Wb_size = Wb.size();
-        size_t T_size = T.size();
-
-#pragma omp target teams distribute parallel for collapse(2)                   \
-    map(to : braAlphaStart, braAlphaEnd, braBetaStart, braBetaEnd,             \
-            ketAlphaStart, ketBetaStart, braAlphaSize, braBetaSize,            \
-            ketBetaSize, mpi_size_h, mpi_rank_h, n_beta, det_size, bit_length, \
-            norbs, I0, SinglesFromAlphaLen[0 : nAlpha],                        \
-            DoublesFromAlphaLen[0 : nAlpha],                                   \
-            SinglesFromAlphaOffset[0 : nAlpha + 1],                            \
-            DoublesFromAlphaOffset[0 : nAlpha + 1],                            \
-            SinglesFromAlpha_ptr[0 : singles_total],                           \
-            DoublesFromAlpha_ptr[0 : doubles_total], T_ptr[0 : T_size])        \
-    map(alloc : det_cache_ptr[0 : det_cache_size], I1_ptr[0 : I1_size],        \
-            I2_ptr[0 : I2_size], I2_Direct_ptr[0 : I2_Direct_size],            \
-            I2_Exchange_ptr[0 : I2_Exchange_size])                             \
-    map(tofrom : Wb_ptr[0 : Wb_size])
+#pragma omp target teams distribute parallel for collapse(2)                \
+    map(to : SinglesFromAlphaLen[0 : nAlpha],                               \
+             DoublesFromAlphaLen[0 : nAlpha],                               \
+             SinglesFromAlphaOffset[0 : nAlpha + 1],                        \
+             DoublesFromAlphaOffset[0 : nAlpha + 1],                        \
+             SinglesFromAlpha_ptr[0 : singles_alpha_total],                       \
+             DoublesFromAlpha_ptr[0 : doubles_alpha_total])  thread_limit(1024)
         for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
-          for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-            size_t braIdx =
-                (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+          for (size_t ib = ibBeg; ib < ibEnd; ib++) {
+            size_t braIdx = (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
 
             size_t ia_local = ia - braAlphaStart;
 
             // Single alpha excitations
-            for (size_t j = SinglesFromAlphaOffset[ia_local];
-                 j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
+            for (size_t j = SinglesFromAlphaOffset[ia_local]; j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
               size_t ja = SinglesFromAlpha_ptr[j];
-              size_t ketIdx =
-                  (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
+              size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
 
               size_t bra_offset = (ia * n_beta + ib) * det_size;
               size_t ket_offset = (ja * n_beta + ib) * det_size;
               const size_t *DetI = &det_cache_ptr[bra_offset];
               const size_t *DetJ = &det_cache_ptr[ket_offset];
 
-              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr,
-                                     I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
+              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr, I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
 
-#pragma omp atomic
               Wb_ptr[braIdx] += hij * T_ptr[ketIdx];
             }
 
             // Double alpha excitations
-            for (size_t j = DoublesFromAlphaOffset[ia_local];
-                 j < DoublesFromAlphaOffset[ia_local + 1]; j++) {
+            for (size_t j = DoublesFromAlphaOffset[ia_local]; j < DoublesFromAlphaOffset[ia_local + 1]; j++) {
               size_t ja = DoublesFromAlpha_ptr[j];
-              size_t ketIdx =
-                  (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
+              size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
 
               size_t bra_offset = (ia * n_beta + ib) * det_size;
               size_t ket_offset = (ja * n_beta + ib) * det_size;
               const size_t *DetI = &det_cache_ptr[bra_offset];
               const size_t *DetJ = &det_cache_ptr[ket_offset];
 
-              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr,
-                                     I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
+              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr, I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
 
-#pragma omp atomic
               Wb_ptr[braIdx] += hij * T_ptr[ketIdx];
             }
-          }
-        }
-
-#else
-        // Original CPU code path (non-offload)
-#pragma omp for schedule(dynamic)
-        for (size_t ia = ia_start; ia < ia_end; ia++) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
-
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
-
-#ifdef USE_DET_CACHE_OMP
-            det_cache.GetDeterminant(ia, ib, DetI);
-#else
-            DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
-#endif
-
-            // single alpha excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize +
-                              ib - helper[task].ketBetaStart;
-#ifdef USE_DET_CACHE_OMP
-              det_cache.GetDeterminant(ja, ib, DetJ);
-#else
-              DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
-#endif
-              size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
-              Wb[braIdx] += eij * T[ketIdx];
-            }
-            // double alpha excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .DoublesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .DoublesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize +
-                              ib - helper[task].ketBetaStart;
-#ifdef USE_DET_CACHE_OMP
-              det_cache.GetDeterminant(ja, ib, DetJ);
-#else
-              DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
-#endif
-              size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
-              Wb[braIdx] += eij * T[ketIdx];
-            }
-
-          } // end for(size_t ib=ib_start; ib < ib_end; ib++)
-        } // end for(size_t ia=helper[task].braAlphaStart; ia <
-          // helper[task].braAlphaEnd; ia++)
-#endif // USE_HIJ_OMP_OFFLOAD
-
+          } // end for ib
+        } // end for ia
       } else if (helper[task].taskType == 1) { // alpha range are same
-
-#ifdef USE_HIJ_OMP_OFFLOAD
-        // Direct loop offload using helper arrays (replaces batching)
-        size_t det_size = det_cache.GetDeterminantSize();
-        size_t n_alpha = adets.size();
-        size_t n_beta = bdets.size();
-        const size_t *det_cache_ptr = det_cache.GetCachePointer();
-
-        // Get helper array pointers
-        size_t nBeta = helper[task].braBetaEnd - helper[task].braBetaStart;
-        size_t *SinglesFromBetaLen = helper[task].SinglesFromBetaLen;
-        size_t *DoublesFromBetaLen = helper[task].DoublesFromBetaLen;
-        const size_t *SinglesFromBetaOffset =
-            helper[task].SinglesFromBetaOffset.data();
-        const size_t *DoublesFromBetaOffset =
-            helper[task].DoublesFromBetaOffset.data();
-
-        // Use pre-flattened arrays from helper construction (no per-mult()
-        // flattening)
-        size_t singles_total = helper[task].SinglesFromBeta_flat.size();
-        size_t doubles_total = helper[task].DoublesFromBeta_flat.size();
-        const size_t *SinglesFromBeta_ptr =
-            helper[task].SinglesFromBeta_flat.data();
-        const size_t *DoublesFromBeta_ptr =
-            helper[task].DoublesFromBeta_flat.data();
-
-        // Task parameters
-        size_t braAlphaStart = helper[task].braAlphaStart;
-        size_t braAlphaEnd = helper[task].braAlphaEnd;
-        size_t braBetaStart = helper[task].braBetaStart;
-        size_t braBetaEnd = helper[task].braBetaEnd;
-        size_t ketAlphaStart = helper[task].ketAlphaStart;
-        size_t ketBetaStart = helper[task].ketBetaStart;
-
-        // Wb and T pointers
-        ElemT *Wb_ptr = Wb.data();
-        const ElemT *T_ptr = T.data();
-
-        size_t det_cache_size = n_alpha * n_beta * det_size;
-        size_t Wb_size = Wb.size();
-        size_t T_size = T.size();
-
-#pragma omp target teams distribute parallel for collapse(2)                   \
-    map(to : braAlphaStart, braAlphaEnd, braBetaStart, braBetaEnd,             \
-            ketAlphaStart, ketBetaStart, braAlphaSize, braBetaSize,            \
-            ketBetaSize, mpi_size_h, mpi_rank_h, n_beta, det_size, bit_length, \
-            norbs, I0, SinglesFromBetaLen[0 : nBeta],                          \
-            DoublesFromBetaLen[0 : nBeta],                                     \
-            SinglesFromBetaOffset[0 : nBeta + 1],                              \
-            DoublesFromBetaOffset[0 : nBeta + 1],                              \
-            SinglesFromBeta_ptr[0 : singles_total],                            \
-            DoublesFromBeta_ptr[0 : doubles_total], T_ptr[0 : T_size])         \
-    map(alloc : det_cache_ptr[0 : det_cache_size], I1_ptr[0 : I1_size],        \
-            I2_ptr[0 : I2_size], I2_Direct_ptr[0 : I2_Direct_size],            \
-            I2_Exchange_ptr[0 : I2_Exchange_size])                             \
-    map(tofrom : Wb_ptr[0 : Wb_size])
+#pragma omp target teams distribute parallel for collapse(2)                \
+    map(to : SinglesFromBetaLen[0 : nBeta],                                 \
+             DoublesFromBetaLen[0 : nBeta],                                 \
+             SinglesFromBetaOffset[0 : nBeta + 1],                          \
+             DoublesFromBetaOffset[0 : nBeta + 1],                          \
+             SinglesFromBeta_ptr[0 : singles_beta_total],                        \
+             DoublesFromBeta_ptr[0 : doubles_beta_total])  thread_limit(1024)
         for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
-          for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-            size_t braIdx =
-                (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+          for (size_t ib = ibBeg; ib < ibEnd; ib++) {
+            size_t braIdx = (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
 
             size_t ib_local = ib - braBetaStart;
 
             // Single beta excitations
-            for (size_t j = SinglesFromBetaOffset[ib_local];
-                 j < SinglesFromBetaOffset[ib_local + 1]; j++) {
+            for (size_t j = SinglesFromBetaOffset[ib_local]; j < SinglesFromBetaOffset[ib_local + 1]; j++) {
               size_t jb = SinglesFromBeta_ptr[j];
-              size_t ketIdx =
-                  (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
+              size_t ketIdx = (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
 
               size_t bra_offset = (ia * n_beta + ib) * det_size;
               size_t ket_offset = (ia * n_beta + jb) * det_size;
               const size_t *DetI = &det_cache_ptr[bra_offset];
               const size_t *DetJ = &det_cache_ptr[ket_offset];
 
-              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr,
-                                     I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
+              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr, I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
 
-#pragma omp atomic
               Wb_ptr[braIdx] += hij * T_ptr[ketIdx];
             }
 
             // Double beta excitations
-            for (size_t j = DoublesFromBetaOffset[ib_local];
-                 j < DoublesFromBetaOffset[ib_local + 1]; j++) {
+            for (size_t j = DoublesFromBetaOffset[ib_local]; j < DoublesFromBetaOffset[ib_local + 1]; j++) {
               size_t jb = DoublesFromBeta_ptr[j];
-              size_t ketIdx =
-                  (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
+              size_t ketIdx = (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
 
               size_t bra_offset = (ia * n_beta + ib) * det_size;
               size_t ket_offset = (ia * n_beta + jb) * det_size;
               const size_t *DetI = &det_cache_ptr[bra_offset];
               const size_t *DetJ = &det_cache_ptr[ket_offset];
 
-              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr,
-                                     I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
+              ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr, I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
 
-#pragma omp atomic
               Wb_ptr[braIdx] += hij * T_ptr[ketIdx];
             }
-          }
-        }
-
-#else
-        // Original CPU code path
-#pragma omp for schedule(dynamic)
-        for (size_t ia = ia_start; ia < ia_end; ia++) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
-
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
-#ifdef USE_DET_CACHE_OMP
-            det_cache.GetDeterminant(ia, ib, DetI);
-#else
-            DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
-#endif
-
-            // single beta excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromBetaLen[ib - helper[task].braBetaStart];
-                 j++) {
-              size_t jb =
-                  helper[task]
-                      .SinglesFromBetaSM[ib - helper[task].braBetaStart][j];
-              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize +
-                              jb - helper[task].ketBetaStart;
-#ifdef USE_DET_CACHE_OMP
-              det_cache.GetDeterminant(ia, jb, DetJ);
-#else
-              DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
-#endif
-              size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
-              Wb[braIdx] += eij * T[ketIdx];
-            }
-            // double beta excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .DoublesFromBetaLen[ib - helper[task].braBetaStart];
-                 j++) {
-              size_t jb =
-                  helper[task]
-                      .DoublesFromBetaSM[ib - helper[task].braBetaStart][j];
-              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize +
-                              jb - helper[task].ketBetaStart;
-#ifdef USE_DET_CACHE_OMP
-              det_cache.GetDeterminant(ia, jb, DetJ);
-#else
-              DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
-#endif
-              size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
-              Wb[braIdx] += eij * T[ketIdx];
-            }
-          } // end for(size_t ib=ib_start; ib < ib_end; ib++)
-        } // end for(size_t ia=helper[task].braAlphaStart; ia <
-          // helper[task].braAlphaEnd; ia++)
-#endif // USE_HIJ_OMP_OFFLOAD
-
+          } // end for ib
+        } // end for ia
       } else { // taskType == 0: mixed alpha+beta excitations
-
-#ifdef USE_HIJ_OMP_OFFLOAD
-        // Direct loop offload using helper arrays (replaces batching)
-        size_t det_size = det_cache.GetDeterminantSize();
-        size_t n_alpha = adets.size();
-        size_t n_beta = bdets.size();
-        const size_t *det_cache_ptr = det_cache.GetCachePointer();
-
-        // Get helper array pointers (both alpha and beta needed for mixed
-        // excitations)
-        size_t nAlpha = helper[task].braAlphaEnd - helper[task].braAlphaStart;
-        size_t nBeta = helper[task].braBetaEnd - helper[task].braBetaStart;
-        size_t *SinglesFromAlphaLen = helper[task].SinglesFromAlphaLen;
-        size_t *SinglesFromBetaLen = helper[task].SinglesFromBetaLen;
-        const size_t *SinglesFromAlphaOffset =
-            helper[task].SinglesFromAlphaOffset.data();
-        const size_t *SinglesFromBetaOffset =
-            helper[task].SinglesFromBetaOffset.data();
-
-        // Use pre-flattened arrays from helper construction (no per-mult()
-        // flattening)
-        size_t singles_alpha_total = helper[task].SinglesFromAlpha_flat.size();
-        size_t singles_beta_total = helper[task].SinglesFromBeta_flat.size();
-        const size_t *SinglesFromAlpha_ptr =
-            helper[task].SinglesFromAlpha_flat.data();
-        const size_t *SinglesFromBeta_ptr =
-            helper[task].SinglesFromBeta_flat.data();
-
-        // Task parameters
-        size_t braAlphaStart = helper[task].braAlphaStart;
-        size_t braAlphaEnd = helper[task].braAlphaEnd;
-        size_t braBetaStart = helper[task].braBetaStart;
-        size_t braBetaEnd = helper[task].braBetaEnd;
-        size_t ketAlphaStart = helper[task].ketAlphaStart;
-        size_t ketBetaStart = helper[task].ketBetaStart;
-
-        // Wb and T pointers
-        ElemT *Wb_ptr = Wb.data();
-        const ElemT *T_ptr = T.data();
-
-        size_t det_cache_size = n_alpha * n_beta * det_size;
-        size_t Wb_size = Wb.size();
-        size_t T_size = T.size();
-
 #pragma omp target teams distribute parallel for collapse(2)                   \
-    map(to : braAlphaStart, braAlphaEnd, braBetaStart, braBetaEnd,             \
-            ketAlphaStart, ketBetaStart, braAlphaSize, braBetaSize,            \
-            ketBetaSize, mpi_size_h, mpi_rank_h, n_beta, det_size, bit_length, \
-            norbs, I0, SinglesFromAlphaLen[0 : nAlpha],                        \
-            SinglesFromBetaLen[0 : nBeta],                                     \
-            SinglesFromAlphaOffset[0 : nAlpha + 1],                            \
-            SinglesFromBetaOffset[0 : nBeta + 1],                              \
-            SinglesFromAlpha_ptr[0 : singles_alpha_total],                     \
-            SinglesFromBeta_ptr[0 : singles_beta_total], T_ptr[0 : T_size])    \
-    map(alloc : det_cache_ptr[0 : det_cache_size], I1_ptr[0 : I1_size],        \
-            I2_ptr[0 : I2_size], I2_Direct_ptr[0 : I2_Direct_size],            \
-            I2_Exchange_ptr[0 : I2_Exchange_size])                             \
-    map(tofrom : Wb_ptr[0 : Wb_size])
+    map(to : SinglesFromAlphaLen[0 : nAlpha],                                  \
+             SinglesFromBetaLen[0 : nBeta],                                    \
+             SinglesFromAlphaOffset[0 : nAlpha + 1],                           \
+             SinglesFromBetaOffset[0 : nBeta + 1],                             \
+             SinglesFromAlpha_ptr[0 : singles_alpha_total],                    \
+             SinglesFromBeta_ptr[0 : singles_beta_total])  thread_limit(1024)
         for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
-          for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-            size_t braIdx =
-                (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+          for (size_t ib = ibBeg; ib < ibEnd; ib++) {
+            size_t braIdx = (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
 
             size_t ia_local = ia - braAlphaStart;
             size_t ib_local = ib - braBetaStart;
 
             // Mixed excitations: bra=(ia,ib), ket=(ja,jb)
-            for (size_t j = SinglesFromAlphaOffset[ia_local];
-                 j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
+            for (size_t j = SinglesFromAlphaOffset[ia_local]; j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
               size_t ja = SinglesFromAlpha_ptr[j];
-              for (size_t k = SinglesFromBetaOffset[ib_local];
-                   k < SinglesFromBetaOffset[ib_local + 1]; k++) {
+              for (size_t k = SinglesFromBetaOffset[ib_local]; k < SinglesFromBetaOffset[ib_local + 1]; k++) {
                 size_t jb = SinglesFromBeta_ptr[k];
-                size_t ketIdx =
-                    (ja - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
+                size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
 
                 size_t bra_offset = (ia * n_beta + ib) * det_size;
                 size_t ket_offset = (ja * n_beta + jb) * det_size;
                 const size_t *DetI = &det_cache_ptr[bra_offset];
                 const size_t *DetJ = &det_cache_ptr[ket_offset];
 
-                ElemT hij =
-                    ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr,
-                               I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
+                ElemT hij = ComputeHij(DetI, DetJ, bit_length, norbs, I0, I1_ptr, I2_ptr, I2_Direct_ptr, I2_Exchange_ptr);
 
-#pragma omp atomic
                 Wb_ptr[braIdx] += hij * T_ptr[ketIdx];
               }
             }
-          }
-        }
+          } // end for ib
+        } // end for ia
+      } // end taskType
+
+#pragma omp target exit data map(from: T_ptr[0: T_size], Wb_ptr[0 : Wb_size])
+
 
 #else
-        // Original CPU code path
+// Original CPU code path
+#pragma omp parallel
+   {
+      auto DetI = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
+      auto DetJ = DetI;
+      std::vector<int> c(2,0);
+      std::vector<int> d(2,0);
+
+      if (helper[task].taskType == 2) { // beta range are same
 #pragma omp for schedule(dynamic)
         for (size_t ia = ia_start; ia < ia_end; ia++) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
-
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
 #ifdef USE_DET_CACHE_OMP
             det_cache.GetDeterminant(ia, ib, DetI);
 #else
             DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
 #endif
+            // single alpha excitation
+            for (size_t j = 0; j < helper[task].SinglesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + ib - helper[task].ketBetaStart;
+#ifdef USE_DET_CACHE_OMP
+              det_cache.GetDeterminant(ja, ib, DetJ);
+#else
+              DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
+#endif
+              size_t orbDiff;
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              Wb[braIdx] += eij * T[ketIdx];
+            }
+            // double alpha excitation
+            for (size_t j = 0; j < helper[task].DoublesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].DoublesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + ib - helper[task].ketBetaStart;
+#ifdef USE_DET_CACHE_OMP
+              det_cache.GetDeterminant(ja, ib, DetJ);
+#else
+              DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
+#endif
+              size_t orbDiff;
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              Wb[braIdx] += eij * T[ketIdx];
+            }
+          } // end for ib
+        } // end for ia
+      } else if (helper[task].taskType == 1) { // alpha range are same
+#pragma omp for schedule(dynamic)
+        for (size_t ia = ia_start; ia < ia_end; ia++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
+#ifdef USE_DET_CACHE_OMP
+            det_cache.GetDeterminant(ia, ib, DetI);
+#else
+            DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
+#endif
+            // single beta excitation
+            for (size_t j = 0; j < helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart]; j++) {
+              size_t jb = helper[task].SinglesFromBetaSM[ib - helper[task].braBetaStart][j];
+              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
+#ifdef USE_DET_CACHE_OMP
+              det_cache.GetDeterminant(ia, jb, DetJ);
+#else
+              DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
+#endif
+              size_t orbDiff;
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              Wb[braIdx] += eij * T[ketIdx];
+            }
+            // double beta excitation
+            for (size_t j = 0; j < helper[task].DoublesFromBetaLen[ib - helper[task].braBetaStart]; j++) {
+              size_t jb = helper[task].DoublesFromBetaSM[ib - helper[task].braBetaStart][j];
+              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
+#ifdef USE_DET_CACHE_OMP
+              det_cache.GetDeterminant(ia, jb, DetJ);
+#else
+              DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
+#endif
+              size_t orbDiff;
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              Wb[braIdx] += eij * T[ketIdx];
+            }
+          } // end for ib
+        } // end for ia
+
+      } else { // taskType == 0: mixed alpha+beta excitations
+#pragma omp for schedule(dynamic)
+        for (size_t ia = ia_start; ia < ia_end; ia++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
+
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
+#ifdef USE_DET_CACHE_OMP
+            det_cache.GetDeterminant(ia, ib, DetI);
+#else
+            DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
+#endif
             // two-particle excitation composed of single alpha and single beta
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              for (size_t k = 0;
-                   k < helper[task]
-                           .SinglesFromBetaLen[ib - helper[task].braBetaStart];
-                   k++) {
-                size_t jb =
-                    helper[task]
-                        .SinglesFromBetaSM[ib - helper[task].braBetaStart][k];
-                size_t ketIdx =
-                    (ja - helper[task].ketAlphaStart) * ketBetaSize + jb -
-                    helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].SinglesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              for (size_t k = 0; k < helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart]; k++) {
+                size_t jb = helper[task].SinglesFromBetaSM[ib - helper[task].braBetaStart][k];
+                size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
 #ifdef USE_DET_CACHE_OMP
                 det_cache.GetDeterminant(ja, jb, DetJ);
 #else
                 DetFromAlphaBeta(adets[ja], bdets[jb], bit_length, norbs, DetJ);
 #endif
                 size_t orbDiff;
-                ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2,
-                                orbDiff);
+                ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
                 Wb[braIdx] += eij * T[ketIdx];
               }
             }
-
-          } // end for(size_t ib=ib_start; ib < ib_end; ib++)
-        } // end for(size_t ia=helper[task].braAlphaStart; ia <
-          // helper[task].braAlphaEnd; ia++)
+          } // end for ib
+        } // end for ia
+      } // end taskType
+    } // end pragma parallel
 #endif // USE_HIJ_OMP_OFFLOAD
-      } // if ( helper[task].taskType == ? )
-    } // end pragma paralell
 
     if (helper[task].taskType == 0 && task != helper.size() - 1) {
 #ifdef SBD_DEBUG_MULT
@@ -810,13 +589,9 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
       R.resize(T.size());
       std::memcpy(R.data(), T.data(), T.size() * sizeof(ElemT));
       auto time_slid_start = std::chrono::high_resolution_clock::now();
-      Mpi2dSlide(R, T, adet_comm_size, bdet_comm_size, adetslide, bdetslide,
-                 b_comm);
+      Mpi2dSlide(R, T, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
       auto time_slid_end = std::chrono::high_resolution_clock::now();
-      auto time_slid_count =
-          std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end -
-                                                                time_slid_start)
-              .count();
+      auto time_slid_count = std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end - time_slid_start).count();
       time_slid += 1.0e-6 * time_slid_count;
     }
 
@@ -824,20 +599,14 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   auto time_mult_end = std::chrono::high_resolution_clock::now();
 
   auto time_comm_start = std::chrono::high_resolution_clock::now();
-  MpiAllreduce(Wb, MPI_SUM, t_comm);
-  MpiAllreduce(Wb, MPI_SUM, h_comm);
+  if (mpi_size_t > 1) MpiAllreduce(Wb, MPI_SUM, t_comm);
+  if (mpi_size_h > 1) MpiAllreduce(Wb, MPI_SUM, h_comm);
   auto time_comm_end = std::chrono::high_resolution_clock::now();
 
 #ifdef SBD_DEBUG_MULT
-  auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_copy_end - time_copy_start)
-                             .count();
-  auto time_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_mult_end - time_mult_start)
-                             .count();
-  auto time_comm_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_comm_end - time_comm_start)
-                             .count();
+  auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(time_copy_end - time_copy_start).count();
+  auto time_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(time_mult_end - time_mult_start).count();
+  auto time_comm_count = std::chrono::duration_cast<std::chrono::microseconds>(time_comm_end - time_comm_start).count();
 
   double time_copy = 1.0e-6 * time_copy_count;
   double time_mult = 1.0e-6 * time_mult_count;
@@ -846,14 +615,6 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   std::cout << " mult: time for multiplication = " << time_mult << std::endl;
   std::cout << " mult: time for 2d slide comm  = " << time_slid << std::endl;
   std::cout << " mult: time for allreduce comm = " << time_comm << std::endl;
-#endif
-
-#ifdef USE_HIJ_OMP_OFFLOAD
-// Clean up GPU memory for integrals
-#pragma omp target exit data map(delete : I1_ptr[0 : I1_size],                 \
-                                     I2_ptr[0 : I2_size],                      \
-                                     I2_Direct_ptr[0 : I2_Direct_size],        \
-                                     I2_Exchange_ptr[0 : I2_Exchange_size])
 #endif
 
 } // end function
@@ -912,8 +673,7 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   T.reserve(max_det_size);
   R.reserve(max_det_size);
   if (helper.size() != 0) {
-    Mpi2dSlide(Wk, T, adet_comm_size, bdet_comm_size, -helper[0].adetShift,
-               -helper[0].bdetShift, b_comm);
+    Mpi2dSlide(Wk, T, adet_comm_size, bdet_comm_size, -helper[0].adetShift, -helper[0].bdetShift, b_comm);
   }
   auto time_copy_end = std::chrono::high_resolution_clock::now();
 
@@ -957,7 +717,7 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
     size_t ketAlphaSize = helper[task].ketAlphaEnd - helper[task].ketAlphaStart;
     size_t ketBetaSize = helper[task].ketBetaEnd - helper[task].ketBetaStart;
 
-    // GPU offload doesn't need outer CPU parallelism (GPU provides
+    // FIX: GPU offload doesn't need outer CPU parallelism (GPU provides
     // parallelism) Outer parallel region causes pthread mutex errors when
     // launching GPU kernels
 #ifndef USE_HIJ_OMP_OFFLOAD
@@ -977,46 +737,29 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
       if (helper[task].taskType == 2) { // beta range are same
 
         for (size_t ia = ia_start; ia < ia_end; ia += num_threads) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
 
             DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
 
             // single alpha excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize +
-                              ib - helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].SinglesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + ib - helper[task].ketBetaStart;
               DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
               size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
               Wb[braIdx] += eij * T[ketIdx];
             }
             // double alpha excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .DoublesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .DoublesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize +
-                              ib - helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].DoublesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].DoublesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + ib - helper[task].ketBetaStart;
               DetFromAlphaBeta(adets[ja], bdets[ib], bit_length, norbs, DetJ);
               size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
               Wb[braIdx] += eij * T[ketIdx];
             }
 
@@ -1027,46 +770,29 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
       } else if (helper[task].taskType == 1) { // alpha range are same
 
         for (size_t ia = ia_start; ia < ia_end; ia += num_threads) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
 
             DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
 
             // single beta excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromBetaLen[ib - helper[task].braBetaStart];
-                 j++) {
-              size_t jb =
-                  helper[task]
-                      .SinglesFromBetaSM[ib - helper[task].braBetaStart][j];
-              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize +
-                              jb - helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart]; j++) {
+              size_t jb = helper[task].SinglesFromBetaSM[ib - helper[task].braBetaStart][j];
+              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
               DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
               size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
               Wb[braIdx] += eij * T[ketIdx];
             }
             // double beta excitation
-            for (size_t j = 0;
-                 j < helper[task]
-                         .DoublesFromBetaLen[ib - helper[task].braBetaStart];
-                 j++) {
-              size_t jb =
-                  helper[task]
-                      .DoublesFromBetaSM[ib - helper[task].braBetaStart][j];
-              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize +
-                              jb - helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].DoublesFromBetaLen[ib - helper[task].braBetaStart]; j++) {
+              size_t jb = helper[task].DoublesFromBetaSM[ib - helper[task].braBetaStart][j];
+              size_t ketIdx = (ia - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
               DetFromAlphaBeta(adets[ia], bdets[jb], bit_length, norbs, DetJ);
               size_t orbDiff;
-              ElemT eij =
-                  Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
+              ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
               Wb[braIdx] += eij * T[ketIdx];
             }
           } // end for(size_t ib=ib_start; ib < ib_end; ib++)
@@ -1076,38 +802,22 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
       } else {
 
         for (size_t ia = ia_start; ia < ia_end; ia += num_threads) {
-          for (size_t ib = helper[task].braBetaStart;
-               ib < helper[task].braBetaEnd; ib++) {
+          for (size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
-            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize +
-                            ib - helper[task].braBetaStart;
-            if ((braIdx % mpi_size_h) != mpi_rank_h)
-              continue;
+            size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib - helper[task].braBetaStart;
+            if ((braIdx % mpi_size_h) != mpi_rank_h) continue;
 
             DetFromAlphaBeta(adets[ia], bdets[ib], bit_length, norbs, DetI);
 
             // two-particle excitation composed of single alpha and single beta
-            for (size_t j = 0;
-                 j < helper[task]
-                         .SinglesFromAlphaLen[ia - helper[task].braAlphaStart];
-                 j++) {
-              size_t ja =
-                  helper[task]
-                      .SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
-              for (size_t k = 0;
-                   k < helper[task]
-                           .SinglesFromBetaLen[ib - helper[task].braBetaStart];
-                   k++) {
-                size_t jb =
-                    helper[task]
-                        .SinglesFromBetaSM[ib - helper[task].braBetaStart][k];
-                size_t ketIdx =
-                    (ja - helper[task].ketAlphaStart) * ketBetaSize + jb -
-                    helper[task].ketBetaStart;
+            for (size_t j = 0; j < helper[task].SinglesFromAlphaLen[ia - helper[task].braAlphaStart]; j++) {
+              size_t ja = helper[task].SinglesFromAlphaSM[ia - helper[task].braAlphaStart][j];
+              for (size_t k = 0; k < helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart]; k++) {
+                size_t jb = helper[task].SinglesFromBetaSM[ib - helper[task].braBetaStart][k];
+                size_t ketIdx = (ja - helper[task].ketAlphaStart) * ketBetaSize + jb - helper[task].ketBetaStart;
                 DetFromAlphaBeta(adets[ja], bdets[jb], bit_length, norbs, DetJ);
                 size_t orbDiff;
-                ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2,
-                                orbDiff);
+                ElemT eij = Hij(DetI, DetJ, bit_length, norbs, c, d, I0, I1, I2, orbDiff);
                 Wb[braIdx] += eij * T[ketIdx];
               }
             }
@@ -1142,13 +852,9 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
       R.resize(T.size());
       std::memcpy(R.data(), T.data(), T.size() * sizeof(ElemT));
       auto time_slid_start = std::chrono::high_resolution_clock::now();
-      Mpi2dSlide(R, T, adet_comm_size, bdet_comm_size, adetslide, bdetslide,
-                 b_comm);
+      Mpi2dSlide(R, T, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
       auto time_slid_end = std::chrono::high_resolution_clock::now();
-      auto time_slid_count =
-          std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end -
-                                                                time_slid_start)
-              .count();
+      auto time_slid_count = std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end - time_slid_start).count();
       time_slid += 1.0e-6 * time_slid_count;
     }
 
@@ -1156,20 +862,14 @@ void mult(const std::vector<ElemT> &hii, const std::vector<ElemT> &Wk,
   auto time_mult_end = std::chrono::high_resolution_clock::now();
 
   auto time_comm_start = std::chrono::high_resolution_clock::now();
-  MpiAllreduce(Wb, MPI_SUM, t_comm);
-  MpiAllreduce(Wb, MPI_SUM, h_comm);
+  if (mpi_size_t > 1) MpiAllreduce(Wb, MPI_SUM, t_comm);
+  if (mpi_size_h > 1) MpiAllreduce(Wb, MPI_SUM, h_comm);
   auto time_comm_end = std::chrono::high_resolution_clock::now();
 
 #ifdef SBD_DEBUG_MULT
-  auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_copy_end - time_copy_start)
-                             .count();
-  auto time_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_mult_end - time_mult_start)
-                             .count();
-  auto time_comm_count = std::chrono::duration_cast<std::chrono::microseconds>(
-                             time_comm_end - time_comm_start)
-                             .count();
+  auto time_copy_count = std::chrono::duration_cast<std::chrono::microseconds>(time_copy_end - time_copy_start).count();
+  auto time_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(time_mult_end - time_mult_start).count();
+  auto time_comm_count = std::chrono::duration_cast<std::chrono::microseconds>(time_comm_end - time_comm_start).count();
 
   double time_copy = 1.0e-6 * time_copy_count;
   double time_mult = 1.0e-6 * time_mult_count;

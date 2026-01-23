@@ -5,6 +5,10 @@
 #ifndef SBD_CHEMISTRY_TPB_SBDIAG_H
 #define SBD_CHEMISTRY_TPB_SBDIAG_H
 
+#ifdef USE_HIJ_OMP_OFFLOAD
+#include "../basic/hij_omp_offload.h"
+#endif
+
 namespace sbd {
 
 namespace tpb {
@@ -148,14 +152,21 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
   double ratio = sbd_data.ratio;
   double threshold = sbd_data.threshold;
 
-  size_t bit_length = sbd_data.bit_length;
-
+  /**
+     Setup system parameters from fcidump
+   */
   double I0;
   sbd::oneInt<double> I1;
   sbd::twoInt<double> I2;
   sbd::SetupIntegrals(fcidump, L, N, I0, I1, I2);
 
+  int norbs = L;
 
+  size_t bit_length = sbd_data.bit_length;
+
+  /**
+     Setup helpers
+   */
   std::vector<sbd::TaskHelpers> helper;
   std::vector<std::vector<size_t>> sharedMemory;
   MPI_Comm h_comm;
@@ -176,8 +187,7 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
           .count();
   double elapsed_help = 0.000001 * elapsed_help_count;
   if (mpi_rank == 0) {
-    std::cout << " Elapsed time for helper construction " << elapsed_help
-              << " (sec) " << std::endl;
+    std::cout << " Elapsed time for helper construction " << elapsed_help << " (sec) " << std::endl;
   }
 
   int mpi_rank_h;
@@ -193,6 +203,9 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
   int mpi_size_h;
   MPI_Comm_size(h_comm, &mpi_size_h);
 
+  /**
+     Initialize/Load wave function
+  */
   auto time_start_init = std::chrono::high_resolution_clock::now();
   std::vector<double> W;
   if (loadname == std::string("")) {
@@ -203,17 +216,62 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
                           h_comm, b_comm, t_comm, W);
   }
   auto time_end_init = std::chrono::high_resolution_clock::now();
-  auto elapsed_init_count =
-      std::chrono::duration_cast<std::chrono::microseconds>(time_end_init -
-                                                            time_start_init)
-          .count();
+  auto elapsed_init_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_init - time_start_init).count();
   double elapsed_init = 1.0e-6 * elapsed_init_count;
   if (mpi_rank == 0) {
-    std::cout << " Elapsed time for init " << elapsed_init << " (sec) "
-              << std::endl;
+    std::cout << " Elapsed time for init " << elapsed_init << " (sec) " << std::endl;
   }
 
+#ifdef USE_HIJ_OMP_OFFLOAD
+  // Step 1: Flatten I1/I2 integrals once and keep on GPU for all tasks
+  I1_size = (2 * norbs) * (2 * norbs);
+  I2_size = (norbs * (norbs + 1) / 2) * ((norbs * (norbs + 1) / 2) + 1) / 2;
+  I2_Direct_size = norbs * norbs;
+  I2_Exchange_size = norbs * norbs;
+  std::vector<double> I1_flat(I1_size);
+  std::vector<double> I2_flat(I2_size);
+  std::vector<double> I2_Direct_flat(I2_Direct_size);
+  std::vector<double> I2_Exchange_flat(I2_Exchange_size);
+
+  // Flatten I1 (spin orbitals: 2*norbs × 2*norbs)
+  for (size_t i = 0; i < 2 * norbs; i++) {
+    for (size_t j = 0; j < 2 * norbs; j++) {
+      I1_flat[i * (2 * norbs) + j] = I1.Value(i, j);
+    }
+  }
+
+  // Flatten I2 (use existing compact storage)
+  for (size_t ij = 0; ij < I2_size; ij++) {
+    I2_flat[ij] = I2.store[ij];
+  }
+
+  // Flatten DirectMat and ExchangeMat (spatial orbitals: norbs × norbs)
+  for (size_t i = 0; i < norbs; i++) {
+    for (size_t j = 0; j < norbs; j++) {
+      I2_Direct_flat[i + norbs * j] = I2.DirectValue(i, j);
+      I2_Exchange_flat[i + norbs * j] = I2.ExchangeValue(i, j);
+    }
+  }
+
+  // Transfer to GPU and keep resident
+  I1_ptr = I1_flat.data();
+  I2_ptr = I2_flat.data();
+  I2_Direct_ptr = I2_Direct_flat.data();
+  I2_Exchange_ptr = I2_Exchange_flat.data();
+#pragma omp target enter data map(to : I1_ptr[0 : I1_size],                    \
+                                       I2_ptr[0 : I2_size],                     \
+                                       I2_Direct_ptr[0 : I2_Direct_size],       \
+                                       I2_Exchange_ptr[0 : I2_Exchange_size])
+#endif
+
+  /**
+     Diagonalization
+  */
   if (method == 0) {
+
+    /**
+       Default method 0: Calculation without storing hamiltonian elements
+    */
 
     std::vector<double> hii;
     auto time_start_diag = std::chrono::high_resolution_clock::now();
@@ -230,8 +288,7 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
             .count();
     double elapsed_davidson = 0.000001 * elapsed_davidson_count;
     if (mpi_rank == 0) {
-      std::cout << " Elapsed time for davidson " << elapsed_davidson
-                << " (sec) " << std::endl;
+      std::cout << " Elapsed time for davidson " << elapsed_davidson << " (sec) " << std::endl;
     }
 
     auto time_end_diag = std::chrono::high_resolution_clock::now();
@@ -241,9 +298,12 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
             .count();
     double elapsed_diag = 0.000001 * elapsed_diag_count;
     if (mpi_rank == 0) {
-      std::cout << " Elapsed time for diagonalization " << elapsed_diag
-                << " (sec) " << std::endl;
+      std::cout << " Elapsed time for diagonalization " << elapsed_diag << " (sec) " << std::endl;
     }
+
+    /**
+       Evaluation of Hamiltonian expectation value
+    */
 
     std::vector<double> C(W.size(), 0.0);
 
@@ -259,8 +319,7 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
             .count();
     double elapsed_mult = 0.000001 * elapsed_mult_count;
     if (mpi_rank == 0) {
-      std::cout << " Elapsed time for mult " << elapsed_mult << " (sec) "
-                << std::endl;
+      std::cout << " Elapsed time for mult " << elapsed_mult << " (sec) " << std::endl;
     }
 
     double E = 0.0;
@@ -274,7 +333,12 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
     }
     energy = E;
 
+
   } else if (method == 1) {
+
+    /**
+       Method 1: Calculation with storing hamiltonian elements
+    */
 
     std::vector<double> hii;
     std::vector<std::vector<size_t *>> ih;
@@ -299,8 +363,9 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
                                                               time_start_mkham)
             .count();
     double elapsed_mkham = 0.000001 * elapsed_mkham_count;
-    std::cout << " Elapsed time for make Hamiltonian " << elapsed_mkham
-              << " (sec) " << std::endl;
+    if (mpi_rank == 0) {
+      std::cout << " Elapsed time for make Hamiltonian " << elapsed_mkham << " (sec) " << std::endl;
+    }
 
     auto time_start_davidson = std::chrono::high_resolution_clock::now();
     sbd::BasisInitVector(W, adet, bdet, adet_comm_size, bdet_comm_size, h_comm,
@@ -314,8 +379,9 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
             time_end_davidson - time_start_davidson)
             .count();
     double elapsed_davidson = 0.000001 * elapsed_davidson_count;
-    std::cout << " Elapsed time for davidson " << elapsed_davidson << " (sec) "
-              << std::endl;
+    if (mpi_rank == 0) {
+      std::cout << " Elapsed time for davidson " << elapsed_davidson << " (sec) " << std::endl;
+    }
 
     auto time_end_diag = std::chrono::high_resolution_clock::now();
     auto elapsed_diag_count =
@@ -323,8 +389,13 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
                                                               time_start_diag)
             .count();
     double elapsed_diag = 0.000001 * elapsed_diag_count;
-    std::cout << " Elapsed time for diagonalization " << elapsed_diag
-              << " (sec) " << std::endl;
+    if (mpi_rank == 0) {
+      std::cout << " Elapsed time for diagonalization " << elapsed_diag << " (sec) " << std::endl;
+    }
+
+    /**
+       Evaluation of Hamiltonian expectation value
+    */
 
     std::vector<double> C(W.size(), 0.0);
 
@@ -339,8 +410,9 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
                                                               time_start_mult)
             .count();
     double elapsed_mult = 0.000001 * elapsed_mult_count;
-    std::cout << " Elapsed time for mult " << elapsed_mult << " (sec) "
-              << std::endl;
+    if (mpi_rank == 0) {
+      std::cout << " Elapsed time for mult " << elapsed_mult << " (sec) " << std::endl;
+    }
 
     double E = 0.0;
     sbd::InnerProduct(W, C, E, b_comm);
@@ -351,8 +423,22 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
     energy = E;
   }
 
+#ifdef USE_HIJ_OMP_OFFLOAD
+// Clean up GPU memory for integrals
+#pragma omp target exit data map(delete : I1_ptr[0 : I1_size],                    \
+                                          I2_ptr[0 : I2_size],                    \
+                                          I2_Direct_ptr[0 : I2_Direct_size],      \
+                                          I2_Exchange_ptr[0 : I2_Exchange_size])
+#endif
+
+  /**
+     Evaluation of expectation values
+  */
   if (do_rdm == 0) {
 
+    /**
+       do_rdm == 0: calculation only the diagonal part of 1p-RDM
+     */
     auto time_start_meas = std::chrono::high_resolution_clock::now();
 
     int p_size = mpi_size_t * mpi_size_h;
@@ -384,11 +470,24 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
             .count();
     double elapsed_meas = 0.000001 * elapsed_meas_count;
     if (mpi_rank == 0) {
-      std::cout << " Elapsed time for measurement " << elapsed_meas << " (sec) "
-                << std::endl;
+      std::cout << " Elapsed time for measurement " << elapsed_meas << " (sec) " << std::endl;
+
+      /*
+      for(size_t io=0; io < L; io++) {
+        std::cout << " Occupation density for orbital " << io
+                  << ": " << density[2*io]+density[2*io+1]
+                  << ", " << density[2*io]
+                  << " for alpha, " << density[2*io+1]
+                  << " for beta " << std::endl;
+      }
+      */
     }
 
   } else {
+
+    /**
+       do_rdm != 0: calculation all one- and two-particle RDM
+     */
 
     auto time_start_meas = std::chrono::high_resolution_clock::now();
     Correlation(W, adet, bdet, bit_length, L, adet_comm_size, bdet_comm_size,
@@ -408,9 +507,21 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
     if (mpi_rank == 0) {
       std::cout << " Elapsed time for measurement " << elapsed_meas << " (sec) "
                 << std::endl;
+      /*
+      for(size_t io=0; io < L; io++) {
+        std::cout << " Occupation density for orbital " << io
+                  << ": " << density[2*io]+density[2*io+1]
+                  << ", " << density[2*io]
+                  << " for alpha, " << density[2*io+1]
+                  << " for beta " << std::endl;
+      }
+      */
     }
   }
 
+  /**
+     Evaluation of carry-over bit-strings
+   */
   if (ratio == 0.0) {
 
     sbd::CarryOverAlphaDet(W, adet, bdet, adet_comm_size, bdet_comm_size,
@@ -429,11 +540,18 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
     }
   }
 
+  /**
+     Save wavefunctions
+   */
+
   if (savename != std::string("")) {
     SaveWavefunction(savename, adet, bdet, adet_comm_size, bdet_comm_size,
                      h_comm, b_comm, t_comm, W);
   }
 
+  /**
+     Save wavefunction in matrix form
+   */
   if (sbd_data.dump_matrix_form_wf != std::string("")) {
     SaveMatrixFormWF(sbd_data.dump_matrix_form_wf, bit_length, L, adet, bdet,
                      adet_comm_size, bdet_comm_size, h_comm, b_comm, t_comm, W);
@@ -441,7 +559,7 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
 
   FreeHelpers(helper);
 
-}
+} // end void diag function
 
 /**
    Main function to perform the diagonalization for selected basis
@@ -478,6 +596,9 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
   size_t L;
   size_t N;
 
+  /**
+     Load fcifump data
+   */
   sbd::FCIDump fcidump;
   if (mpi_rank == 0) {
     fcidump = sbd::LoadFCIDump(fcidumpfile);
@@ -492,6 +613,10 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
       N = std::atoi(value.c_str());
     }
   }
+
+  /**
+     Load dets file
+   */
 
   int do_shuffle = sbd_data.do_shuffle;
   std::vector<std::vector<size_t>> adet;
@@ -546,7 +671,7 @@ void diag(const MPI_Comm &comm, const SBD &sbd_data,
   diag(comm, sbd_data, fcidump, adet, bdet, loadname, savename, energy, density,
        carryover_bitstrings, one_p_rdm, two_p_rdm);
 
-}
+} // end diag for file-name version
 
 } // namespace tpb
 

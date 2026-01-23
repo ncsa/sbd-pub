@@ -22,6 +22,14 @@ int main(int argc, char *argv[]) {
   int mpi_size;
   MPI_Comm_size(comm, &mpi_size);
 
+  int myDevice, numDevices;
+
+  numDevices = omp_get_num_devices();
+  if (numDevices > 0) myDevice = mpi_rank % numDevices;
+  else                myDevice = 0;
+  omp_set_default_device(myDevice);
+  if (mpi_rank < numDevices) printf("rank %d has device %d\n", mpi_rank, myDevice);
+
   auto sbd_data = sbd::tpb::generate_sbd_data(argc, argv);
 
   std::string adetfile("alphadets.txt");

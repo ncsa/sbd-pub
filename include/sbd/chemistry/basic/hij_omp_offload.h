@@ -5,35 +5,23 @@
 #ifndef SBD_CHEMISTRY_BASIC_HIJ_OMP_OFFLOAD_H
 #define SBD_CHEMISTRY_BASIC_HIJ_OMP_OFFLOAD_H
 
+#include "sbd/framework/type_def.h"
+
 #ifdef USE_HIJ_OMP_OFFLOAD
 
-// Compile-time debug flag: define HIJ_GPU_DEBUG to enable debug output
-// This adds NO runtime overhead when not defined
-#ifdef HIJ_GPU_DEBUG
-#include <cstdio>
-#define HIJ_DEBUG_PRINT(...) printf(__VA_ARGS__)
-#else
-#define HIJ_DEBUG_PRINT(...)                                                   \
-  do {                                                                         \
-  } while (0)
-#endif
-
 #include <limits> // For std::numeric_limits (bisection test)
+
+  // one-electron and two-electron integrals
+  size_t I1_size, I2_size, I2_Direct_size, I2_Exchange_size;
+  double *I1_ptr;
+  double *I2_ptr;
+  double *I2_Direct_ptr;
+  double *I2_Exchange_ptr;
 
 namespace sbd {
 
 // Declare all device functions for OpenMP target offload
 #pragma omp declare target
-
-// Device-side bit counting (portable popcount)
-inline int popcount_device(size_t x) {
-  int count = 0;
-  while (x) {
-    count += x & 1;
-    x >>= 1;
-  }
-  return count;
-}
 
 // Device-side parity computation (5-parameter version)
 template <typename ElemT>
@@ -51,21 +39,21 @@ inline void parity_device(const size_t *dets, size_t bit_length, int start,
 
   if (blockStart == blockEnd) {
     size_t mask = ((size_t(1) << bitEnd) - 1) ^ ((size_t(1) << bitStart) - 1);
-    nonZeroBits += popcount_device(dets[blockStart] & mask);
+    nonZeroBits += __builtin_popcountl(dets[blockStart] & mask);
   } else {
     if (bitStart != 0) {
       size_t mask = ~((size_t(1) << bitStart) - 1);
-      nonZeroBits += popcount_device(dets[blockStart] & mask);
+      nonZeroBits += __builtin_popcountl(dets[blockStart] & mask);
       blockStart++;
     }
 
     for (size_t i = blockStart; i < blockEnd; i++) {
-      nonZeroBits += popcount_device(dets[i]);
+      nonZeroBits += __builtin_popcountl(dets[i]);
     }
 
     if (bitEnd != 0) {
       size_t mask = (size_t(1) << bitEnd) - 1;
-      nonZeroBits += popcount_device(dets[blockEnd] & mask);
+      nonZeroBits += __builtin_popcountl(dets[blockEnd] & mask);
     }
   }
 
@@ -90,12 +78,12 @@ inline int bitcount_device(const size_t *det, size_t bit_length, size_t L) {
   size_t remaining_bits = L % bit_length;
 
   for (size_t i = 0; i < full_words; ++i) {
-    count += popcount_device(det[i]);
+    count += __builtin_popcountl(det[i]);
   }
 
   if (remaining_bits > 0) {
     size_t mask = (size_t(1) << remaining_bits) - 1;
-    count += popcount_device(det[full_words] & mask);
+    count += __builtin_popcountl(det[full_words] & mask);
   }
 
   return count;
@@ -144,10 +132,6 @@ inline ElemT ZeroExcite_device(const size_t *det, size_t bit_length, size_t L,
                                int norbs_spatial, int norbs_spin) {
   ElemT energy = I0;
 
-  HIJ_DEBUG_PRINT(
-      "    ZeroExcite: L=%zu, norbs_spatial=%d, norbs_spin=%d, I0=%.6f\n", L,
-      norbs_spatial, norbs_spin, double(I0));
-
   // Get closed orbitals
   int closed[256]; // Maximum 256 orbitals
   int num_closed = 0;
@@ -158,22 +142,11 @@ inline ElemT ZeroExcite_device(const size_t *det, size_t bit_length, size_t L,
     }
   }
 
-  HIJ_DEBUG_PRINT("    ZeroExcite: num_closed=%d, closed orbitals:",
-                  num_closed);
-#ifdef HIJ_GPU_DEBUG
-  for (int i = 0; i < num_closed; i++) {
-    printf(" %d", closed[i]);
-  }
-  printf("\n");
-#endif
-
   // One-electron contribution (use spin orbital indexing)
   for (int i = 0; i < num_closed; i++) {
     int I = closed[i];
-    int idx = I * norbs_spin + I; //use norbs_spin for oneInt indexing
+    int idx = I * norbs_spin + I;
     ElemT h_val = I1[idx];
-    HIJ_DEBUG_PRINT("    ZeroExcite: h[%d,%d] (idx=%d) = %.6f\n", I, I, idx,
-                    double(h_val));
     energy += h_val;
   }
 
@@ -202,52 +175,26 @@ inline ElemT ZeroExcite_device(const size_t *det, size_t bit_length, size_t L,
 // Device-side OneExcite evaluation
 template <typename ElemT>
 inline ElemT OneExcite_device(const size_t *det, size_t bit_length, int i,
-                              int a, const ElemT *I1, const ElemT *I2,
-                              int norbs_spatial, int norbs_spin) {
+                              int a, const ElemT *I1, const ElemT *I2, int norbs_spin) {
   double sgn = 1.0;
   parity_device<ElemT>(det, bit_length, (i < a) ? i : a, (i > a) ? i : a, sgn);
-
-  HIJ_DEBUG_PRINT(
-      "    OneExcite: i=%d, a=%d, norbs_spatial=%d, norbs_spin=%d, sgn=%.2f\n",
-      i, a, norbs_spatial, norbs_spin, sgn);
-
-  int idx_ai = a * norbs_spin + i; //use norbs_spin for oneInt indexing
+  int idx_ai = a * norbs_spin + i; 
   ElemT energy = I1[idx_ai];
-  HIJ_DEBUG_PRINT("    OneExcite: h[%d,%d] (idx=%d) = %.6f\n", a, i, idx_ai,
-                  double(energy));
-
-  // Loop over occupied orbitals (use spin orbitals = 2 * norbs_spatial)
-  // Combined loop using unconditional masking (no branch divergence)
-  size_t num_words = (norbs_spin + bit_length - 1) / bit_length;
-  size_t remaining_bits = norbs_spin % bit_length;
-
-  // Precompute mask array: all bits set except last word may be partial
-  size_t masks[16]; // Max 16 words for 1024 spin orbitals (512 spatial)
-  for (size_t x = 0; x < num_words - 1; x++) {
-    masks[x] = ~size_t(0); // All bits set
+  int dsize = (norbs_spin + bit_length - 1) / bit_length;
+  for (int x = 0; x < dsize; x++) {
+    size_t bits = det[x];
+    for (int pos = 0; pos < bit_length; pos++) {
+       if ((bits & 1ULL) == 1ULL) {
+          int j = x * bit_length + pos;
+          // Use twoInt_device helper for cleaner code
+          // I2.Value(a,i,j,j) - I2.Value(a,j,j,i)
+          ElemT term1 = twoInt_device(a, i, j, j, I2);
+          ElemT term2 = twoInt_device(a, j, j, i, I2);
+          energy += term1 - term2;
+        }
+        bits >>= 1;
+     }
   }
-  masks[num_words - 1] =
-      (remaining_bits > 0) ? ((size_t(1) << remaining_bits) - 1) : ~size_t(0);
-
-  for (size_t x = 0; x < num_words; x++) {
-    size_t bits = det[x] & masks[x]; // Unconditional mask application
-    int pos = 0;
-    while (bits != 0) {
-      if (bits & 1) {
-        int j = x * bit_length + pos;
-
-        // Use twoInt_device helper for cleaner code
-        // I2.Value(a,i,j,j) - I2.Value(a,j,j,i)
-        ElemT term1 = twoInt_device(a, i, j, j, I2);
-        ElemT term2 = twoInt_device(a, j, j, i, I2);
-
-        energy += term1 - term2;
-      }
-      bits >>= 1;
-      pos++;
-    }
-  }
-
   return ElemT(sgn) * energy;
 }
 
@@ -286,8 +233,7 @@ inline ElemT ComputeHij(const size_t *DetI, const size_t *DetJ,
   int nc = 0;
   int nd = 0;
 
-  size_t full_words = (2 * norbs) / bit_length;
-  size_t remaining_bits = (2 * norbs) % bit_length;
+  size_t full_words = (2 * norbs + bit_length - 1) / bit_length;
 
   // Count orbital differences
   for (size_t i = 0; i < full_words; ++i) {
@@ -308,59 +254,16 @@ inline ElemT ComputeHij(const size_t *DetI, const size_t *DetJ,
     }
   }
 
-  if (remaining_bits > 0) {
-    size_t mask = (size_t(1) << remaining_bits) - 1;
-    size_t diff_c = (DetI[full_words] & ~DetJ[full_words]) & mask;
-    size_t diff_d = (DetJ[full_words] & ~DetI[full_words]) & mask;
-
-    for (size_t bit_pos = 0; bit_pos < remaining_bits; ++bit_pos) {
-      if (diff_c & (size_t(1) << bit_pos)) {
-        if (nc < 2)
-          c[nc] = bit_length * full_words + bit_pos;
-        nc++;
-      }
-      if (diff_d & (size_t(1) << bit_pos)) {
-        if (nd < 2)
-          d[nd] = bit_length * full_words + bit_pos;
-        nd++;
-      }
-    }
-  }
-
-  // Dispatch based on excitation level
-  HIJ_DEBUG_PRINT("ComputeHij: nc=%d, nd=%d\n", nc, nd);
-  if (nc >= 1 && nc <= 2) {
-    HIJ_DEBUG_PRINT("  c[0]=%d, d[0]=%d", c[0], d[0]);
-    if (nc == 2) {
-      HIJ_DEBUG_PRINT(", c[1]=%d, d[1]=%d", c[1], d[1]);
-    }
-    HIJ_DEBUG_PRINT("\n");
-  }
-
   ElemT result = ElemT(0.0);
   if (nc == 0) {
-    // ZeroExcite_device expects norbs_spatial as 3rd parameter (same as CPU
-    // ZeroExcite) CPU: ZeroExcite(det, bit_length, L, I0, I1, I2) where L =
-    // spatial orbitals
-    result = ZeroExcite_device(DetJ, bit_length, norbs, I0, I1,
-			       I2_Direct,   // Direct matrix
-			       I2_Exchange, // Exchange matrix
-			       norbs,       // spatial orbitals
-			       2 * norbs);  // spins
-    HIJ_DEBUG_PRINT("  ZeroExcite(norbs=%zu) -> %.6f\n", norbs, double(result));
-  } else if (nc == 1) {
-    result = OneExcite_device(DetJ, bit_length, d[0], c[0], I1, I2,
-			      norbs,        // like above: spatial
-                              2 * norbs     // spins
-			      );
-    HIJ_DEBUG_PRINT("  OneExcite(i=%d, a=%d) -> %.6f\n", d[0], c[0],
-                    double(result));
-  } else if (nc == 2) {
+    result = ZeroExcite_device(DetJ, bit_length, norbs, I0, I1, I2_Direct,
+                               I2_Exchange, norbs, 2 * norbs);
+  } 
+  else if (nc == 1) {
+    result = OneExcite_device(DetJ, bit_length, d[0], c[0], I1, I2, 2 * norbs);
+  } 
+  else if (nc == 2) {
     result = TwoExcite_device(DetJ, bit_length, d[0], d[1], c[0], c[1], I2);
-    HIJ_DEBUG_PRINT("  TwoExcite(i=%d, j=%d, a=%d, b=%d) -> %.6f\n", d[0], d[1],
-                    c[0], c[1], double(result));
-  } else {
-    HIJ_DEBUG_PRINT("  nc=%d > 2, returning 0\n", nc);
   }
 
   return result;
@@ -459,7 +362,7 @@ void Hij_Batch_OMP(const size_t *det_cache, const size_t *bra_ia,
                    size_t n_beta, size_t det_size, size_t I1_size,
                    size_t I2_size) {
 
-  // det_cache is already GPU-resident (target enter data)
+  // det_cache is already GPU-resident from Phase 1 (target enter data)
   // Use map(alloc:) to reuse existing GPU allocation without copying
   size_t det_cache_size = n_alpha * n_beta * det_size;
 
