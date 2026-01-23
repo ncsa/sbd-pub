@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  int L;
+  int L = 0;  // Initialize to 0 to handle corrupt FCIDUMP headers
   int N;
   double energy;
   std::vector<double> density;
