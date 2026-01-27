@@ -302,6 +302,7 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
   return count;
 }
 
+// clang-format off
 //
 // for adet_size = 4, bdet_size = 4, r_comm_size = 1
 //
@@ -330,7 +331,9 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
 // task 21 (3,1) (3,2) (3,3) (3,1) (0,1) (0,2) (0,3) (0,0) (1,1) (1,2) (1,3) (1,0) (2,1) (2,2) (2,3) (2,0)
 // task 22 (3,2) (3,3) (3,1) (3,1) (0,2) (0,3) (0,0) (0,1) (1,2) (1,3) (1,0) (1,1) (2,2) (2,3) (2,0) (2,1)
 // task 23 (3,3) (3,1) (3,1) (3,2) (0,3) (0,0) (0,1) (0,2) (1,3) (1,0) (1,1) (1,2) (2,3) (2,0) (2,1) (2,2)
+// clang-format on
 
+// clang-format off
 // for adet_size = 4, bdet_size = 4, r_comm_size = 3
 //                             r_comm_rank = 0
 // task 0  (0,0) (0,1) (0,2) (0,3) (1,0) (1,1) (1,2) (1,3) (2,0) (2,1) (2,2) (2,3) (3,0) (3,1) (3,2) (3,3)
@@ -361,6 +364,7 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
 // task 5  (3,1) (3,2) (3,3) (3,1) (0,1) (0,2) (0,3) (0,0) (1,1) (1,2) (1,3) (1,0) (2,1) (2,2) (2,3) (2,0)
 // task 6  (3,2) (3,3) (3,1) (3,1) (0,2) (0,3) (0,0) (0,1) (1,2) (1,3) (1,0) (1,1) (2,2) (2,3) (2,0) (2,1)
 // task 7  (3,3) (3,1) (3,1) (3,2) (0,3) (0,0) (0,1) (0,2) (1,3) (1,0) (1,1) (1,2) (2,3) (2,0) (2,1) (2,2)
+// clang-format on
 
 void FreeVectors(TaskHelpers &helper) {
   helper.SinglesFromAlpha = std::vector<std::vector<size_t>>();

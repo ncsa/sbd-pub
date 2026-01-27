@@ -362,7 +362,7 @@ void Hij_Batch_OMP(const size_t *det_cache, const size_t *bra_ia,
                    size_t n_beta, size_t det_size, size_t I1_size,
                    size_t I2_size) {
 
-  // det_cache is already GPU-resident from Phase 1 (target enter data)
+  // det_cache is already GPU-resident (target enter data)
   // Use map(alloc:) to reuse existing GPU allocation without copying
   size_t det_cache_size = n_alpha * n_beta * det_size;
 

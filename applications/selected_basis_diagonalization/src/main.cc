@@ -24,6 +24,9 @@ int main(int argc, char *argv[]) {
 
   int myDevice, numDevices;
 
+  // If more than 1 device is visible to the process, this may lead to suboptimal
+  // affinity, but in cases where the batch scheduler does not restrict device
+  // visibility at all, this is the simplest solution to get the right default.
   numDevices = omp_get_num_devices();
   if (numDevices > 0) myDevice = mpi_rank % numDevices;
   else                myDevice = 0;
