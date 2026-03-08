@@ -5,6 +5,14 @@
 #ifndef SBD_CHEMISTRY_BASIC_INTEGRALS_THRUST_H
 #define SBD_CHEMISTRY_BASIC_INTEGRALS_THRUST_H
 
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/for_each.h>
+#include <thrust/execution_policy.h>
+#include <thrust/tuple.h>
+#include <thrust/transform.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/inner_product.h>
 
 namespace sbd {
 

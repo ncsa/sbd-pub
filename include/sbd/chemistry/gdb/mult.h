@@ -24,7 +24,6 @@ namespace sbd {
 	      MPI_Comm h_comm,
 	      MPI_Comm b_comm,
 	      MPI_Comm t_comm) {
-      
       int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
       int mpi_rank_h; MPI_Comm_rank(h_comm,&mpi_rank_h);
       int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
@@ -87,23 +86,11 @@ namespace sbd {
 					  exidx[task].SinglesAdetCrAnSM[ia][2*ja+0],
 					  exidx[task].SinglesAdetCrAnSM[ia][2*ja+1],
 					  I1,I2);
-		    // size_t od;
-		    // ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,od);
 		    wb[idet] += eij * twk[jdet];
 		  }
 		}
 
 		// double alpha excitations
-		/*
-		for(size_t ja=0; ja < tidxmap.BdetToDetLen[jbst]; ja++) {
-		  size_t jdet = tidxmap.BdetToDetSM[jbst][ja];
-		  if( difference(det[idet],tdet[jdet],bit_length,2*norb) == 4 ) {
-		    size_t odiff;
-		    ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
-		    wb[idet] += eij * twk[jdet];
-		  }
-		}
-		*/
 		for(size_t ja=0; ja < exidx[task].DoublesFromAdetLen[ia]; ja++) {
 		  size_t jast = exidx[task].DoublesFromAdetSM[ia][ja];
 		  auto itA = std::lower_bound(&tidxmap.BdetToAdetSM[jbst][0],
@@ -120,8 +107,6 @@ namespace sbd {
 					  exidx[task].DoublesAdetCrAnSM[ia][4*ja+2],
 					  exidx[task].DoublesAdetCrAnSM[ia][4*ja+3],
 					  I1,I2);
-		    // size_t od;
-		    // ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,od);
 		    wb[idet] += eij * twk[jdet];
 		  }
 		}
@@ -133,7 +118,6 @@ namespace sbd {
 		size_t start_idx = 0;
 		size_t end_idx = tidxmap.AdetToDetLen[jast];
 		size_t SinglesFromBLen = exidx[task].SinglesFromBdetLen[ibst];
-		// size_t maxAtoB = tidxmap.AdetToBdetSM[jast][end_idx-1];
 		for(size_t k=0; k < SinglesFromBLen; k++) {
 		  size_t jbst = exidx[task].SinglesFromBdetSM[ibst][k];
 		  if( start_idx >= end_idx ) break;
@@ -153,8 +137,6 @@ namespace sbd {
 					      exidx[task].SinglesAdetCrAnSM[ia][2*ja+1],
 					      exidx[task].SinglesBdetCrAnSM[ibst][2*k+1],
 					      I1,I2);
-			// size_t odiff;
-			// ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
 			wb[idet] += eij * twk[jdet];
 		      }
 		    }
@@ -164,7 +146,6 @@ namespace sbd {
 
 	      if( exidx[task].SelfFromAdetLen[iast] != 0 ) {
 		size_t jast = exidx[task].SelfFromAdetSM[iast][0];
-		
 		// single beta excitations
 		for(size_t jb=0; jb < exidx[task].SinglesFromBdetLen[ibst]; jb++) {
 		  size_t jbst = exidx[task].SinglesFromBdetSM[ibst][jb];
@@ -180,24 +161,11 @@ namespace sbd {
 					  exidx[task].SinglesBdetCrAnSM[ibst][2*jb+0],
 					  exidx[task].SinglesBdetCrAnSM[ibst][2*jb+1],
 					  I1,I2);
-		    // size_t odiff;
-		    // ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
 		    wb[idet] += eij * twk[jdet];
 		  }
 		}
 
 		// double beta excitations
-		/*
-		for(size_t jb = 0; jb < tidxmap.AdetToDetLen[jast]; jb++) {
-		  size_t jdet = tidxmap.AdetToDetSM[jast][jb];
-		  if( difference(det[idet],tdet[jdet],bit_length,2*norb) == 4 ) {
-		    size_t odiff;
-		    ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,
-				    I0,I1,I2,odiff);
-		    wb[idet] += eij * twk[jdet];
-		  }
-		}
-		*/
 		for(size_t jb=0; jb < exidx[task].DoublesFromBdetLen[ibst]; jb++) {
 		  size_t jbst = exidx[task].DoublesFromBdetSM[ibst][jb];
 		  auto itB = std::lower_bound(&tidxmap.AdetToBdetSM[jast][0],
@@ -214,12 +182,10 @@ namespace sbd {
 					  exidx[task].DoublesBdetCrAnSM[ibst][4*jb+2],
 					  exidx[task].DoublesBdetCrAnSM[ibst][4*jb+3],
 					  I1,I2);
-		    // size_t odiff;
-		    // ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
 		    wb[idet] += eij * twk[jdet];
 		  }
 		}
-		
+
 	      } // if there are same alpha
 
 	    } // corresponding beta string loop for bra-side basis
@@ -234,16 +200,12 @@ namespace sbd {
 	  DetIndexMapCopy(tidxmap,ridxmap);
 	  sbd::MpiSlide(rwk,twk,slide,b_comm);
 	  sbd::gdb::MpiSlide(ridxmap,tidxmap,slide,b_comm);
-	  // std::vector<std::vector<size_t>> rdet;
-	  // std::swap(rdet,tdet);
-	  // sbd::MpiSlide(rdet,tdet,slide,b_comm);
 	}
-	
+
       } // end task for loop
 
       MpiAllreduce(wb,MPI_SUM,t_comm);
       MpiAllreduce(wb,MPI_SUM,h_comm);
-      
     } // end function for mult
 
     template <typename ElemT>
@@ -269,9 +231,9 @@ namespace sbd {
       std::vector<ElemT> rwk;
       if( slide.size() != 0 ) {
 	if( slide[0] != 0 ) {
-	  sbd::MpiSlide(wb,twk,-slide[0],b_comm);
+	  sbd::MpiSlide(wk,twk,-slide[0],b_comm);
 	} else {
-	  twk = wb;
+	  twk = wk;
 	}
       }
 
@@ -302,9 +264,9 @@ namespace sbd {
       sbd::MpiAllreduce(wb,MPI_SUM,t_comm);
       sbd::MpiAllreduce(wb,MPI_SUM,h_comm);
     }
-    
+
   } // end namespace gdb
-  
+
 } // end namespace sbd
 
 #endif

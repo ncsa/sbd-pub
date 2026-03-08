@@ -169,6 +169,7 @@ namespace sbd {
 	getAdet(det[i],bit_length,norb,adet[i]);
 	getBdet(det[i],bit_length,norb,bdet[i]);
       }
+      /*
       std::sort(adet.begin(),adet.end(),
 		[](const std::vector<size_t> & x,
 		   const std::vector<size_t> & y) {
@@ -178,6 +179,17 @@ namespace sbd {
 		[](const std::vector<size_t> & x,
 		   const std::vector<size_t> & y) {
 		  return x < y;
+		});
+      */
+      std::sort(adet.begin(),adet.end(),
+		[](const std::vector<size_t> & x,
+		   const std::vector<size_t> & y) {
+		  return sbd::less_from_back(x,y);
+		});
+      std::sort(bdet.begin(),bdet.end(),
+		[](const std::vector<size_t> & x,
+		   const std::vector<size_t> & y) {
+		  return sbd::less_from_back(x,y);
 		});
       auto adet_sorted = adet;
       auto bdet_sorted = bdet;
@@ -240,6 +252,7 @@ namespace sbd {
       for(size_t i=0; i < det.size(); i++) {
 	getAdet(det[i],bit_length,norb,adet_temp);
 	getBdet(det[i],bit_length,norb,bdet_temp);
+	/*
 	auto itia = std::lower_bound(adet.begin(),adet.end(),
 				     adet_temp,
 				     [](const std::vector<size_t> & lhs,
@@ -251,6 +264,19 @@ namespace sbd {
 				     [](const std::vector<size_t> & lhs,
 					const std::vector<size_t> & rhs) {
 				       return lhs < rhs;
+				     });
+	*/
+	auto itia = std::lower_bound(adet.begin(),adet.end(),
+				     adet_temp,
+				     [](const std::vector<size_t> & lhs,
+					const std::vector<size_t> & rhs) {
+				       return sbd::less_from_back(lhs,rhs);
+				     });
+	auto itib = std::lower_bound(bdet.begin(),bdet.end(),
+				     bdet_temp,
+				     [](const std::vector<size_t> & lhs,
+					const std::vector<size_t> & rhs) {
+				       return sbd::less_from_back(lhs,rhs);
 				     });
 	if( itia == adet.end() || *itia != adet_temp ) {
 	  std::cout << " unexpected situation happened in adet" << std::endl;

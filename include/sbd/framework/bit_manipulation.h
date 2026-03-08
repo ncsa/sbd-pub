@@ -127,6 +127,59 @@
 namespace sbd {
 
   /**
+   * @brief Compare two vectors in right-to-left lexicographical order.
+   *
+   * This function performs a lexicographical comparison starting from the
+   * last element of each vector (i.e., from back to front).
+   * The vector lengths are assumed to be identical.
+   *
+   * The ordering is equivalent to:
+   *   Compare a[n-1] with b[n-1], then a[n-2] with b[n-2], and so on,
+   *   and decide at the first position where they differ.
+   *
+   * @param a First vector.
+   * @param b Second vector.
+   * @return true if a is considered smaller than b under this ordering,
+   *         false otherwise.
+   */
+  inline bool less_from_back(const std::vector<size_t> & a,
+			     const std::vector<size_t> & b) {
+    
+    size_t a_size = a.size();
+    size_t b_size = b.size();
+
+    assert( a_size == b_size );
+
+    bool res = false;
+    for(size_t n = a_size; n > 0; n--) {
+      if( a[n-1] < b[n-1] ) {
+	res = true;
+	break;
+      } else if ( a[n-1] > b[n-1] ) {
+	res = false;
+	break;
+      }
+    }
+    return res;
+  }
+
+  /**
+   * @brief Compare two vectors in reverse right-to-left lexicographical order.
+   *
+   * This function defines the opposite ordering of less_from_back(a, b).
+   * It is equivalent to calling less_from_back(b, a).
+   *
+   * @param a First vector.
+   * @param b Second vector.
+   * @return true if a is considered greater than b under this ordering,
+   *         false otherwise.
+   */
+  inline bool greater_from_back(const std::vector<size_t> & a,
+				const std::vector<size_t> & b) {
+    return less_from_back(b,a);
+  }
+  
+  /**
      Function for making a string from the bitarray data
      @param[in] config: target bitarray
      @param[in] bit_length: length of the bitstring managed by each size_t
@@ -322,10 +375,16 @@ namespace sbd {
      @param[in/out] a: set of bit strings to be sorted
    */
   void sort_bitarray(std::vector<std::vector<size_t>> & a) {
+    /*
     std::sort(a.begin(),a.end(),
 	      [](const std::vector<size_t> & x,
 		 const std::vector<size_t> & y)
 	      { return x < y; });
+    */
+    std::sort(a.begin(),a.end(),
+	      [](const std::vector<size_t> & x,
+		 const std::vector<size_t> & y)
+	      { return less_from_back(x,y); });
     a.erase(std::unique(a.begin(),a.end()),a.end());
   }
 

@@ -10,7 +10,7 @@ distributed basis
 #include <algorithm>
 
 namespace sbd {
-  
+
   struct TaskHelpers {
     size_t braAlphaStart;
     size_t braAlphaEnd;
@@ -30,7 +30,7 @@ namespace sbd {
     std::vector<std::vector<int>> SinglesAlphaCrAn;
     std::vector<std::vector<int>> SinglesBetaCrAn;
     std::vector<std::vector<int>> DoublesAlphaCrAn;
-    std::vector<std::vector<int>> DoublesBetaCrAn;    
+    std::vector<std::vector<int>> DoublesBetaCrAn;
     size_t * SinglesFromAlphaLen;
     size_t * SinglesFromBetaLen;
     size_t * DoublesFromAlphaLen;
@@ -425,7 +425,7 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
     helper.SinglesAlphaCrAn = std::vector<std::vector<int>>();
     helper.DoublesAlphaCrAn = std::vector<std::vector<int>>();
     helper.SinglesBetaCrAn = std::vector<std::vector<int>>();
-    helper.DoublesBetaCrAn = std::vector<std::vector<int>>();    
+    helper.DoublesBetaCrAn = std::vector<std::vector<int>>();
   }
 
 void FreeHelpers(TaskHelpers &helper) {
@@ -518,7 +518,6 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
       helper.DoublesBetaCrAnSM[i] = int_begin + int_counter;
       int_counter += 4 * helper.DoublesFromBetaLen[i];
     }
-    
     for(size_t i=0; i < nAlpha; i++) {
       std::memcpy(helper.SinglesFromAlphaSM[i],
 		  helper.SinglesFromAlpha[i].data(),
@@ -527,7 +526,16 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
 		  helper.DoublesFromAlpha[i].data(),
 		  helper.DoublesFromAlphaLen[i]*sizeof(size_t));
     }
-    
+
+    for(size_t i=0; i < nAlpha; i++) {
+      std::memcpy(helper.SinglesAlphaCrAnSM[i],
+		  helper.SinglesAlphaCrAn[i].data(),
+		  2*helper.SinglesFromAlphaLen[i]*sizeof(int));
+      std::memcpy(helper.DoublesAlphaCrAnSM[i],
+		  helper.DoublesAlphaCrAn[i].data(),
+		  4*helper.DoublesFromAlphaLen[i]*sizeof(int));
+    }
+
     for(size_t i=0; i < nBeta; i++) {
       std::memcpy(helper.SinglesFromBetaSM[i],
 		  helper.SinglesFromBeta[i].data(),
@@ -536,6 +544,7 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
 		  helper.DoublesFromBeta[i].data(),
 		  helper.DoublesFromBetaLen[i]*sizeof(size_t));
     }
+    
     for(size_t i=0; i < nBeta; i++) {
       std::memcpy(helper.SinglesBetaCrAnSM[i],
 		  helper.SinglesBetaCrAn[i].data(),

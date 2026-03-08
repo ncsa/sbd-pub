@@ -1,0 +1,23 @@
+# Path to the SBD library
+SBD_PATH=../..
+
+# mpi c++ compiler
+CCCOM=mpicxx
+
+# flags for build: include path to openmp. The following is the case using homebrew's llvm on Mac
+CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3 -DSBD_SBDIAG_DEBUG
+
+# flags for linking: include link to lapack and blas. The following s the case using homebrew's openblas on Mac
+SYSLIB= -L/opt/homebrew/opt/openblas/lib -llapack -lblas
+
+### Example for the Fugaku
+# SBD_PATH=../../
+# CCCOM=mpiFCCpx
+# CCFLAGS= -Nclang -std=c++17 -stdlib=libc++ -Kfast,openmp -Xpreprocessor -fopenmp
+# SYSLIB= -SSL2
+#
+### Trad-mode for Fugaku
+# SBD_PATH=../../
+# CCCOM=mpiFCCpx
+# CCFLAGS= -std=c++17 -Kfast,openmp -DSBD_TRADMODE
+# SYSLIB= -SSL2

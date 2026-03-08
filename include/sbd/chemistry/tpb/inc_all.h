@@ -8,10 +8,7 @@
 #include "sbd/chemistry/tpb/qcham.h"
 #include "sbd/chemistry/tpb/mult.h"
 #ifdef SBD_THRUST
-#include "sbd/framework/mpi_utility_thrust.h"
 #include "sbd/chemistry/tpb/mult_thrust.h"
-#include "sbd/chemistry/tpb/davidson_thrust.h"
-#include "sbd/chemistry/tpb/lanczos_thrust.h"
 #endif
 #include "sbd/chemistry/tpb/davidson.h"
 #include "sbd/chemistry/tpb/lanczos.h"
