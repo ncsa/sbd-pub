@@ -157,7 +157,8 @@ namespace sbd {
   // Serialize the FCIDump structure into a string for broadcasting
   std::string serializeFCIDump(const FCIDump& fciDump) {
     std::ostringstream oss;
-    oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10);
+    oss << std::scientific
+	<< std::setprecision(std::numeric_limits<double>::max_digits10);
     // Serialize header
     for (const auto & [key, value] : fciDump.header) {
       oss << key << "=" << value << ",\n";

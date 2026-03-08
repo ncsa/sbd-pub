@@ -9,12 +9,10 @@
 #include <complex>
 #include <limits.h>
 #include <cassert>
-#include <cstdint>
 
 #include "mpi.h"
 
 namespace sbd {
-
   template <typename T> struct GetRealType;
   template <> struct GetRealType<float> { using RealT = float; };
   template <> struct GetRealType<double> { using RealT = double; };
@@ -26,9 +24,15 @@ namespace sbd {
   inline float GetReal(const std::complex<float> a) { return a.real(); }
   inline double GetReal(const std::complex<double> a) { return a.real(); }
 
+#ifdef SBD_THRUST
+  template <typename T> inline __host__ __device__ T Conjugate(T a) { return a; }
+  template<> inline __host__ __device__ std::complex<float> Conjugate(std::complex<float> a) { return std::conj(a); }
+  template<> inline __host__ __device__ std::complex<double> Conjugate(std::complex<double> a) { return std::conj(a); }
+#else
   template <typename T> inline T Conjugate(T a) { return a; }
   template<> inline std::complex<float> Conjugate(std::complex<float> a) { return std::conj(a); }
   template<> inline std::complex<double> Conjugate(std::complex<double> a) { return std::conj(a); }
+#endif
 
   template <typename T> struct GetMpiType { static MPI_Datatype MpiT; };
   template<> inline MPI_Datatype GetMpiType<float>::MpiT = MPI_FLOAT;

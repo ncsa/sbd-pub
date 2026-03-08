@@ -1,13 +1,13 @@
 /**
-@file sbd/basic/out_of_place_func/arithmetic.h
-@brief out-of-place arithmetic for GeneralOp class
+@file sbd/caop/basic/arithmetic.h
+@brief arithmetic for GeneralOp class
 */
-#ifndef SBD_BASIC_OUT_OF_PLACE_FUNC_ARITHMETIC_H
-#define SBD_BASIC_OUT_OF_PLACE_FUNC_ARITHMETIC_H
+#ifndef SBD_CAOP_BASIC_ARITHMETIC_H
+#define SBD_CAOP_BASIC_ARITHMETIC_H
 
 namespace sbd {
 
-  ProductOp operator * (const FieldOp & a, const FieldOp & b) {
+  ProductOp operator * (const CAOp & a, const CAOp & b) {
     ProductOp res(a);
     res *= b;
     return res;
@@ -28,7 +28,7 @@ namespace sbd {
   }
 
   template <typename ElemT>
-  GeneralOp<ElemT> operator * (ElemT c, const FieldOp & a) {
+  GeneralOp<ElemT> operator * (ElemT c, const CAOp & a) {
     ProductOp P(a);
     return GeneralOp<ElemT>(c,P);
   }
@@ -72,7 +72,7 @@ namespace sbd {
 	  }
 	}
 	    
-	FieldOp ft1(tpop.fops_[indcr[m]+m_an]);
+	CAOp ft1(tpop.fops_[indcr[m]+m_an]);
 	ft1.dagger();
 	    
 	for(int k=0; k < m_an; k++) {
@@ -83,7 +83,7 @@ namespace sbd {
 	    indcr.push_back(indcr[m]);
 	    osign.push_back(osign[m]);
 	  }
-	  FieldOp ft2(tpop.fops_[indcr[m]+m_an-k-1]);
+	  CAOp ft2(tpop.fops_[indcr[m]+m_an-k-1]);
 	  if( sign ) {
 	    osign[m] *= -1;
 	  } else {
@@ -106,9 +106,9 @@ namespace sbd {
     for(int m=0; m < temp.o_.size(); m++) {
       ProductOp tpop = temp.o_[m];
       for(int k=0; k < indcr[m]-1; k++) {
-	FieldOp ft1(tpop.fops_[k]);
+	CAOp ft1(tpop.fops_[k]);
 	for(int l=k+1; l < indcr[m]; l++) {
-	  FieldOp ft2(tpop.fops_[l]);
+	  CAOp ft2(tpop.fops_[l]);
 	  if( ft2 < ft1 ) {
 	    if( sign ) {
 	      osign[m] *= -1;
@@ -134,9 +134,9 @@ namespace sbd {
     for(int m=0; m < temp.o_.size(); m++) {
       ProductOp tpop = temp.o_[m];
       for(int k=indcr[m]; k < tpop.size(); k++) {
-	FieldOp ft1(tpop.fops_[k]);
+	CAOp ft1(tpop.fops_[k]);
 	for(int l=k+1; l < tpop.size(); l++) {
-	  FieldOp ft2(tpop.fops_[l]);
+	  CAOp ft2(tpop.fops_[l]);
 	  if( ft1 < ft2 ) {
 	    if( sign ) {
 	      osign[m] *= -1;
@@ -164,9 +164,9 @@ namespace sbd {
       ProductOp tpop = temp.o_[m];
 	
       for(int k=0; k < indcr[m]; k++) {
-	FieldOp ft1(tpop.fops_[k]);
+	CAOp ft1(tpop.fops_[k]);
 	for(int l=k+1; l < indcr[m]; l++) {
-	  FieldOp ft2(tpop.fops_[l]);
+	  CAOp ft2(tpop.fops_[l]);
 	  if( ft1 == ft2 ) {
 	    b = false;
 	    break;
@@ -178,9 +178,9 @@ namespace sbd {
       }
 	
       for(int k=indcr[m]; k < tpop.size(); k++) {
-	FieldOp ft1(tpop.fops_[k]);
+	CAOp ft1(tpop.fops_[k]);
 	for(int l=k+1; l < tpop.size(); l++) {
-	  FieldOp ft2(tpop.fops_[l]);
+	  CAOp ft2(tpop.fops_[l]);
 	  if( ft1 == ft2 ) {
 	    b = false;
 	    break;
@@ -335,16 +335,14 @@ namespace sbd {
     G = res;
   }
 
-
-
-  void MpiSend(const FieldOp & F,
+  void MpiSend(const CAOp & F,
 	       int dest,
 	       MPI_Comm comm) {
     MPI_Send(&F.d_,1,MPI_C_BOOL,dest,0,comm);
     MPI_Send(&F.q_,1,MPI_INT,dest,0,comm);
   }
   
-  void MpiRecv(FieldOp & F,
+  void MpiRecv(CAOp & F,
 	       int source,
 	       MPI_Comm comm) {
     MPI_Status status;
@@ -352,6 +350,13 @@ namespace sbd {
     MPI_Recv(&F.q_,1,MPI_INT,source,0,comm,&status);
   }
   
+  void MpiBcast(CAOp & F,
+		int root,
+		MPI_Comm comm) {
+    MPI_Bcast(&F.d_,1,MPI_C_BOOL,root,comm);
+    MPI_Bcast(&F.q_,1,MPI_INT,root,comm);
+  }
+
   void MpiSend(const ProductOp & P,
 	       int dest,
 	       MPI_Comm comm) {
@@ -376,7 +381,23 @@ namespace sbd {
     }
   }
 
-  
+  void MpiBcast(ProductOp & P,
+		int root,
+		MPI_Comm comm) {
+    int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
+    size_t p_size;
+    if( mpi_rank == 0 ) {
+      p_size = P.fops_.size();
+    }
+    MPI_Bcast(&P.n_dag_,1,MPI_INT,root,comm);
+    MPI_Bcast(&p_size,1,SBD_MPI_SIZE_T,root,comm);
+    if( mpi_rank != 0 ) {
+      P.fops_.resize(p_size);
+    }
+    for(size_t i=0; i < p_size; i++) {
+      MpiBcast(P.fops_[i],root,comm);
+    }
+  }
   
   // friend function
   template <typename ElemT>
@@ -414,10 +435,6 @@ namespace sbd {
 	       MPI_Comm comm) {
     MPI_Status status;
     std::vector<size_t> sizes(4);
-    sizes[0] = G.e_.size();
-    sizes[1] = G.d_.size();
-    sizes[2] = G.c_.size();
-    sizes[3] = G.o_.size();
     MPI_Recv(sizes.data(),4,SBD_MPI_SIZE_T,source,0,comm,&status);
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     if( sizes[0] != 0 ) {
@@ -441,9 +458,47 @@ namespace sbd {
       }
     }
   }
+
+  template <typename ElemT>
+  void MpiBcast(GeneralOp<ElemT> & G,
+		int root,
+		MPI_Comm comm) {
+    int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
+    std::vector<size_t> sizes(4);
+    if( mpi_rank == 0 ) {
+      sizes[0] = G.e_.size();
+      sizes[1] = G.d_.size();
+      sizes[2] = G.c_.size();
+      sizes[3] = G.o_.size();
+    }
+    MPI_Bcast(sizes.data(),4,SBD_MPI_SIZE_T,root,comm);
+    if( mpi_rank != 0 ) {
+      G.e_.resize(sizes[0]);
+      G.d_.resize(sizes[1]);
+      G.c_.resize(sizes[2]);
+      G.o_.resize(sizes[3]);
+    }
+    MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+    if( sizes[0] != 0 ) {
+      MPI_Bcast(G.e_.data(),sizes[0],DataT,root,comm);
+    }
+    if( sizes[1] != 0 ) {
+      for(size_t i=0; i < sizes[1]; i++) {
+	MpiBcast(G.d_[i],root,comm);
+      }
+    }
+    if( sizes[2] != 0 ) {
+      MPI_Bcast(G.c_.data(),sizes[2],DataT,root,comm);
+    }
+    if( sizes[3] != 0 ) {
+      for(size_t i=0; i < sizes[3]; i++) {
+	MpiBcast(G.o_[i],root,comm);
+      }
+    }
+  }
   
   std::ostream & operator << (std::ostream & s,
-			      const FieldOp & fop) {
+			      const CAOp & fop) {
     if( fop.d_ ) {
       s << "Adag(";
     } else {
@@ -499,28 +554,29 @@ namespace sbd {
   }
 
 
-  FieldOp Sp(int q) {
-    return FieldOp(true,q);
+  CAOp Sp(int q) {
+    return CAOp(false,q);
   }
 
-  FieldOp Sm(int q) {
-    return FieldOp(false,q);
+  CAOp Sm(int q) {
+    return CAOp(true,q);
   }
 
   template <typename ElemT>
   GeneralOp<ElemT> Sz(int q) {
     GeneralOp<ElemT> res;
-    res += Sp(q) * Sm(q);
-    res += ElemT(-0.5);
+    res += Sm(q) * Sp(q);
+    res *= ElemT(-1.0);
+    res += ElemT(0.5);
     return res;
   }
 
-  FieldOp An(int q) {
-    return FieldOp(false,q);
+  CAOp An(int q) {
+    return CAOp(false,q);
   }
 
-  FieldOp Cr(int q) {
-    return FieldOp(true,q);
+  CAOp Cr(int q) {
+    return CAOp(true,q);
   }
   
 } // end namespace sbd

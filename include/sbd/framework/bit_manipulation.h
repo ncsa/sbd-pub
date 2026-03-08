@@ -174,7 +174,7 @@ namespace sbd {
   /**
      Function for finding a mpi process which manages the target bit string
      @param[in] config: target configuration
-     @param[in] config_begin: first element for each mpi 
+     @param[in] config_begin: first element for each mpi
   */
   void mpi_process_search(const std::vector<size_t> & target_config,
 			  const std::vector<std::vector<size_t>> & config_begin,
@@ -305,7 +305,7 @@ namespace sbd {
      @param[in/out] a: bitstring
      @param[in] bit_length: length for the bitstring managed by each size_t
    */
-  
+
   void bitadvance(std::vector<size_t> & a, int bit_length) {
     size_t x;
     size_t d = (((size_t) 1) << bit_length) - 1;
@@ -382,7 +382,8 @@ namespace sbd {
       int mpi_rank_begin = 0;
       int mpi_rank_end   = mpi_size-1;
       for(int rank=0; rank < mpi_size; rank++) {
-	if ( ( index_begin[rank] <= i_begin[recv_rank] ) && ( i_begin[recv_rank] < index_end[rank] ) ) {
+	if ( ( index_begin[rank] <= i_begin[recv_rank] )
+	     && ( i_begin[recv_rank] < index_end[rank] ) ) {
 	  mpi_rank_begin = rank;
 	  break;
 	}
@@ -435,11 +436,14 @@ namespace sbd {
     for(int rank=0; rank < mpi_size; rank++) {
       index_end[rank] = index_begin[rank] + config_size[rank];
     }
-    
+
     for(int rank=0; rank < mpi_size; rank++) {
       if( rank == mpi_rank ) {
 	config_begin[rank] = config[0];
+      } else {
+	config_begin[rank].resize(config_length);
       }
+
       MPI_Bcast(config_begin[rank].data(),config_length,SBD_MPI_SIZE_T,rank,comm);
     }
     for(int rank=0; rank < mpi_size-1; rank++) {
@@ -448,8 +452,11 @@ namespace sbd {
     if( mpi_rank == mpi_size-1 ) {
       config_end[mpi_rank] = config[config.size()-1];
       bitadvance(config_end[mpi_rank],bit_length);
+    } else {
+      config_end[mpi_size-1].resize(config_length);
     }
     MPI_Bcast(config_end[mpi_size-1].data(),config_length,SBD_MPI_SIZE_T,mpi_size-1,comm);
+
   }
 
   /**
@@ -613,7 +620,7 @@ namespace sbd {
 
 	    if( ( config_begin[r_rank] < config_end_b[s_rank] )
 	     && ( config_begin_b[s_rank] < config_end[r_rank] ) ) {
-	      
+
 	      if( (s_rank + mpi_master_b) == mpi_rank ) {
 
 		size_t i_begin = 0;
@@ -649,7 +656,7 @@ namespace sbd {
 			  << " < " << makestring(config_end[r_rank],bit_length,total_bit_length)
 			  << "] = " << ( config_begin_b[s_rank] < config_end[r_rank] ) << std::endl;
 #endif
-		
+
 		std::vector<std::vector<size_t>> config_transfer;
 		size_t transfer_size = i_end-i_begin;
 		if( i_end-i_begin > 0 ) {
@@ -663,14 +670,14 @@ namespace sbd {
 		} else {
 		  new_config_b.insert(new_config_b.end(),config_transfer.begin(),config_transfer.end());
 		}
-		
+
 	      }
 	      if( ( r_rank == mpi_rank ) && ( s_rank+mpi_master_b != r_rank ) ) {
-		
+
 		std::vector<std::vector<size_t>> config_transfer(0);
 		MpiRecv(config_transfer,s_rank+mpi_master_b,comm);
 		new_config_b.insert(new_config_b.end(),config_transfer.begin(),config_transfer.end());
-		
+
 	      }
 	    }
 	  }
@@ -794,7 +801,7 @@ namespace sbd {
 	  usleep(100000);
 	}
 #endif
-	
+
 	mpi_redistribution(config,config_begin,config_end,index_begin,index_end,total_bit_length,bit_length,comm);
 
 #ifdef SBD_DEBUG_BIT
@@ -822,8 +829,8 @@ namespace sbd {
 	  usleep(100000);
 	}
 #endif
-	
-	
+
+
       } else {
 
 	for(int rank=0; rank < mpi_size_a; rank++) {
@@ -848,12 +855,12 @@ namespace sbd {
 	}
 
 	mpi_redistribution(config,config_begin,config_end,index_begin,index_end,total_bit_length,bit_length,comm);
-	
+
       } // if( config_end_a_end > config_begin_b_begin ) to skip case where it is already sorted.
     }
   }
 
-  
+
   /**
      Function to change the length of bit string managed by each `size_t`
      @param[in] bit_length_a: the input length of bit string managed by each `size_t`
@@ -906,12 +913,16 @@ namespace sbd {
     if( total_bit_length_a % bit_length_b != 0 ) {
       b_size++;
     }
-    size_t maxbit_b = (((size_t) 1) << bit_length_b) - 1;
-    
+    size_t maxbit_b;
+    if (bit_length_b == 64)
+      maxbit_b = 0xffffffffffffffff;
+    else
+      maxbit_b = (((size_t) 1) << bit_length_b) - 1;
+
     for(size_t k=0; k < b.size(); k++) {
       a = b[k];
       b[k].resize(b_size);
-      
+
       size_t a_max_order = bit_length_a;
       size_t min_order = 0;
       size_t b_max_order = bit_length_b;
@@ -961,7 +972,7 @@ namespace sbd {
     return sign;
   }
 
-  
+
   /**
      Function to change the integer to a string filled by zero from left
      @param[in] i: input integer
@@ -1044,9 +1055,9 @@ namespace sbd {
   std::string remove_extension(const std::string& filename) {
     size_t lastdot = filename.find_last_of(".");
     if (lastdot == std::string::npos) return filename;
-    return filename.substr(0, lastdot); 
+    return filename.substr(0, lastdot);
   }
-  
+
   /**
      Function to define the name of binary file with zero-filled integer
      @param[in] i: integer
@@ -1079,7 +1090,7 @@ namespace sbd {
 	       sizeof(size_t)*size_b);
     }
   }
-  
+
   /**
      Function to load the set of bitstring
      @param[in] is: input stream
@@ -1110,7 +1121,7 @@ namespace sbd {
       return hash;
     }
   };
-  
+
   /**
      Equal function: whether bit is equal or not
    */
@@ -1120,7 +1131,7 @@ namespace sbd {
       return a == b; // std::vector<size_t>
     }
   };
-  
+
   /**
      merge sequences D and W to Dn and Wn if D has same entries
      @param[in] D: input set of bit strings
@@ -1147,11 +1158,11 @@ namespace sbd {
       size_t n = std::distance(Dn.begin(),itn);
       Wn[n] += W[i];
     }
-    
-    
+
+
   }
 
-  
+
 }
 
 #endif

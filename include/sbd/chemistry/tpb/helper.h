@@ -6,120 +6,144 @@ distributed basis
 #ifndef SBD_CHEMISTRY_TPB_HELPER_H
 #define SBD_CHEMISTRY_TPB_HELPER_H
 
+#include <map>
 #include <algorithm>
 
 namespace sbd {
+  
+  struct TaskHelpers {
+    size_t braAlphaStart;
+    size_t braAlphaEnd;
+    size_t ketAlphaStart;
+    size_t ketAlphaEnd;
+    size_t braBetaStart;
+    size_t braBetaEnd;
+    size_t ketBetaStart;
+    size_t ketBetaEnd;
+    size_t taskType;
+    size_t adetShift;
+    size_t bdetShift;
+    std::vector<std::vector<size_t>> SinglesFromAlpha;
+    std::vector<std::vector<size_t>> SinglesFromBeta;
+    std::vector<std::vector<size_t>> DoublesFromAlpha;
+    std::vector<std::vector<size_t>> DoublesFromBeta;
+    std::vector<std::vector<int>> SinglesAlphaCrAn;
+    std::vector<std::vector<int>> SinglesBetaCrAn;
+    std::vector<std::vector<int>> DoublesAlphaCrAn;
+    std::vector<std::vector<int>> DoublesBetaCrAn;    
+    size_t * SinglesFromAlphaLen;
+    size_t * SinglesFromBetaLen;
+    size_t * DoublesFromAlphaLen;
+    size_t * DoublesFromBetaLen;
+    std::vector<size_t*> SinglesFromAlphaSM;
+    std::vector<size_t*> SinglesFromBetaSM;
+    std::vector<size_t*> DoublesFromAlphaSM;
+    std::vector<size_t*> DoublesFromBetaSM;
+    std::vector<int*> SinglesAlphaCrAnSM;
+    std::vector<int*> SinglesBetaCrAnSM;
+    std::vector<int*> DoublesAlphaCrAnSM;
+    std::vector<int*> DoublesBetaCrAnSM;
+    std::vector<size_t> sharedSizeTMemory;
+    std::vector<int> sharedIntMemory;
+      // Step 2: Flattened arrays for GPU access
+    // Offset arrays: offset[i] = starting index in flat array for determinant i
+    std::vector<size_t> SinglesFromAlphaOffset;
+    std::vector<size_t> DoublesFromAlphaOffset;
+    std::vector<size_t> SinglesFromBetaOffset;
+    std::vector<size_t> DoublesFromBetaOffset;
 
-struct TaskHelpers {
-  size_t braAlphaStart;
-  size_t braAlphaEnd;
-  size_t ketAlphaStart;
-  size_t ketAlphaEnd;
-  size_t braBetaStart;
-  size_t braBetaEnd;
-  size_t ketBetaStart;
-  size_t ketBetaEnd;
-  size_t taskType;
-  size_t adetShift;
-  size_t bdetShift;
-  std::vector<std::vector<size_t>> SinglesFromAlpha;
-  std::vector<std::vector<size_t>> SinglesFromBeta;
-  std::vector<std::vector<size_t>> DoublesFromAlpha;
-  std::vector<std::vector<size_t>> DoublesFromBeta;
-  size_t *SinglesFromAlphaLen;
-  size_t *SinglesFromBetaLen;
-  size_t *DoublesFromAlphaLen;
-  size_t *DoublesFromBetaLen;
-  std::vector<size_t *> SinglesFromAlphaSM;
-  std::vector<size_t *> SinglesFromBetaSM;
-  std::vector<size_t *> DoublesFromAlphaSM;
-  std::vector<size_t *> DoublesFromBetaSM;
+    // Step 3: Flattened data arrays (populated once during helper construction)
+    // These replace per-mult() flattening for GPU offload
+    std::vector<size_t> SinglesFromAlpha_flat;
+    std::vector<size_t> DoublesFromAlpha_flat;
+    std::vector<size_t> SinglesFromBeta_flat;
+    std::vector<size_t> DoublesFromBeta_flat;    
 
-  // Step 2: Flattened arrays for GPU access
-  // Offset arrays: offset[i] = starting index in flat array for determinant i
-  std::vector<size_t> SinglesFromAlphaOffset;
-  std::vector<size_t> DoublesFromAlphaOffset;
-  std::vector<size_t> SinglesFromBetaOffset;
-  std::vector<size_t> DoublesFromBetaOffset;
+    std::vector<size_t> SinglesAlphaCrAn_flat;
+    std::vector<size_t> DoublesAlphaCrAn_flat;
+    std::vector<size_t> SinglesBetaCrAn_flat;
+    std::vector<size_t> DoublesBetaCrAn_flat;    
 
-  // Step 3: Flattened data arrays (populated once during helper construction)
-  // These replace per-mult() flattening for GPU offload
-  std::vector<size_t> SinglesFromAlpha_flat;
-  std::vector<size_t> DoublesFromAlpha_flat;
-  std::vector<size_t> SinglesFromBeta_flat;
-  std::vector<size_t> DoublesFromBeta_flat;
-};
+  };
 
-void GenerateSingles(const std::vector<std::vector<size_t>> &ADets,
-                     const std::vector<std::vector<size_t>> &BDets,
-                     const size_t bit_length, const size_t norb,
-                     TaskHelpers &helper) {
-  size_t braAlphaStart = helper.braAlphaStart;
-  size_t braAlphaEnd = helper.braAlphaEnd;
-  size_t ketAlphaStart = helper.ketAlphaStart;
-  size_t ketAlphaEnd = helper.ketAlphaEnd;
-  size_t braBetaStart = helper.braBetaStart;
-  size_t braBetaEnd = helper.braBetaEnd;
-  size_t ketBetaStart = helper.ketBetaStart;
-  size_t ketBetaEnd = helper.ketBetaEnd;
+  void GenerateSingles(const std::vector<std::vector<size_t>> & ADets,
+		       const std::vector<std::vector<size_t>> & BDets,
+		       const size_t bit_length,
+		       const size_t norb,
+		       TaskHelpers & helper) {
+    size_t braAlphaStart = helper.braAlphaStart;
+    size_t braAlphaEnd = helper.braAlphaEnd;
+    size_t ketAlphaStart = helper.ketAlphaStart;
+    size_t ketAlphaEnd = helper.ketAlphaEnd;
+    size_t braBetaStart = helper.braBetaStart;
+    size_t braBetaEnd = helper.braBetaEnd;
+    size_t ketBetaStart = helper.ketBetaStart;
+    size_t ketBetaEnd = helper.ketBetaEnd;
 
   std::vector<int> closed(norb);
   std::vector<int> open(norb);
   auto aDet = ADets[0];
   auto bDet = BDets[0];
 
-  helper.SinglesFromAlpha.resize(braAlphaEnd - braAlphaStart);
-  helper.SinglesFromBeta.resize(braBetaEnd - braBetaStart);
+    helper.SinglesFromAlpha.resize(braAlphaEnd-braAlphaStart);
+    helper.SinglesAlphaCrAn.resize(braAlphaEnd-braAlphaStart);
+    helper.SinglesFromBeta.resize(braBetaEnd-braBetaStart);
+    helper.SinglesBetaCrAn.resize(braBetaEnd-braBetaStart);
 
-  for (size_t ib = braAlphaStart; ib < braAlphaEnd; ib++) {
-    int nclosed = getOpenClosed(ADets[ib], bit_length, norb, open, closed);
-    for (size_t j = 0; j < nclosed; j++) {
-      for (size_t k = 0; k < norb - nclosed; k++) {
-        aDet = ADets[ib];
-        setocc(aDet, bit_length, closed[j], false);
-        setocc(aDet, bit_length, open[k], true);
-        auto itk = std::find(ADets.begin() + ketAlphaStart,
-                             ADets.begin() + ketAlphaEnd, aDet);
-        if (itk != ADets.begin() + ketAlphaEnd) {
-          auto ik = std::distance(ADets.begin(), itk);
-          helper.SinglesFromAlpha[ib - braAlphaStart].push_back(
-              static_cast<size_t>(ik));
-        }
+    for(size_t ib=braAlphaStart; ib < braAlphaEnd; ib++) {
+      int nclosed = getOpenClosed(ADets[ib],bit_length,norb,open,closed);
+      for(size_t j=0; j < nclosed; j++) {
+	for(size_t k=0; k < norb-nclosed; k++) {
+	  aDet = ADets[ib];
+	  setocc(aDet,bit_length,closed[j],false);
+	  setocc(aDet,bit_length,open[k],true);
+	  auto itk = std::find(ADets.begin()+ketAlphaStart,
+			       ADets.begin()+ketAlphaEnd,
+			       aDet);
+	  if( itk != ADets.begin()+ketAlphaEnd ) {
+	    auto ik = std::distance(ADets.begin(),itk);
+	    helper.SinglesFromAlpha[ib-braAlphaStart].push_back(static_cast<size_t>(ik));
+	    helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*open[k]);
+	    helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*closed[j]);
+	  }
+	}
+      }
+    }
+
+    for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+      int nclosed = getOpenClosed(BDets[ib],bit_length,norb,open,closed);
+      for(size_t j=0; j < nclosed; j++) {
+	for(size_t k=0; k < norb-nclosed; k++) {
+	  bDet = BDets[ib];
+	  setocc(bDet,bit_length,closed[j],false);
+	  setocc(bDet,bit_length,open[k],true);
+	  auto itk = std::find(BDets.begin()+ketBetaStart,
+			       BDets.begin()+ketBetaEnd,
+			       bDet);
+	  if( itk != BDets.begin()+ketBetaEnd ) {
+	    auto ik = std::distance(BDets.begin(),itk);
+	    helper.SinglesFromBeta[ib-braBetaStart].push_back(static_cast<size_t>(ik));
+	    helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*open[k]+1);
+	    helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*closed[j]+1);
+	  }
+	}
       }
     }
   }
 
-  for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-    int nclosed = getOpenClosed(BDets[ib], bit_length, norb, open, closed);
-    for (size_t j = 0; j < nclosed; j++) {
-      for (size_t k = 0; k < norb - nclosed; k++) {
-        bDet = BDets[ib];
-        setocc(bDet, bit_length, closed[j], false);
-        setocc(bDet, bit_length, open[k], true);
-        auto itk = std::find(BDets.begin() + ketBetaStart,
-                             BDets.begin() + ketBetaEnd, bDet);
-        if (itk != BDets.begin() + ketBetaEnd) {
-          auto ik = std::distance(BDets.begin(), itk);
-          helper.SinglesFromBeta[ib - braBetaStart].push_back(
-              static_cast<size_t>(ik));
-        }
-      }
-    }
-  }
-}
-
-void GenerateDoubles(const std::vector<std::vector<size_t>> &ADets,
-                     const std::vector<std::vector<size_t>> &BDets,
-                     const size_t bit_length, const size_t norb,
-                     TaskHelpers &helper) {
-  size_t braAlphaStart = helper.braAlphaStart;
-  size_t braAlphaEnd = helper.braAlphaEnd;
-  size_t ketAlphaStart = helper.ketAlphaStart;
-  size_t ketAlphaEnd = helper.ketAlphaEnd;
-  size_t braBetaStart = helper.braBetaStart;
-  size_t braBetaEnd = helper.braBetaEnd;
-  size_t ketBetaStart = helper.ketBetaStart;
-  size_t ketBetaEnd = helper.ketBetaEnd;
+  void GenerateDoubles(const std::vector<std::vector<size_t>> & ADets,
+		       const std::vector<std::vector<size_t>> & BDets,
+		       const size_t bit_length,
+		       const size_t norb,
+		       TaskHelpers & helper) {
+    size_t braAlphaStart = helper.braAlphaStart;
+    size_t braAlphaEnd = helper.braAlphaEnd;
+    size_t ketAlphaStart = helper.ketAlphaStart;
+    size_t ketAlphaEnd = helper.ketAlphaEnd;
+    size_t braBetaStart = helper.braBetaStart;
+    size_t braBetaEnd = helper.braBetaEnd;
+    size_t ketBetaStart = helper.ketBetaStart;
+    size_t ketBetaEnd = helper.ketBetaEnd;
 
   helper.DoublesFromAlpha.resize(braAlphaEnd - braAlphaStart);
   helper.DoublesFromBeta.resize(braBetaEnd - braBetaStart);
@@ -158,77 +182,103 @@ void GenerateExcitation(const std::vector<std::vector<size_t>> &adets,
   size_t ketBetaStart = helper.ketBetaStart;
   size_t ketBetaEnd = helper.ketBetaEnd;
 
-  size_t braAlphaSize = braAlphaEnd - braAlphaStart;
-  size_t braBetaSize = braBetaEnd - braBetaStart;
-  helper.SinglesFromAlpha.resize(braAlphaSize);
-  helper.DoublesFromAlpha.resize(braAlphaSize);
-  helper.SinglesFromBeta.resize(braBetaSize);
-  helper.DoublesFromBeta.resize(braBetaSize);
+    size_t braAlphaSize = braAlphaEnd-braAlphaStart;
+    size_t braBetaSize  = braBetaEnd-braBetaStart;
+    helper.SinglesFromAlpha.resize(braAlphaSize);
+    helper.SinglesAlphaCrAn.resize(braAlphaSize);
+    helper.DoublesFromAlpha.resize(braAlphaSize);
+    helper.DoublesAlphaCrAn.resize(braAlphaSize);
+    helper.SinglesFromBeta.resize(braBetaSize);
+    helper.SinglesBetaCrAn.resize(braBetaSize);
+    helper.DoublesFromBeta.resize(braBetaSize);
+    helper.DoublesBetaCrAn.resize(braBetaSize);
 
-  // count single and double excitations to save memory
-#pragma omp parallel for
-  for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
-    size_t scount = 0;
-    size_t dcount = 0;
-    for (size_t ja = ketAlphaStart; ja < ketAlphaEnd; ja++) {
-      int d = difference(adets[ia], adets[ja], bit_length, norb);
-      if (d == 2)
-        scount++;
-      else if (d == 4)
-        dcount++;
+    // count single and double excitations to save memory
+
+    #pragma omp parallel for
+    for(size_t ia=braAlphaStart; ia < braAlphaEnd; ia++) {
+      size_t scount = 0; size_t dcount = 0;
+      for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+        int d = difference(adets[ia],adets[ja],bit_length,norb);
+        if ( d == 2 ) scount++;
+        else if ( d == 4 ) dcount++;
+      }
+
+      std::vector<int> cr(2);
+      std::vector<int> an(2);
+      helper.SinglesFromAlpha[ia-braAlphaStart].reserve(scount);
+      helper.SinglesAlphaCrAn[ia-braAlphaStart].reserve(2*scount);
+      helper.DoublesFromAlpha[ia-braAlphaStart].reserve(dcount);
+      helper.DoublesAlphaCrAn[ia-braAlphaStart].reserve(4*dcount);
+
+      for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+        int d = difference(adets[ia],adets[ja],bit_length,norb);
+        if ( d == 2 ) {
+          helper.SinglesFromAlpha[ia-braAlphaStart].push_back(ja);
+	  OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
+	  helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
+	  helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
+        } else if ( d == 4 ) {
+          helper.DoublesFromAlpha[ia-braAlphaStart].push_back(ja);
+	  OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
+	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
+	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[1]);
+	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
+	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[1]);
+        }
+      }
     }
 
-    helper.SinglesFromAlpha[ia - braAlphaStart].reserve(scount);
-    helper.DoublesFromAlpha[ia - braAlphaStart].reserve(dcount);
+#pragma omp parallel for
+    for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+      size_t scount = 0; size_t dcount = 0;
+      for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+        if ( d == 2 ) scount++;
+        else if ( d == 4 ) dcount++;
+      }
 
-    for (size_t ja = ketAlphaStart; ja < ketAlphaEnd; ja++) {
-      int d = difference(adets[ia], adets[ja], bit_length, norb);
-      if (d == 2) {
-        helper.SinglesFromAlpha[ia - braAlphaStart].push_back(ja);
-      } else if (d == 4) {
-        helper.DoublesFromAlpha[ia - braAlphaStart].push_back(ja);
+      helper.SinglesFromBeta[ib-braBetaStart].reserve(scount);
+      helper.SinglesBetaCrAn[ib-braBetaStart].reserve(2*scount);
+      helper.DoublesFromBeta[ib-braBetaStart].reserve(dcount);
+      helper.DoublesBetaCrAn[ib-braBetaStart].reserve(4*dcount);
+      std::vector<int> cr(2);
+      std::vector<int> an(2);
+
+      for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+        if ( d == 2 ) {
+          helper.SinglesFromBeta[ib-braBetaStart].push_back(jb);
+	  OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
+	  helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
+	  helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
+        } else if ( d == 4 ) {
+          helper.DoublesFromBeta[ib-braBetaStart].push_back(jb);
+	  OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
+	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
+	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[1]+1);
+	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
+	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[1]+1);
+        }
       }
     }
   }
 
-#pragma omp parallel for
-  for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-    size_t scount = 0;
-    size_t dcount = 0;
-    for (size_t jb = ketBetaStart; jb < ketBetaEnd; jb++) {
-      int d = difference(bdets[ib], bdets[jb], bit_length, norb);
-      if (d == 2)
-        scount++;
-      else if (d == 4)
-        dcount++;
-    }
+  void TaskCommunicator(MPI_Comm comm,
+			int h_comm_size,
+			int adet_comm_size,
+			int bdet_comm_size,
+			int task_comm_size,
+			MPI_Comm & h_comm,
+			MPI_Comm & b_comm,
+			MPI_Comm & t_comm) {
 
-    helper.SinglesFromBeta[ib - braBetaStart].reserve(scount);
-    helper.DoublesFromBeta[ib - braBetaStart].reserve(dcount);
+    int mpi_size; MPI_Comm_size(comm,&mpi_size);
+    int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
 
-    for (size_t jb = ketBetaStart; jb < ketBetaEnd; jb++) {
-      int d = difference(bdets[ib], bdets[jb], bit_length, norb);
-      if (d == 2) {
-        helper.SinglesFromBeta[ib - braBetaStart].push_back(jb);
-      } else if (d == 4) {
-        helper.DoublesFromBeta[ib - braBetaStart].push_back(jb);
-      }
-    }
-  }
-}
-
-void TaskCommunicator(MPI_Comm comm, int h_comm_size, int adet_comm_size,
-                      int bdet_comm_size, int task_comm_size, MPI_Comm &h_comm,
-                      MPI_Comm &b_comm, MPI_Comm &t_comm) {
-
-  int mpi_size;
-  MPI_Comm_size(comm, &mpi_size);
-  int mpi_rank;
-  MPI_Comm_rank(comm, &mpi_rank);
-
-  int basis_comm_size = adet_comm_size * bdet_comm_size;
-  int basis_area_size = basis_comm_size * task_comm_size;
-  int mpi_size_request = basis_area_size * h_comm_size;
+    int basis_comm_size = adet_comm_size*bdet_comm_size;
+    int basis_area_size = basis_comm_size*task_comm_size;
+    int mpi_size_request = basis_area_size*h_comm_size;
 
   if (mpi_size_request != mpi_size) {
     throw std::invalid_argument(
@@ -246,11 +296,12 @@ void TaskCommunicator(MPI_Comm comm, int h_comm_size, int adet_comm_size,
   int mpi_rank_area;
   MPI_Comm_rank(basis_area_comm, &mpi_rank_area);
 
-  int t_comm_color = mpi_rank_area % basis_comm_size;
-  int b_comm_color = mpi_rank_area / basis_comm_size;
-  MPI_Comm_split(basis_area_comm, t_comm_color, mpi_rank, &t_comm);
-  MPI_Comm_split(basis_area_comm, b_comm_color, mpi_rank, &b_comm);
-}
+    int t_comm_color = mpi_rank_area % basis_comm_size;
+    int b_comm_color = mpi_rank_area / basis_comm_size;
+    MPI_Comm_split(basis_area_comm,t_comm_color,mpi_rank,&t_comm);
+    MPI_Comm_split(basis_area_comm,b_comm_color,mpi_rank,&b_comm);
+
+  }
 
 size_t SizeOfVector(TaskHelpers &helper) {
   size_t count = 0;
@@ -302,7 +353,7 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
   return count;
 }
 
-// clang-format off
+ // clang-format off
 //
 // for adet_size = 4, bdet_size = 4, r_comm_size = 1
 //
@@ -366,12 +417,16 @@ size_t CapacityOfVector(std::vector<TaskHelpers> &helper) {
 // task 7  (3,3) (3,1) (3,1) (3,2) (0,3) (0,0) (0,1) (0,2) (1,3) (1,0) (1,1) (1,2) (2,3) (2,0) (2,1) (2,2)
 // clang-format on
 
-void FreeVectors(TaskHelpers &helper) {
-  helper.SinglesFromAlpha = std::vector<std::vector<size_t>>();
-  helper.DoublesFromAlpha = std::vector<std::vector<size_t>>();
-  helper.SinglesFromBeta = std::vector<std::vector<size_t>>();
-  helper.DoublesFromBeta = std::vector<std::vector<size_t>>();
-}
+  void FreeVectors(TaskHelpers & helper) {
+    helper.SinglesFromAlpha = std::vector<std::vector<size_t>>();
+    helper.DoublesFromAlpha = std::vector<std::vector<size_t>>();
+    helper.SinglesFromBeta = std::vector<std::vector<size_t>>();
+    helper.DoublesFromBeta = std::vector<std::vector<size_t>>();
+    helper.SinglesAlphaCrAn = std::vector<std::vector<int>>();
+    helper.DoublesAlphaCrAn = std::vector<std::vector<int>>();
+    helper.SinglesBetaCrAn = std::vector<std::vector<int>>();
+    helper.DoublesBetaCrAn = std::vector<std::vector<int>>();    
+  }
 
 void FreeHelpers(TaskHelpers &helper) {
   free(helper.SinglesFromAlphaLen);
@@ -386,70 +441,111 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
   }
 }
 
-void MakeSmartHelper(TaskHelpers &helper, std::vector<size_t> &sharedMemory) {
+ void MakeSmartHelper(TaskHelpers & helper) {
 
-  size_t nAlpha = helper.SinglesFromAlpha.size();
-  size_t nBeta = helper.SinglesFromBeta.size();
+    size_t nAlpha = helper.SinglesFromAlpha.size();
+    size_t nBeta = helper.SinglesFromBeta.size();
 
-  helper.SinglesFromAlphaLen = (size_t *)malloc(nAlpha * sizeof(size_t));
-  helper.DoublesFromAlphaLen = (size_t *)malloc(nAlpha * sizeof(size_t));
-  helper.SinglesFromBetaLen = (size_t *)malloc(nBeta * sizeof(size_t));
-  helper.DoublesFromBetaLen = (size_t *)malloc(nBeta * sizeof(size_t));
+    helper.SinglesFromAlphaLen = (size_t*)malloc(nAlpha*sizeof(size_t));
+    helper.DoublesFromAlphaLen = (size_t*)malloc(nAlpha*sizeof(size_t));
+    helper.SinglesFromBetaLen  = (size_t*)malloc(nBeta*sizeof(size_t));
+    helper.DoublesFromBetaLen  = (size_t*)malloc(nBeta*sizeof(size_t));
 
-  for (size_t i = 0; i < nAlpha; ++i) {
-    helper.SinglesFromAlphaLen[i] = helper.SinglesFromAlpha[i].size();
-    helper.DoublesFromAlphaLen[i] = helper.DoublesFromAlpha[i].size();
-  }
-  for (size_t i = 0; i < nBeta; ++i) {
-    helper.SinglesFromBetaLen[i] = helper.SinglesFromBeta[i].size();
-    helper.DoublesFromBetaLen[i] = helper.DoublesFromBeta[i].size();
-  }
+    for(size_t i=0; i < nAlpha; ++i) {
+      helper.SinglesFromAlphaLen[i] = helper.SinglesFromAlpha[i].size();
+      helper.DoublesFromAlphaLen[i] = helper.DoublesFromAlpha[i].size();
+    }
+    for(size_t i=0; i < nBeta; ++i) {
+      helper.SinglesFromBetaLen[i] = helper.SinglesFromBeta[i].size();
+      helper.DoublesFromBetaLen[i] = helper.DoublesFromBeta[i].size();
+    }
 
-  helper.SinglesFromAlphaSM.resize(nAlpha);
-  helper.DoublesFromAlphaSM.resize(nAlpha);
-  helper.SinglesFromBetaSM.resize(nBeta);
-  helper.DoublesFromBetaSM.resize(nBeta);
+    helper.SinglesFromAlphaSM.resize(nAlpha);
+    helper.SinglesAlphaCrAnSM.resize(nAlpha);
+    helper.DoublesFromAlphaSM.resize(nAlpha);
+    helper.DoublesAlphaCrAnSM.resize(nAlpha);
+    helper.SinglesFromBetaSM.resize(nBeta);
+    helper.SinglesBetaCrAnSM.resize(nBeta);
+    helper.DoublesFromBetaSM.resize(nBeta);
+    helper.DoublesBetaCrAnSM.resize(nBeta);
 
-  size_t total_size = 0;
-  for (size_t i = 0; i < nAlpha; i++) {
-    total_size += helper.SinglesFromAlphaLen[i] + helper.DoublesFromAlphaLen[i];
-  }
-  for (size_t i = 0; i < nBeta; i++) {
-    total_size += helper.SinglesFromBetaLen[i] + helper.DoublesFromBetaLen[i];
-  }
-  sharedMemory.resize(total_size);
-  size_t *begin = sharedMemory.data();
-  size_t counter = 0;
+    size_t total_size = 0;
+    size_t total_int_size = 0;
+    for (size_t i=0; i < nAlpha; i++) {
+      total_size += helper.SinglesFromAlphaLen[i]
+	+ helper.DoublesFromAlphaLen[i];
+      total_int_size += 2*helper.SinglesFromAlphaLen[i]
+	+ 4*helper.DoublesFromAlphaLen[i];
+    }
+    for(size_t i=0; i < nBeta; i++) {
+      total_size += helper.SinglesFromBetaLen[i]
+	+ helper.DoublesFromBetaLen[i];
+      total_int_size += 2*helper.SinglesFromBetaLen[i]
+	+ 4*helper.DoublesFromBetaLen[i];
+    }
+    helper.sharedSizeTMemory.resize(total_size);
+    helper.sharedIntMemory.resize(total_int_size);
+    size_t * begin = helper.sharedSizeTMemory.data();
+    size_t counter = 0;
 
-  for (size_t i = 0; i < nAlpha; i++) {
-    helper.SinglesFromAlphaSM[i] = begin + counter;
-    counter += helper.SinglesFromAlphaLen[i];
-    helper.DoublesFromAlphaSM[i] = begin + counter;
-    counter += helper.DoublesFromAlphaLen[i];
-  }
+    int * int_begin = helper.sharedIntMemory.data();
+    size_t int_counter = 0;
 
-  for (size_t i = 0; i < nBeta; i++) {
-    helper.SinglesFromBetaSM[i] = begin + counter;
-    counter += helper.SinglesFromBetaLen[i];
-    helper.DoublesFromBetaSM[i] = begin + counter;
-    counter += helper.DoublesFromBetaLen[i];
-  }
+    for(size_t i=0; i < nAlpha; i++) {
+      helper.SinglesFromAlphaSM[i] = begin + counter;
+      counter += helper.SinglesFromAlphaLen[i];
+      helper.DoublesFromAlphaSM[i] = begin + counter;
+      counter += helper.DoublesFromAlphaLen[i];
+    }
 
-  for (size_t i = 0; i < nAlpha; i++) {
-    std::memcpy(helper.SinglesFromAlphaSM[i], helper.SinglesFromAlpha[i].data(),
-                helper.SinglesFromAlphaLen[i] * sizeof(size_t));
-    std::memcpy(helper.DoublesFromAlphaSM[i], helper.DoublesFromAlpha[i].data(),
-                helper.DoublesFromAlphaLen[i] * sizeof(size_t));
-  }
+    for(size_t i=0; i < nBeta; i++) {
+      helper.SinglesFromBetaSM[i] = begin + counter;
+      counter += helper.SinglesFromBetaLen[i];
+      helper.DoublesFromBetaSM[i] = begin + counter;
+      counter += helper.DoublesFromBetaLen[i];
+    }
 
-  for (size_t i = 0; i < nBeta; i++) {
-    std::memcpy(helper.SinglesFromBetaSM[i], helper.SinglesFromBeta[i].data(),
-                helper.SinglesFromBetaLen[i] * sizeof(size_t));
-    std::memcpy(helper.DoublesFromBetaSM[i], helper.DoublesFromBeta[i].data(),
-                helper.DoublesFromBetaLen[i] * sizeof(size_t));
-  }
+    for(size_t i=0; i < nAlpha; i++) {
+      helper.SinglesAlphaCrAnSM[i] = int_begin + int_counter;
+      int_counter += 2 * helper.SinglesFromAlphaLen[i];
+      helper.DoublesAlphaCrAnSM[i] = int_begin + int_counter;
+      int_counter += 4 * helper.DoublesFromAlphaLen[i];
+    }
 
-  // Step 2: Compute offset arrays for GPU-friendly access
+    for(size_t i=0; i < nBeta; i++) {
+      helper.SinglesBetaCrAnSM[i] = int_begin + int_counter;
+      int_counter += 2 * helper.SinglesFromBetaLen[i];
+      helper.DoublesBetaCrAnSM[i] = int_begin + int_counter;
+      int_counter += 4 * helper.DoublesFromBetaLen[i];
+    }
+    
+    for(size_t i=0; i < nAlpha; i++) {
+      std::memcpy(helper.SinglesFromAlphaSM[i],
+		  helper.SinglesFromAlpha[i].data(),
+		  helper.SinglesFromAlphaLen[i]*sizeof(size_t));
+      std::memcpy(helper.DoublesFromAlphaSM[i],
+		  helper.DoublesFromAlpha[i].data(),
+		  helper.DoublesFromAlphaLen[i]*sizeof(size_t));
+    }
+    
+    for(size_t i=0; i < nBeta; i++) {
+      std::memcpy(helper.SinglesFromBetaSM[i],
+		  helper.SinglesFromBeta[i].data(),
+		  helper.SinglesFromBetaLen[i]*sizeof(size_t));
+      std::memcpy(helper.DoublesFromBetaSM[i],
+		  helper.DoublesFromBeta[i].data(),
+		  helper.DoublesFromBetaLen[i]*sizeof(size_t));
+    }
+    for(size_t i=0; i < nBeta; i++) {
+      std::memcpy(helper.SinglesBetaCrAnSM[i],
+		  helper.SinglesBetaCrAn[i].data(),
+		  2*helper.SinglesFromBetaLen[i]*sizeof(int));
+      std::memcpy(helper.DoublesBetaCrAnSM[i],
+		  helper.DoublesBetaCrAn[i].data(),
+		  4*helper.DoublesFromBetaLen[i]*sizeof(int));
+    }
+
+ // Step 2: Compute offset arrays for GPU-friendly access
   // Offset[i] = cumulative sum of lengths up to i
   helper.SinglesFromAlphaOffset.resize(nAlpha + 1);
   helper.DoublesFromAlphaOffset.resize(nAlpha + 1);
@@ -483,17 +579,25 @@ void MakeSmartHelper(TaskHelpers &helper, std::vector<size_t> &sharedMemory) {
 
   helper.SinglesFromAlpha_flat.resize(singles_alpha_total);
   helper.DoublesFromAlpha_flat.resize(doubles_alpha_total);
+  helper.SinglesAlphaCrAn_flat.resize(singles_alpha_total);
+  helper.DoublesAlphaCrAn_flat.resize(doubles_alpha_total);
   helper.SinglesFromBeta_flat.resize(singles_beta_total);
   helper.DoublesFromBeta_flat.resize(doubles_beta_total);
+  helper.SinglesBetaCrAn_flat.resize(singles_beta_total);
+  helper.DoublesBetaCrAn_flat.resize(doubles_beta_total);
 
   for (size_t i = 0; i < nAlpha; i++) {
     for (size_t j = 0; j < helper.SinglesFromAlphaLen[i]; j++) {
       helper.SinglesFromAlpha_flat[helper.SinglesFromAlphaOffset[i] + j] =
           helper.SinglesFromAlphaSM[i][j];
+      helper.SinglesAlphaCrAn_flat[helper.SinglesFromAlphaOffseti] + j] =
+          helper.SinglesAlphaCrAnSM[i][j];
     }
     for (size_t j = 0; j < helper.DoublesFromAlphaLen[i]; j++) {
       helper.DoublesFromAlpha_flat[helper.DoublesFromAlphaOffset[i] + j] =
           helper.DoublesFromAlphaSM[i][j];
+      helper.DoublesAlphaCrAn_flat[helper.DoublesFromAlphaOffset[i] + j] =
+          helper.DoublesAlphaCrAnSM[i][j];
     }
   }
 
@@ -501,40 +605,41 @@ void MakeSmartHelper(TaskHelpers &helper, std::vector<size_t> &sharedMemory) {
     for (size_t j = 0; j < helper.SinglesFromBetaLen[i]; j++) {
       helper.SinglesFromBeta_flat[helper.SinglesFromBetaOffset[i] + j] =
           helper.SinglesFromBetaSM[i][j];
+      helper.SinglesBetaCrAn_flat[helper.SinglesFromBetaOffset[i] + j] =
+          helper.SinglesBetaCrAnSM[i][j];
     }
     for (size_t j = 0; j < helper.DoublesFromBetaLen[i]; j++) {
       helper.DoublesFromBeta_flat[helper.DoublesFromBetaOffset[i] + j] =
           helper.DoublesFromBetaSM[i][j];
+      helper.DoublesBetaCrAn_flat[helper.DoublesFromBetaOffset[i] + j] =
+          helper.DoublesBetaCrAnSM[i][j];
     }
   }
 
-  FreeVectors(helper);
-}
-
-void MakeSmartHelper(std::vector<TaskHelpers> &helper,
-                     std::vector<std::vector<size_t>> &sharedMemory) {
-  sharedMemory.resize(helper.size());
-  for (int task = 0; task < helper.size(); task++) {
-    MakeSmartHelper(helper[task], sharedMemory[task]);
+    FreeVectors(helper);
   }
-}
 
-void MakeHelpers(const std::vector<std::vector<size_t>> &adets,
-                 const std::vector<std::vector<size_t>> &bdets,
-                 size_t bit_length, size_t norb,
-                 std::vector<TaskHelpers> &helper,
-                 std::vector<std::vector<size_t>> &sharedMemory,
-                 MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm,
-                 size_t adet_comm_size, size_t bdet_comm_size) {
+  void MakeSmartHelper(std::vector<TaskHelpers> & helper) {
+    for(int task=0; task < helper.size(); task++) {
+      MakeSmartHelper(helper[task]);
+    }
+  }
 
-  int mpi_size_b;
-  MPI_Comm_size(b_comm, &mpi_size_b);
-  int mpi_rank_b;
-  MPI_Comm_rank(b_comm, &mpi_rank_b);
-  int mpi_size_t;
-  MPI_Comm_size(t_comm, &mpi_size_t);
-  int mpi_rank_t;
-  MPI_Comm_rank(t_comm, &mpi_rank_t);
+  void MakeHelpers(const std::vector<std::vector<size_t>> & adets,
+		   const std::vector<std::vector<size_t>> & bdets,
+		   size_t bit_length,
+		   size_t norb,
+		   std::vector<TaskHelpers> & helper,
+		   MPI_Comm h_comm,
+		   MPI_Comm b_comm,
+		   MPI_Comm t_comm,
+		   size_t adet_comm_size,
+		   size_t bdet_comm_size) {
+
+    int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
+    int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
+    int mpi_size_t; MPI_Comm_size(t_comm,&mpi_size_t);
+    int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
 
   size_t total_task =
       adet_comm_size * bdet_comm_size + adet_comm_size + bdet_comm_size;
@@ -589,20 +694,19 @@ void MakeHelpers(const std::vector<std::vector<size_t>> &adets,
     }
   }
 
-  size_t task_start = 0;
-  size_t task_end = type_schedule.size();
-  get_mpi_range(mpi_size_t, mpi_rank_t, task_start, task_end);
-  size_t task_size = task_end - task_start;
-  helper.resize(task_size);
-  sharedMemory.resize(task_size);
+    size_t task_start = 0;
+    size_t task_end = type_schedule.size();
+    get_mpi_range(mpi_size_t,mpi_rank_t,task_start,task_end);
+    size_t task_size = task_end-task_start;
+    helper.resize(task_size);
 
   int bra_rank = mpi_rank_b;
   int bra_adet_rank = bra_rank / bdet_comm_size;
   int bra_bdet_rank = bra_rank % bdet_comm_size;
 
-  double total_smart_memory_size = 0.0;
+    double total_smart_memory_size = 0.0;
 
-  for (size_t task = task_start; task < task_end; task++) {
+    for(size_t task=task_start; task < task_end; task++) {
 
     int ket_adet_rank = (bra_adet_rank + adet_schedule[task]) % adet_comm_size;
     int ket_bdet_rank = (bra_bdet_rank + bdet_schedule[task]) % bdet_comm_size;
@@ -645,29 +749,27 @@ void MakeHelpers(const std::vector<std::vector<size_t>> &adets,
               << " (GiB) before the serialization " << std::endl;
 #endif
 
-    MakeSmartHelper(helper[task - task_start], sharedMemory[task - task_start]);
-    FreeVectors(helper[task - task_start]);
+      MakeSmartHelper(helper[task-task_start]);
+      // FreeVectors(helper[task-task_start]);
 
 #ifdef SBD_DEBUG_HELPER
-    size_t smart_memory_count =
-        sharedMemory[task - task_start].size() * sizeof(size_t);
-    double smart_memory_size =
-        1.0 * smart_memory_count / (1024.0 * 1024.0 * 1024.0);
-    helper_vector_capacity_count = CapacityOfVector(helper);
-    helper_vector_size_count = SizeOfVector(helper);
-    helper_vector_capacity =
-        1.0 * helper_vector_capacity_count / (1024.0 * 1024.0 * 1024.0);
-    helper_vector_size =
-        1.0 * helper_vector_size_count / (1024.0 * 1024.0 * 1024.0);
-    std::cout << " smart memory size of task " << task
-              << " helper = " << smart_memory_size
-              << " (GiB), capacity of vector = " << helper_vector_capacity
-              << " (GiB), size of vector = " << helper_vector_size
-              << " (GiB) after the serialization " << std::endl;
+      size_t smart_memory_count = helper.sharedSizeTMemory[task-task_start].size() * sizeof(size_t)
+	+ helper.sharedIntMemory[task-task_start].size() * sizeof(int);
+      double smart_memory_size = 1.0 * smart_memory_count / (1024.0*1024.0*1024.0);
+      helper_vector_capacity_count = CapacityOfVector(helper);
+      helper_vector_size_count = SizeOfVector(helper);
+      helper_vector_capacity = 1.0 * helper_vector_capacity_count / (1024.0*1024.0*1024.0);
+      helper_vector_size = 1.0 * helper_vector_size_count / (1024.0*1024.0*1024.0);
+      std::cout << " smart memory size of task " << task << " helper = "
+		<< smart_memory_size << " (GiB), capacity of vector = "
+		<< helper_vector_capacity
+		<< " (GiB), size of vector = " << helper_vector_size
+		<< " (GiB) after the serialization " << std::endl;
 #endif
 
-  } // end helpers for different tasks
-}
+    } // end helpers for different tasks
+
+  }
 
 std::vector<size_t> TaskCostSize(const std::vector<TaskHelpers> &helper,
                                  MPI_Comm h_comm, MPI_Comm b_comm,
@@ -679,17 +781,15 @@ std::vector<size_t> TaskCostSize(const std::vector<TaskHelpers> &helper,
   MPI_Comm_rank(h_comm, &mpi_rank_h);
   size_t num_threads = 1;
 #pragma omp parallel
-  {
-    num_threads = omp_get_num_threads();
-  }
+    {
+      num_threads = omp_get_num_threads();
+    }
 
-  size_t chunk_size = 0;
-  if (helper.size() != 0) {
-    chunk_size =
-        (helper[0].braAlphaEnd - helper[0].braAlphaStart) / num_threads;
-  }
-  std::vector<std::vector<size_t>> len(helper.size(),
-                                       std::vector<size_t>(num_threads));
+    size_t chunk_size = 0;
+    if( helper.size() != 0 ) {
+      chunk_size = (helper[0].braAlphaEnd-helper[0].braAlphaStart) / num_threads;
+    }
+    std::vector<std::vector<size_t>> len(helper.size(),std::vector<size_t>(num_threads));
 
   size_t braAlphaSize = 0;
   size_t braBetaSize = 0;
@@ -699,86 +799,75 @@ std::vector<size_t> TaskCostSize(const std::vector<TaskHelpers> &helper,
   }
 
 #pragma omp parallel
-  {
-    size_t thread_id = omp_get_thread_num();
-    size_t ia_start = 0;
-    size_t ia_end = 0;
-    if (helper.size() != 0) {
-      ia_start = thread_id * chunk_size + helper[0].braAlphaStart;
-      ia_end = (thread_id + 1) * chunk_size + helper[0].braAlphaStart;
-      if (thread_id == num_threads - 1) {
-        ia_end = helper[0].braAlphaEnd;
+    {
+      size_t thread_id = omp_get_thread_num();
+      size_t ia_start = 0;
+      size_t ia_end   = 0;
+      if( helper.size() != 0 ) {
+	ia_start = thread_id * chunk_size     + helper[0].braAlphaStart;
+	ia_end   = (thread_id+1) * chunk_size + helper[0].braAlphaStart;
+	if( thread_id == num_threads - 1 ) {
+	  ia_end = helper[0].braAlphaEnd;
+	}
+      }
+      for(size_t task = 0; task < helper.size(); task++) {
+	for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
+	    size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
+	                    +ib-helper[task].braBetaStart;
+	    if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
+	    if ( helper[task].taskType == 0 ) {
+	      // two-particle excitation composed of single alpha and single beta
+	      len[task][thread_id] += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart]
+		                    * helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
+	    }
+	    else if ( helper[task].taskType == 1 ) {
+	      // single alpha excitation
+	      len[task][thread_id] += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart];
+	      // double alpha excitation
+	      len[task][thread_id] += helper[task].DoublesFromAlphaLen[ia-helper[task].braAlphaStart];
+	    }
+	    else if( helper[task].taskType == 2 ) {
+	      // single beta excitation
+	      len[task][thread_id] += helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
+	      // double beta excitation
+	      len[task][thread_id] += helper[task].DoublesFromBetaLen[ib-helper[task].braBetaStart];
+	    }
+	  } // end ib loop
+	} // end ia loop
+      } // end tasktype loop
+    } // end omp parallel for
+
+    std::vector<size_t> cost(helper.size());
+    for(size_t task=0; task < helper.size(); task++) {
+      cost[task] = 0.0;
+      for(size_t thread=0; thread < num_threads; thread++) {
+	cost[task] += len[task][thread];
       }
     }
-    for (size_t task = 0; task < helper.size(); task++) {
-      for (size_t ia = ia_start; ia < ia_end; ia++) {
-        for (size_t ib = helper[task].braBetaStart;
-             ib < helper[task].braBetaEnd; ib++) {
-          size_t braIdx = (ia - helper[task].braAlphaStart) * braBetaSize + ib -
-                          helper[task].braBetaStart;
-          if ((braIdx % mpi_size_h) != mpi_rank_h)
-            continue;
-          if (helper[task].taskType == 0) {
-            // two-particle excitation composed of single alpha and single beta
-            len[task][thread_id] +=
-                helper[task]
-                    .SinglesFromAlphaLen[ia - helper[task].braAlphaStart] *
-                helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart];
-          } else if (helper[task].taskType == 1) {
-            // single alpha excitation
-            len[task][thread_id] +=
-                helper[task]
-                    .SinglesFromAlphaLen[ia - helper[task].braAlphaStart];
-            // double alpha excitation
-            len[task][thread_id] +=
-                helper[task]
-                    .DoublesFromAlphaLen[ia - helper[task].braAlphaStart];
-          } else if (helper[task].taskType == 2) {
-            // single beta excitation
-            len[task][thread_id] +=
-                helper[task].SinglesFromBetaLen[ib - helper[task].braBetaStart];
-            // double beta excitation
-            len[task][thread_id] +=
-                helper[task].DoublesFromBetaLen[ib - helper[task].braBetaStart];
-          }
-        } // end ib loop
-      } // end ia loop
-    } // end tasktype loop
-  } // end omp parallel for
-
-  std::vector<size_t> cost(helper.size());
-  for (size_t task = 0; task < helper.size(); task++) {
-    cost[task] = 0.0;
-    for (size_t thread = 0; thread < num_threads; thread++) {
-      cost[task] += len[task][thread];
-    }
+    return cost;
   }
-  return cost;
-}
 
-void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
-                   const std::vector<std::vector<size_t>> &bdet,
-                   size_t bit_length, size_t norb,
-                   std::vector<TaskHelpers> &helper,
-                   std::vector<std::vector<size_t>> &sharedMemory,
-                   MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm,
-                   size_t adet_comm_size, size_t bdet_comm_size) {
+  void RemakeHelpers(const std::vector<std::vector<size_t>> & adet,
+		     const std::vector<std::vector<size_t>> & bdet,
+		     size_t bit_length,
+		     size_t norb,
+		     std::vector<TaskHelpers> & helper,
+		     MPI_Comm h_comm,
+		     MPI_Comm b_comm,
+		     MPI_Comm t_comm,
+		     size_t adet_comm_size,
+		     size_t bdet_comm_size) {
 
-  int mpi_size_h;
-  MPI_Comm_size(h_comm, &mpi_size_h);
-  int mpi_rank_h;
-  MPI_Comm_rank(h_comm, &mpi_rank_h);
-  int mpi_size_b;
-  MPI_Comm_size(b_comm, &mpi_size_b);
-  int mpi_rank_b;
-  MPI_Comm_rank(b_comm, &mpi_rank_b);
-  int mpi_size_t;
-  MPI_Comm_size(t_comm, &mpi_size_t);
-  int mpi_rank_t;
-  MPI_Comm_rank(t_comm, &mpi_rank_t);
+    int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
+    int mpi_rank_h; MPI_Comm_rank(h_comm,&mpi_rank_h);
+    int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
+    int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
+    int mpi_size_t; MPI_Comm_size(t_comm,&mpi_size_t);
+    int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
 
-  size_t total_task =
-      adet_comm_size * bdet_comm_size + adet_comm_size + bdet_comm_size;
+    size_t total_task = adet_comm_size * bdet_comm_size
+                      + adet_comm_size + bdet_comm_size;
 
   std::vector<size_t> task_start(mpi_size_t);
   std::vector<size_t> task_end(mpi_size_t);
@@ -830,26 +919,25 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
       }
 #endif
 
-      std::vector<double> cost(total_helper, 0.0);
-      std::vector<double> cost_send(total_helper, 0.0);
-      size_t k_start = 0;
-      for (int rank_t = 0; rank_t < mpi_rank_t; rank_t++) {
-        k_start += num_helper[rank_t];
-      }
-      size_t k_end = num_helper[mpi_rank_t] + k_start;
-      for (size_t k = k_start; k < k_end; k++) {
-        cost_send[k] = 1.0 * cost_rank[k - k_start];
-      }
-      MPI_Allreduce(cost_send.data(), cost.data(), total_helper, MPI_DOUBLE,
-                    MPI_SUM, t_comm);
+	std::vector<double> cost(total_helper,0.0);
+	std::vector<double> cost_send(total_helper,0.0);
+	size_t k_start = 0;
+	for(int rank_t=0; rank_t < mpi_rank_t; rank_t++) {
+	  k_start += num_helper[rank_t];
+	}
+	size_t k_end = num_helper[mpi_rank_t] + k_start;
+	for(size_t k=k_start; k < k_end; k++) {
+	  cost_send[k] = 1.0 * cost_rank[k-k_start];
+	}
+	MPI_Allreduce(cost_send.data(),cost.data(),total_helper,MPI_DOUBLE,MPI_SUM,t_comm);
 
-      auto itkmin = std::min_element(cost.begin(), cost.end());
-      double volC = 1.0 / (1.0 + (*itkmin));
-      double sumC = 0.0;
-      for (size_t k = 0; k < total_helper; k++) {
-        cost[k] *= volC;
-        sumC += cost[k];
-      }
+	auto itkmin = std::min_element(cost.begin(),cost.end());
+	double volC = 1.0/(1.0+(*itkmin));
+	double sumC = 0.0;
+	for(size_t k=0; k < total_helper; k++) {
+	  cost[k] *= volC;
+	  sumC += cost[k];
+	}
 
 #ifdef SBD_DEBUG_HELPER
       for (int rank_t = 0; rank_t < mpi_size_t; rank_t++) {
@@ -865,17 +953,17 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
       }
 #endif
 
-      double regC = sumC / mpi_size_t;
-      std::vector<double> cumsum(total_helper + 1, 0.0);
-      std::vector<double> devreg(total_helper + 1, 0.0);
-      size_t s_start = 0;
-      size_t s_end = total_helper;
-      for (int rank_t = 0; rank_t < mpi_size_t; rank_t++) {
-        std::fill(cumsum.begin(), cumsum.end(), 0.0);
-        for (size_t s = s_start + 1; s <= s_end; s++) {
-          cumsum[s] += cumsum[s - 1] + cost[s - 1];
-          devreg[s] = (cumsum[s] - regC) * (cumsum[s] - regC);
-        }
+	double regC = sumC / mpi_size_t;
+	std::vector<double> cumsum(total_helper+1,0.0);
+	std::vector<double> devreg(total_helper+1,0.0);
+	size_t s_start = 0;
+	size_t s_end   = total_helper;
+	for(int rank_t=0; rank_t < mpi_size_t; rank_t++) {
+	  std::fill(cumsum.begin(),cumsum.end(),0.0);
+	  for(size_t s=s_start+1; s <= s_end; s++) {
+	    cumsum[s] += cumsum[s-1] + cost[s-1];
+	    devreg[s] = (cumsum[s]-regC)*(cumsum[s]-regC);
+	  }
 #ifdef SBD_DEBUG_HELPER
         for (int rank_t = 0; rank_t < mpi_size_t; rank_t++) {
           if (mpi_rank_t == rank_t) {
@@ -895,29 +983,27 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
         }
 #endif
 
-        auto itsm = std::min_element(devreg.begin() + s_start + 1,
-                                     devreg.begin() + s_end + 1);
-        task_start[rank_t] = s_start;
-        task_end[rank_t] =
-            static_cast<size_t>(std::distance(devreg.begin(), itsm));
-        if (rank_t == mpi_size_t - 1) {
-          task_end[rank_t] = total_helper;
-        }
-        s_start = task_end[rank_t];
-        sumC = 0.0;
-        for (size_t s = s_start; s < s_end; s++) {
-          sumC += cost[s];
-        }
-        if (rank_t != mpi_size_t - 1) {
-          regC = sumC / (mpi_size_t - rank_t - 1);
-        }
+	  auto itsm = std::min_element(devreg.begin()+s_start+1,devreg.begin()+s_end+1);
+	  task_start[rank_t] = s_start;
+	  task_end[rank_t]   = static_cast<size_t>(std::distance(devreg.begin(),itsm));
+	  if( rank_t == mpi_size_t-1 ) {
+	    task_end[rank_t] = total_helper;
+	  }
+	  s_start = task_end[rank_t];
+	  sumC = 0.0;
+	  for(size_t s=s_start; s < s_end; s++) {
+	    sumC += cost[s];
+	  }
+	  if( rank_t != mpi_size_t-1 ) {
+	    regC = sumC / (mpi_size_t - rank_t - 1);
+	  }
+	}
       }
+      MPI_Bcast(task_start.data(),mpi_size_t,SBD_MPI_SIZE_T,0,b_comm);
+      MPI_Bcast(task_end.data(),mpi_size_t,SBD_MPI_SIZE_T,0,b_comm);
     }
-    MPI_Bcast(task_start.data(), mpi_size_t, SBD_MPI_SIZE_T, 0, b_comm);
-    MPI_Bcast(task_end.data(), mpi_size_t, SBD_MPI_SIZE_T, 0, b_comm);
-  }
-  MPI_Bcast(task_start.data(), mpi_size_t, SBD_MPI_SIZE_T, 0, h_comm);
-  MPI_Bcast(task_end.data(), mpi_size_t, SBD_MPI_SIZE_T, 0, h_comm);
+    MPI_Bcast(task_start.data(),mpi_size_t,SBD_MPI_SIZE_T,0,h_comm);
+    MPI_Bcast(task_end.data(),mpi_size_t,SBD_MPI_SIZE_T,0,h_comm);
 
 #ifdef SBD_DEBUG_HELPER
   for (int rank_h = 0; rank_h < mpi_size_h; rank_h++) {
@@ -942,11 +1028,10 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
   }
 #endif
 
-  /**
-     Free every helpers
-   */
-  FreeHelpers(helper);
-  sharedMemory = std::vector<std::vector<size_t>>();
+    /**
+       Free every helpers
+     */
+    FreeHelpers(helper);
 
   std::vector<size_t> adet_schedule(total_task);
   std::vector<size_t> bdet_schedule(total_task);
@@ -998,18 +1083,16 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
     }
   }
 
-  size_t task_size = task_end[mpi_rank_t] - task_start[mpi_rank_t];
-  helper.resize(task_size);
-  sharedMemory.resize(task_size);
+    size_t task_size = task_end[mpi_rank_t]-task_start[mpi_rank_t];
+    helper.resize(task_size);
 
   int bra_rank = mpi_rank_b;
   int bra_adet_rank = bra_rank / bdet_comm_size;
   int bra_bdet_rank = bra_rank % bdet_comm_size;
 
-  double total_smart_memory_size = 0.0;
+    double total_smart_memory_size = 0.0;
 
-  for (size_t task = task_start[mpi_rank_t]; task < task_end[mpi_rank_t];
-       task++) {
+    for(size_t task=task_start[mpi_rank_t]; task < task_end[mpi_rank_t]; task++) {
 
     int ket_adet_rank = (bra_adet_rank + adet_schedule[task]) % adet_comm_size;
     int ket_bdet_rank = (bra_bdet_rank + bdet_schedule[task]) % bdet_comm_size;
@@ -1052,9 +1135,8 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
               << " (GiB) before the serialization " << std::endl;
 #endif
 
-    MakeSmartHelper(helper[task - task_start[mpi_rank_t]],
-                    sharedMemory[task - task_start[mpi_rank_t]]);
-    FreeVectors(helper[task - task_start[mpi_rank_t]]);
+      MakeSmartHelper(helper[task-task_start[mpi_rank_t]]);
+      // FreeVectors(helper[task-task_start[mpi_rank_t]]);
 
 #ifdef SBD_DEBUG_HELPER
     size_t smart_memory_count =
@@ -1074,8 +1156,12 @@ void RemakeHelpers(const std::vector<std::vector<size_t>> &adet,
               << " (GiB) after the serialization " << std::endl;
 #endif
 
-  } // end helpers for different tasks
-}
+    } // end helpers for different tasks
+
+  }
+
+
+
 
 } // end namespace sbd
 

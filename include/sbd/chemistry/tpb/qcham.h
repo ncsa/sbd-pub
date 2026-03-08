@@ -35,10 +35,8 @@ namespace sbd {
     MPI_Comm_rank(h_comm,&mpi_rank_h);
     MPI_Comm_size(h_comm,&mpi_size_h);
 
-    int mpi_size_x; MPI_Comm_size(b_comm,&mpi_size_x);
-    int mpi_rank_x; MPI_Comm_rank(b_comm,&mpi_rank_x);
-    int mpi_size_y; MPI_Comm_size(t_comm,&mpi_size_y);
-    int mpi_rank_y; MPI_Comm_rank(t_comm,&mpi_rank_y);
+    int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
+    int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
 
     size_t braAlphaSize = 0;
     size_t braBetaSize = 0;
@@ -74,45 +72,20 @@ namespace sbd {
       }
     }
     
-#ifdef SBD_DEBUG_QCHAM
-    for(int task=0; task < helper.size(); task++) {
-      for(int rank_y=0; rank_y < mpi_size_y; rank_y++) {
-	for(int rank_x=0; rank_x < mpi_size_x; rank_x++) {
-	  if( mpi_rank_x == rank_x && mpi_rank_y == rank_y ) {
-	    std::cout << " mpi rank (" << rank_x << "," << rank_y << ")";
-	    std::cout << " braAlphaRange, braBetaRange, ketAlphaRange, ketBetaRange = "
-		      << "(" << helper[task].braAlphaStart << "," << helper[task].braAlphaEnd
-		      << "), (" << helper[task].braBetaStart << "," << helper[task].braBetaEnd
-		      << "), (" << helper[task].ketAlphaStart << "," << helper[task].ketAlphaEnd
-		      << "), (" << helper[task].ketBetaStart << "," << helper[task].ketBetaEnd
-		      << "), task type = " << helper[task].taskType << std::endl;
-	  }
-	  MPI_Barrier(b_comm);
-	}
-	MPI_Barrier(t_comm);
-      }
-    }
-#endif
-
     tasktype.resize(helper.size());
     adetshift.resize(helper.size());
     bdetshift.resize(helper.size());
     len.resize(helper.size(),std::vector<size_t>(num_threads));
     
-    size_t chunk_size = (braAlphaEnd-braAlphaStart) / num_threads;
-
     // size evaluation
 #pragma omp parallel
     {
       size_t thread_id = omp_get_thread_num();
-      size_t ia_start = thread_id * chunk_size     + braAlphaStart;
-      size_t ia_end   = (thread_id+1) * chunk_size + braAlphaStart;
-      if( thread_id == num_threads - 1 ) {
-	ia_end = braAlphaEnd;
-      }
+      size_t ia_start = thread_id + braAlphaStart;
+      size_t ia_end   = braAlphaEnd;
       for(size_t task = 0; task < helper.size(); task++) {
 	len[task][thread_id] = 0;
-	for(size_t ia = ia_start; ia < ia_end; ia++) {
+	for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
 	  for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 	    size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
 	                    +ib-helper[task].braBetaStart;
@@ -181,22 +154,24 @@ namespace sbd {
     size_t total_memory_size_count = counter_int * sizeof(size_t)
       + counter_ElemT * sizeof(ElemT);
     RealT total_memory_size = 1.0 * total_memory_size_count / 1073741824.0;
-    std::cout << " Memory size for Hamiltonian = "
-	      << total_memory_size 
-	      << " GiB " << std::endl;
+    if( mpi_rank_h == 0 ) {
+      if( mpi_rank_t == 0 ) {
+	if( mpi_rank_b == 0 ) {
+	  std::cout << " Memory size for Hamiltonian = "
+		    << total_memory_size 
+		    << " GiB " << std::endl;
+	}
+      }
+    }
     
     // size_t chunk_size = (helper.braBetaEnd-helper.braBetaStart) / num_threads;
 #pragma omp parallel
     {
       size_t thread_id = omp_get_thread_num();
-      size_t ia_start = thread_id * chunk_size     + braAlphaStart;
-      size_t ia_end   = (thread_id+1) * chunk_size + braAlphaStart;
-      if( thread_id == num_threads - 1 ) {
-	ia_end = braAlphaEnd;
-      }
+      size_t ia_start = thread_id + braAlphaStart;
+      size_t ia_end   = braAlphaEnd;
 
       auto DetI = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
-      auto DetJ = DetI;
       std::vector<int> c(2,0);
       std::vector<int> d(2,0);
 
@@ -208,7 +183,7 @@ namespace sbd {
 	size_t ketBetaSize  = helper[task].ketBetaEnd-helper[task].ketBetaStart;
 	size_t address = 0;
 	
-	for(size_t ia = ia_start; ia < ia_end; ia++) {
+	for(size_t ia = ia_start; ia < ia_end; ia+=num_threads) {
 	  for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	    size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -226,9 +201,12 @@ namespace sbd {
 		  size_t jb = helper[task].SinglesFromBetaSM[ib-helper[task].braBetaStart][k];
 		  size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		                  +jb-helper[task].ketBetaStart;
-		  DetFromAlphaBeta(adets[ja],bdets[jb],bit_length,norbs,DetJ);
-		  size_t orbDiff;
-		  ElemT eij = Hij(DetI,DetJ,bit_length,norbs,c,d,I0,I1,I2,orbDiff);
+		  ElemT eij = TwoExcite(DetI,bit_length,
+					helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+0],
+					helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*k+0],
+					helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+1],
+					helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*k+1],
+					I1,I2);
 		  ih[task][thread_id][address] = braIdx;
 		  jh[task][thread_id][address] = ketIdx;
 		  hij[task][thread_id][address] = eij;
@@ -244,10 +222,10 @@ namespace sbd {
 		size_t ja = helper[task].SinglesFromAlphaSM[ia-helper[task].braAlphaStart][j];
 		size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		                +ib-helper[task].ketBetaStart;
-		DetFromAlphaBeta(adets[ja],bdets[ib],bit_length,norbs,DetJ);
-		size_t orbDiff;
-		ElemT eij = Hij(DetI,DetJ,
-				bit_length,norbs,c,d,I0,I1,I2,orbDiff);
+		ElemT eij = OneExcite(DetI,bit_length,
+				      helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+0],
+				      helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+1],
+				      I1,I2);
 		ih[task][thread_id][address] = braIdx;
 		jh[task][thread_id][address] = ketIdx;
 		hij[task][thread_id][address] = eij;
@@ -258,9 +236,12 @@ namespace sbd {
 		size_t ja = helper[task].DoublesFromAlphaSM[ia-helper[task].braAlphaStart][j];
 		size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		               + ib-helper[task].ketBetaStart;
-		DetFromAlphaBeta(adets[ja],bdets[ib],bit_length,norbs,DetJ);
-		size_t orbDiff;
-		ElemT eij = Hij(DetI,DetJ,bit_length,norbs,c,d,I0,I1,I2,orbDiff);
+		ElemT eij = TwoExcite(DetI,bit_length,
+				      helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+0],
+				      helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+1],
+				      helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+2],
+				      helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+3],
+				      I1,I2);
 		ih[task][thread_id][address] = braIdx;
 		jh[task][thread_id][address] = ketIdx;
 		hij[task][thread_id][address] = eij;
@@ -274,9 +255,10 @@ namespace sbd {
 		size_t jb = helper[task].SinglesFromBetaSM[ib-helper[task].braBetaStart][j];
 		size_t ketIdx = (ia-helper[task].ketAlphaStart) * ketBetaSize
 		               + jb - helper[task].ketBetaStart;
-		DetFromAlphaBeta(adets[ia],bdets[jb],bit_length,norbs,DetJ);
-		size_t orbDiff;
-		ElemT eij = Hij(DetI,DetJ,bit_length,norbs,c,d,I0,I1,I2,orbDiff);
+		ElemT eij = OneExcite(DetI,bit_length,
+				      helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*j+0],
+				      helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*j+1],
+				      I1,I2);
 		ih[task][thread_id][address] = braIdx;
 		jh[task][thread_id][address] = ketIdx;
 		hij[task][thread_id][address] = eij;
@@ -287,9 +269,12 @@ namespace sbd {
 		size_t jb = helper[task].DoublesFromBetaSM[ib-helper[task].braBetaStart][j];
 		size_t ketIdx = (ia-helper[task].ketAlphaStart) * ketBetaSize
 		               + jb-helper[task].ketBetaStart;
-		DetFromAlphaBeta(adets[ia],bdets[jb],bit_length,norbs,DetJ);
-		size_t orbDiff;
-		ElemT eij = Hij(DetI,DetJ,bit_length,norbs,c,d,I0,I1,I2,orbDiff);
+		ElemT eij = TwoExcite(DetI,bit_length,
+				      helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+0],
+				      helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+1],
+				      helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+2],
+				      helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+3],
+				      I1,I2);
 		ih[task][thread_id][address] = braIdx;
 		jh[task][thread_id][address] = ketIdx;
 		hij[task][thread_id][address] = eij;
@@ -298,15 +283,6 @@ namespace sbd {
 	    }
 	  } // end for(size_t ib=ib_start; ib < ib_end; ib++)
 	} // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
-
-#ifdef SBD_DEBUG_QCHAM
-	std::cout << "(" << mpi_rank_h << "," << mpi_rank_x << "," << mpi_rank_y
-		  << "): size check: address = " << address << ", len[task][thread] = "
-		  << len[task][thread_id] << " for task " << task
-		  << "(" << tasktype[task] << ") and thread "
-		  << thread_id << std::endl;
-#endif
-	
       } // end for(size_t task=0; task < helper.size(); task++)
     } // end pragma paralell
   } // end function

@@ -1,52 +1,52 @@
 /**
-@file sbd/basic/generalop.h
+@file sbd/caop/basic/generalop.h
 @brief Class to manage the operator
 */
-#ifndef SBD_BASIC_GENERALOP_H
-#define SBD_BASIC_GENERALOP_H
+#ifndef SBD_CAOP_BASIC_GENERALOP_H
+#define SBD_CAOP_BASIC_GENERALOP_H
 
 namespace sbd {
 
-  class FieldOp;
+  class CAOp;
 
   class ProductOp;
 
   template <typename ElemT>
   class GeneralOp;
 
-  class FieldOp {
+  class CAOp {
   public:
-    FieldOp()
+    CAOp()
       : d_(false), q_(0) {}
-    FieldOp(bool d, int q)
+    CAOp(bool d, int q)
       : d_(d), q_(q) {}
-    FieldOp(const FieldOp & other)
+    CAOp(const CAOp & other)
       : d_(other.d_), q_(other.q_) {}
-    ~FieldOp() {}
+    ~CAOp() {}
 
-    FieldOp & operator = (const FieldOp & other) {
+    CAOp & operator = (const CAOp & other) {
       if( this != &other ) {
 	copy(other);
       }
       return *this;
     }
 
-    bool operator == (const FieldOp & other) const {
+    bool operator == (const CAOp & other) const {
       return ( ( d_ == other.d_ ) && ( q_ == other.q_ ) );
     }
 
-    bool operator != (const FieldOp & other) const {
+    bool operator != (const CAOp & other) const {
       return ( ( d_ != other.d_ ) || ( q_ != other.q_ ) );
     }
 
-    bool operator < (const FieldOp & other) const {
+    bool operator < (const CAOp & other) const {
       if( q_ < other.q_ ) {
 	return true;
       }
       return false;
     }
 
-    bool operator > (const FieldOp & other) const {
+    bool operator > (const CAOp & other) const {
       if( q_ > other.q_ ) {
 	return true;
       }
@@ -64,61 +64,63 @@ namespace sbd {
 			       GeneralOp<ElemT_> & G,
 			       bool sign);
     
-    friend void MpiSend(const FieldOp & F,
+    friend void MpiSend(const CAOp & F,
 			int destination,
 			MPI_Comm comm);
 
-    friend void MpiRecv(FieldOp & F,
+    friend void MpiRecv(CAOp & F,
 			int source,
 			MPI_Comm comm);
+
+    friend void MpiBcast(CAOp & F,
+			 int root,
+			 MPI_Comm comm);
     
     template <typename ElemT_>
-    friend void mult_diagonal(const GeneralOp<ElemT_> & H,
-			      const std::vector<ElemT_> & C,
-			      const Basis & B,
-			      std::vector<ElemT_> & W,
-			      size_t bit_length);
+    friend void mult(const std::vector<ElemT_> & hd,
+		     const std::vector<ElemT_> & wk,
+		     std::vector<ElemT_> & wb,
+		     const std::vector<std::vector<size_t>> & bs,
+		     const size_t bit_length,
+		     const std::vector<int> & slide,
+		     const GeneralOp<ElemT_> & H,
+		     bool sign,
+		     MPI_Comm h_comm,
+		     MPI_Comm b_comm,
+		     MPI_Comm t_comm);
 
     template <typename ElemT_>
-    friend void mult_offdiagonal(const GeneralOp<ElemT_> & H,
-				 const std::vector<ElemT_> & C,
-				 const Basis & B,
-				 std::vector<ElemT_> & W,
-				 size_t bit_length,
-				 int data_width,
-				 bool sign);
+    friend void makeCAOpHamDiagTerms(const std::vector<std::vector<size_t>> & bs,
+				     const size_t bit_length,
+				     const std::vector<int> & slide,
+				     const GeneralOp<ElemT_> & H,
+				     std::vector<ElemT_> & hii);
 
     template <typename ElemT_>
-    friend void mult(const GeneralOp<ElemT_> & H,
-		     const std::vector<ElemT_> & C,
-		     const Basis & B,
-		     std::vector<ElemT_> & W,
-		     MPI_Comm comm,
-		     bool sign);
-
-    template <typename ElemT_>
-    friend void make_hamiltonian(const GeneralOp<ElemT_> & H,
-		const Basis & B,
-	        std::vector<ElemT_> & hii,
-		std::vector<std::vector<std::vector<size_t>>> & ih,
-		std::vector<std::vector<std::vector<size_t>>> & jh,
-		std::vector<std::vector<std::vector<size_t>>> & tr,
-		std::vector<std::vector<std::vector<ElemT_>>> & hij,
-		size_t bit_length,
-	        int data_width,
-		bool sign);
-
+    friend void makeCAOpHam(const std::vector<std::vector<size_t>> & bs,
+			    const size_t bit_length,
+			    const std::vector<int> & slide,
+			    const GeneralOp<ElemT_> & H,
+			    const bool sign,
+			    std::vector<ElemT_> & hii,
+			    std::vector<std::vector<std::vector<size_t>>> & ih,
+			    std::vector<std::vector<std::vector<size_t>>> & jh,
+			    std::vector<std::vector<std::vector<ElemT_>>> & hij,
+			    MPI_Comm h_comm,
+			    MPI_Comm b_comm,
+			    MPI_Comm t_comm);
+    
     template <typename ElemT_>
     friend void MeasHamSquare(const GeneralOp<ElemT_> & H,
-			      const Basis & B,
 			      const std::vector<ElemT_> & W,
+			      const std::vector<std::vector<size_t>> & basis,
 			      size_t bit_length,
 			      MPI_Comm & comm,
 			      ElemT_ & res,
 			      bool sign);
     
     friend std::ostream & operator << (std::ostream & s,
-				       const FieldOp & o);
+				       const CAOp & o);
 
     // friend class
     friend class ProductOp;
@@ -129,11 +131,11 @@ namespace sbd {
   private:
     bool d_;
     int q_;
-    void copy(const FieldOp & other) {
+    void copy(const CAOp & other) {
       d_ = other.d_;
       q_ = other.q_;
     }
-  }; // end FieldOp
+  }; // end CAOp
 
   
 
@@ -145,7 +147,7 @@ namespace sbd {
     ProductOp(const ProductOp & other)
       : n_dag_(other.n_dag_), fops_(other.fops_) {}
     
-    ProductOp(const FieldOp & other)
+    ProductOp(const CAOp & other)
       : fops_(1,other) {
       if( other.d_ ) {
 	n_dag_ = 1;
@@ -159,7 +161,7 @@ namespace sbd {
     
     ~ProductOp() {}
 
-    ProductOp & operator = (const FieldOp & other) {
+    ProductOp & operator = (const CAOp & other) {
       *this = ProductOp(other);
       return *this;
     }
@@ -199,7 +201,7 @@ namespace sbd {
       return res;
     }
 
-    ProductOp operator * (const FieldOp & other) const
+    ProductOp operator * (const CAOp & other) const
       {
 	ProductOp res(*this);
 	res.fops_.push_back(other);
@@ -223,7 +225,7 @@ namespace sbd {
 	return *this;
       }
 
-    ProductOp & operator *= (const FieldOp & other)
+    ProductOp & operator *= (const CAOp & other)
       {
 	fops_.push_back(other);
 	if( other.d_ )
@@ -266,7 +268,7 @@ namespace sbd {
     
       for(int i=0; i < fops_.size(); i++) {
 	if( fops_[i].d_ ) {
-	  FieldOp f1 = fops_[i];
+	  CAOp f1 = fops_[i];
 	  f1.dagger();
 	  bool not_find = true;
 	  for(int j=0; j < fops_.size(); j++) {
@@ -289,7 +291,7 @@ namespace sbd {
     
     void dagger()
     {
-      std::vector<FieldOp> fops(this->fops_);
+      std::vector<CAOp> fops(this->fops_);
       for(size_t i=0; i < fops.size(); i++) {
 	fops_[i] = fops[fops_.size()-1-i];
 	fops_[i].dagger();
@@ -307,7 +309,7 @@ namespace sbd {
     }
 
     // out of place functions
-    friend ProductOp operator * (const FieldOp & a, const FieldOp & b);
+    friend ProductOp operator * (const CAOp & a, const CAOp & b);
     
     template <typename ElemT_>
     friend GeneralOp<ElemT_> operator * (const ProductOp & G, ElemT_ c);
@@ -324,45 +326,43 @@ namespace sbd {
 			       bool sign);
 
     template <typename ElemT_>
-    friend void mult_diagonal(const GeneralOp<ElemT_> & H,
-			      const std::vector<ElemT_> & C,
-			      const Basis & B,
-			      std::vector<ElemT_> & W,
-			      size_t bit_length);
+    friend void mult(const std::vector<ElemT_> & hd,
+		     const std::vector<ElemT_> & wk,
+		     std::vector<ElemT_> & wb,
+		     const std::vector<std::vector<size_t>> & bs,
+		     const size_t bit_length,
+		     const std::vector<int> & slide,
+		     const GeneralOp<ElemT_> & H,
+		     bool sign,
+		     MPI_Comm h_comm,
+		     MPI_Comm b_comm,
+		     MPI_Comm t_comm);
 
     template <typename ElemT_>
-    friend void mult_offdiagonal(const GeneralOp<ElemT_> & H,
-				 const std::vector<ElemT_> & C,
-				 const Basis & B,
-				 std::vector<ElemT_> & W,
-				 size_t bit_length,
-				 int data_width,
-				 bool sign);
+    friend void makeCAOpHamDiagTerms(const std::vector<std::vector<size_t>> & bs,
+				     const size_t bit_length,
+				     const std::vector<int> & slide,
+				     const GeneralOp<ElemT_> & H,
+				     std::vector<ElemT_> & hii);
 
     template <typename ElemT_>
-    friend void mult(const GeneralOp<ElemT_> & H,
-		     const std::vector<ElemT_> & C,
-		     const Basis & B,
-		     std::vector<ElemT_> & W,
-		     MPI_Comm comm,
-		     bool sign);
+    friend void makeCAOpHam(const std::vector<std::vector<size_t>> & bs,
+			    const size_t bit_length,
+			    const std::vector<int> & slide,
+			    const GeneralOp<ElemT_> & H,
+			    const bool sign,
+			    std::vector<ElemT_> & hii,
+			    std::vector<std::vector<std::vector<size_t>>> & ih,
+			    std::vector<std::vector<std::vector<size_t>>> & jh,
+			    std::vector<std::vector<std::vector<ElemT_>>> & hij,
+			    MPI_Comm h_comm,
+			    MPI_Comm b_comm,
+			    MPI_Comm t_comm);
 
-    template <typename ElemT_>
-    friend void make_hamiltonian(const GeneralOp<ElemT_> & H,
-		const Basis & B,
-	        std::vector<ElemT_> & hii,
-		std::vector<std::vector<std::vector<size_t>>> & ih,
-		std::vector<std::vector<std::vector<size_t>>> & jh,
-		std::vector<std::vector<std::vector<size_t>>> & tr,
-		std::vector<std::vector<std::vector<ElemT_>>> & hij,
-		size_t bit_length,
-		int data_width,
-		bool sign);
-    
     template <typename ElemT_>
     friend void MeasHamSquare(const GeneralOp<ElemT_> & H,
-			      const Basis & B,
 			      const std::vector<ElemT_> & W,
+			      const std::vector<std::vector<size_t>> & basis,
 			      size_t bit_length,
 			      MPI_Comm & comm,
 			      ElemT_ & res,
@@ -375,17 +375,21 @@ namespace sbd {
     friend void MpiRecv(ProductOp & F,
 			int source,
 			MPI_Comm comm);
+
+    friend void MpiBcast(ProductOp & F,
+			 int root,
+			 MPI_Comm comm);
     
     friend std::ostream & operator << (std::ostream & s, const ProductOp & op);
     
-    friend class FieldOp;
+    friend class CAOp;
 
     template <typename ElemT_>
     friend class GeneralOp;
     
   private:
     int n_dag_;
-    std::vector<FieldOp> fops_;
+    std::vector<CAOp> fops_;
     void copy(const ProductOp & other) {
       n_dag_ = other.n_dag_;
       fops_ = other.fops_;
@@ -433,7 +437,7 @@ namespace sbd {
       return *this;
     }
 
-    GeneralOp & operator = (const FieldOp & other) {
+    GeneralOp & operator = (const CAOp & other) {
       e_.resize(0);
       d_.resize(0);
       c_.resize(1,ElemT(1.0));
@@ -528,7 +532,7 @@ namespace sbd {
       return res;
     }
     
-    GeneralOp operator * (const FieldOp & other) const {
+    GeneralOp operator * (const CAOp & other) const {
       GeneralOp res;
       
       for(size_t i=0; i < d_.size(); i++) {
@@ -560,7 +564,7 @@ namespace sbd {
       return *this;
     }
     
-    GeneralOp & operator *= (const FieldOp & other) {
+    GeneralOp & operator *= (const CAOp & other) {
       GeneralOp temp(*this);
       *this = temp * other;
       return *this;
@@ -599,7 +603,7 @@ namespace sbd {
       return *this;
     }
 
-    GeneralOp & operator += (const FieldOp & other) {
+    GeneralOp & operator += (const CAOp & other) {
       ProductOp temp(other);
       if( temp.check_diagonal() ) {
 	this->d_.push_back(temp);
@@ -641,7 +645,7 @@ namespace sbd {
       return *this;
     }
 
-    GeneralOp & operator -= (const FieldOp & other) {
+    GeneralOp & operator -= (const CAOp & other) {
       ProductOp temp(other);
       if( temp.check_diagonal() ) {
 	this->d_.push_back(temp);
@@ -672,7 +676,7 @@ namespace sbd {
       return res;
     }
 
-    GeneralOp operator + (const FieldOp & other) const {
+    GeneralOp operator + (const CAOp & other) const {
       GeneralOp res(*this);
       res += ProductOp(other);
       return res;
@@ -743,55 +747,57 @@ namespace sbd {
     friend void Simplify(GeneralOp<ElemT_> & G);
 
     template <typename ElemT_>
-    friend void mult_diagonal(const GeneralOp<ElemT_> & H,
-			      const std::vector<ElemT_> & C,
-			      const Basis & B,
-			      std::vector<ElemT_> & W,
-			      size_t bit_length);
+    friend void mult(const std::vector<ElemT_> & hd,
+		     const std::vector<ElemT_> & wk,
+		     std::vector<ElemT_> & wb,
+		     const std::vector<std::vector<size_t>> & bs,
+		     const size_t bit_length,
+		     const std::vector<int> & slide,
+		     const GeneralOp<ElemT_> & H,
+		     bool sign,
+		     MPI_Comm h_comm,
+		     MPI_Comm b_comm,
+		     MPI_Comm t_comm);
 
     template <typename ElemT_>
-    friend void mult_offdiagonal(const GeneralOp<ElemT_> & H,
-				 const std::vector<ElemT_> & C,
-				 const Basis & B,
-				 std::vector<ElemT_> & W,
-				 size_t bit_length,
-				 int data_width,
-				 bool sign);
+    friend void makeCAOpHamDiagTerms(const std::vector<std::vector<size_t>> & bs,
+				     const size_t bit_length,
+				     const std::vector<int> & slide,
+				     const GeneralOp<ElemT_> & H,
+				     std::vector<ElemT_> & hii);
 
     template <typename ElemT_>
-    friend void mult(const GeneralOp<ElemT_> & H,
-		     const std::vector<ElemT_> & C,
-		     const Basis & B,
-		     std::vector<ElemT_> & W,
-		     MPI_Comm comm,
-		     bool sign);
-
-    template <typename ElemT_>
-    friend void make_hamiltonian(const GeneralOp<ElemT_> & H,
-		const Basis & B,
-	        std::vector<ElemT_> & hii,
-		std::vector<std::vector<std::vector<size_t>>> & ih,
-		std::vector<std::vector<std::vector<size_t>>> & jh,
-		std::vector<std::vector<std::vector<size_t>>> & tr,
-		std::vector<std::vector<std::vector<ElemT_>>> & hij,
-		size_t bit_length,
-		int data_width,
-		bool sign);
+    friend void makeCAOpHam(const std::vector<std::vector<size_t>> & bs,
+			    const size_t bit_length,
+			    const std::vector<int> & slide,
+			    const GeneralOp<ElemT_> & H,
+			    const bool sign,
+			    std::vector<ElemT_> & hii,
+			    std::vector<std::vector<std::vector<size_t>>> & ih,
+			    std::vector<std::vector<std::vector<size_t>>> & jh,
+			    std::vector<std::vector<std::vector<ElemT_>>> & hij,
+			    MPI_Comm h_comm,
+			    MPI_Comm b_comm,
+			    MPI_Comm t_comm);
     
     template <typename ElemT_>
     friend void MeasHamSquare(const GeneralOp<ElemT_> & H,
-			      const Basis & B,
 			      const std::vector<ElemT_> & W,
+			      const std::vector<std::vector<size_t>> & basis,
 			      size_t bit_length,
 			      MPI_Comm & comm,
 			      ElemT_ & res,
 			      bool sign);
+    
     
     template <typename ElemT_>
     friend void MpiSend(const GeneralOp<ElemT_> & G, int destination, MPI_Comm comm);
 
     template <typename ElemT_>
     friend void MpiRecv(GeneralOp<ElemT_> & G, int source, MPI_Comm comm);
+
+    template <typename ElemT_>
+    friend void MpiBcast(GeneralOp<ElemT_> & G, int root, MPI_Comm comm);
 
     template <typename ElemT_>
     friend std::ostream & operator << (std::ostream & s,

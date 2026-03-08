@@ -8,10 +8,7 @@
 namespace sbd {
 
 
-
-  /**
-     Function for adding diagonal contribution
-   */
+  /*
   template <typename ElemT>
   void ZeroDiffCorrelation(const std::vector<size_t> & DetI,
 			   ElemT WeightI,
@@ -43,9 +40,6 @@ namespace sbd {
     }
   }
 
-  /**
-     Function for adding one-occupation different contribution
-   */
   template <typename ElemT>
   void OneDiffCorrelation(const std::vector<size_t> & DetI,
 			  const ElemT WeightI,
@@ -85,9 +79,6 @@ namespace sbd {
     }
   }
 
-  /**
-     Function for adding two-occupation different contribution
-   */
   template <typename ElemT>
   void TwoDiffCorrelation(const std::vector<size_t> & DetI,
 			  const ElemT WeightI,
@@ -129,9 +120,6 @@ namespace sbd {
 
   }
 
-  /**
-     Function for adding the terms to the resulting correlation
-   */
   template <typename ElemT>
   void CorrelationTermAddition(const std::vector<size_t> & DetI,
 			       const std::vector<size_t> & DetJ,
@@ -187,6 +175,7 @@ namespace sbd {
       TwoDiffCorrelation(DetI,WeightI,WeightJ,bit_length,norb,c[0],c[1],d[0],d[1],onebody,twobody);
     }
   }
+  */
 
   /**
      Function to evaluate the two-particle correlation functions
@@ -205,8 +194,6 @@ namespace sbd {
 		   MPI_Comm t_comm,
 		   std::vector<std::vector<ElemT>> & onebody,
 		   std::vector<std::vector<ElemT>> & twobody) {
-
-    
 
     onebody.resize(2);
     twobody.resize(4);
@@ -315,20 +302,34 @@ namespace sbd {
 		  size_t ja = helper[task].SinglesFromAlphaSM[ia-helper[task].braAlphaStart][j];
 		  size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		                  +ib-helper[task].ketBetaStart;
+		  OneDiffCorrelation(DetI,W[braIdx],T[ketIdx],bit_length,norb,
+				     helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+0],
+				     helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+1],
+				     onebody_t[thread_id],twobody_t[thread_id]);
+		  /*
 		  DetFromAlphaBeta(adet[ja],bdet[ib],bit_length,norb,DetJ);
 		  CorrelationTermAddition(DetI,DetJ,W[braIdx],T[ketIdx],
 					  bit_length,norb,c,d,
 					  onebody_t[thread_id],twobody_t[thread_id]);
+		  */
 		}
 		// double alpha excitation
 		for(size_t j=0; j < helper[task].DoublesFromAlphaLen[ia-helper[task].braAlphaStart]; j++) {
 		  size_t ja = helper[task].DoublesFromAlphaSM[ia-helper[task].braAlphaStart][j];
 		  size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		                 + ib-helper[task].ketBetaStart;
+		  TwoDiffCorrelation(DetI,W[braIdx],T[ketIdx],bit_length,norb,
+				     helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+0],
+				     helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+1],
+				     helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+2],
+				     helper[task].DoublesAlphaCrAnSM[ia-helper[task].braAlphaStart][4*j+3],
+				     onebody_t[thread_id],twobody_t[thread_id]);
+		  /*
 		  DetFromAlphaBeta(adet[ja],bdet[ib],bit_length,norb,DetJ);
 		  CorrelationTermAddition(DetI,DetJ,W[braIdx],T[ketIdx],
 					  bit_length,norb,c,d,
 					  onebody_t[thread_id],twobody_t[thread_id]);
+		  */
 		}
 		
 	      } // end for(size_t ib=ib_start; ib < ib_end; ib++)
@@ -350,20 +351,34 @@ namespace sbd {
 		  size_t jb = helper[task].SinglesFromBetaSM[ib-helper[task].braBetaStart][j];
 		  size_t ketIdx = (ia-helper[task].ketAlphaStart) * ketBetaSize
 		                 + jb-helper[task].ketBetaStart;
+		  OneDiffCorrelation(DetI,W[braIdx],T[ketIdx],bit_length,norb,
+				     helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*j+0],
+				     helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*j+1],
+				     onebody_t[thread_id],twobody_t[thread_id]);
+		  /*
 		  DetFromAlphaBeta(adet[ia],bdet[jb],bit_length,norb,DetJ);
 		  CorrelationTermAddition(DetI,DetJ,W[braIdx],T[ketIdx],
 					  bit_length,norb,c,d,
 					  onebody_t[thread_id],twobody_t[thread_id]);
+		  */
 		}
 		// double beta excitation
 		for(size_t j=0; j < helper[task].DoublesFromBetaLen[ib-helper[task].braBetaStart]; j++) {
 		  size_t jb = helper[task].DoublesFromBetaSM[ib-helper[task].braBetaStart][j];
 		  size_t ketIdx = (ia-helper[task].ketAlphaStart) * ketBetaSize
 		                 + jb-helper[task].ketBetaStart;
+		  TwoDiffCorrelation(DetI,W[braIdx],T[ketIdx],bit_length,norb,
+				     helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+0],
+				     helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+1],
+				     helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+2],
+				     helper[task].DoublesBetaCrAnSM[ib-helper[task].braBetaStart][4*j+3],
+				     onebody_t[thread_id],twobody_t[thread_id]);
+		  /*
 		  DetFromAlphaBeta(adet[ia],bdet[jb],bit_length,norb,DetJ);
 		  CorrelationTermAddition(DetI,DetJ,W[braIdx],T[ketIdx],
 					bit_length,norb,c,d,
 					  onebody_t[thread_id],twobody_t[thread_id]);
+		  */
 		}
 	      } // end for(size_t ib=ib_start; ib < ib_end; ib++)
 	    } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
@@ -387,10 +402,18 @@ namespace sbd {
 		    size_t jb = helper[task].SinglesFromBetaSM[ib-helper[task].braBetaStart][k];
 		    size_t ketIdx = (ja-helper[task].ketAlphaStart)*ketBetaSize
 		                    +jb-helper[task].ketBetaStart;
+		    TwoDiffCorrelation(DetI,W[braIdx],T[ketIdx],bit_length,norb,
+				       helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+0],
+				       helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*k+0],
+				       helper[task].SinglesAlphaCrAnSM[ia-helper[task].braAlphaStart][2*j+1],
+				       helper[task].SinglesBetaCrAnSM[ib-helper[task].braBetaStart][2*k+1],
+				       onebody_t[thread_id],twobody_t[thread_id]);
+		    /*
 		    DetFromAlphaBeta(adet[ja],bdet[jb],bit_length,norb,DetJ);
 		    CorrelationTermAddition(DetI,DetJ,W[braIdx],T[ketIdx],
 					    bit_length,norb,c,d,
 					    onebody_t[thread_id],twobody_t[thread_id]);
+		    */
 		  }
 		}
 		

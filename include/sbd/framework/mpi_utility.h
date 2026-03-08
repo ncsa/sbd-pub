@@ -7,8 +7,10 @@
 #ifndef SBD_FRAMEWORK_MPI_UTILITY_H
 #define SBD_FRAMEWORK_MPI_UTILITY_H
 
-#include <vector>
-#include <iostream>
+#include <type_traits>
+#include <limits>
+#include <stdexcept>
+
 #include "mpi.h"
 
 namespace sbd {
@@ -16,10 +18,10 @@ namespace sbd {
   void get_mpi_range(int mpi_size, int mpi_rank, size_t & i_begin, size_t & i_end)
   {
     size_t i_all = i_end - i_begin;
-
+    
     size_t i_div = i_all / mpi_size;
     size_t i_res = i_all % mpi_size;
-
+  
     size_t j = i_begin;
     size_t j_begin;
     size_t j_end;
@@ -81,7 +83,7 @@ namespace sbd {
       MPI_Irecv(data.data(),d_size,DataT,source,1,comm,&req);
     }
   }
-
+  
   template <typename ElemT>
   void MpiBcast(std::vector<ElemT> & data, int root, MPI_Comm comm) {
     size_t d_size;
@@ -97,7 +99,7 @@ namespace sbd {
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     MPI_Bcast(data.data(),d_size,DataT,root,comm);
   }
-
+  
   template <>
   void MpiSend(const std::vector<std::vector<size_t>> & config, int dest, MPI_Comm comm) {
     size_t c_num = config.size();
@@ -115,7 +117,7 @@ namespace sbd {
       MPI_Send(config_send.data(),total_size,SBD_MPI_SIZE_T,dest,2,comm);
     }
   }
-
+  
   template <>
   void MpiRecv(std::vector<std::vector<size_t>> & config, int source, MPI_Comm comm) {
     MPI_Status status;
@@ -186,12 +188,13 @@ namespace sbd {
       }
     }
   }
-
-
+  
+  
   template <>
   void MpiBcast(std::vector<std::vector<size_t>> & config,
 		int root,
 		MPI_Comm comm) {
+
     size_t c_num;
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
@@ -200,6 +203,7 @@ namespace sbd {
     }
     MPI_Bcast(&c_num,1,SBD_MPI_SIZE_T,root,comm);
     if( c_num != 0 ) {
+      
       size_t c_len;
       if( mpi_rank == root ) {
 	c_len = config[0].size();
@@ -214,7 +218,7 @@ namespace sbd {
 	  }
 	}
       }
-      MPI_Bcast(config_transfer.data(),total_size,SBD_MPI_SIZE_T,root,comm);
+      MPI_Bcast(config_transfer.data(),static_cast<int>(total_size),SBD_MPI_SIZE_T,root,comm);
       if( mpi_rank != root ) {
 	config = std::vector<std::vector<size_t>>(c_num,std::vector<size_t>(c_len));
 	for(size_t n=0; n < c_num; n++) {
@@ -225,15 +229,15 @@ namespace sbd {
       }
     }
   }
-
+  
   template <typename ElemT>
   void MpiIncSlide(const std::vector<ElemT> & A,
 		   std::vector<ElemT> & B,
 		   MPI_Comm comm) {
-
+    
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
-
+    
     if( mpi_size % 2 == 0 ) {
       if( mpi_rank % 2 == 0 ) {
 	MpiSend(A,mpi_rank+1,comm);
@@ -272,7 +276,7 @@ namespace sbd {
       }
     }
   }
-
+  
   template <typename ElemT>
   void MpiDecSlide(const std::vector<ElemT> & A, std::vector<ElemT> & B, MPI_Comm comm) {
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
@@ -321,7 +325,7 @@ namespace sbd {
 		std::vector<ElemT> & B,
 		int slide,
 		MPI_Comm comm) {
-
+    
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
     int mpi_dest   = (mpi_size+mpi_rank+slide) % mpi_size;
@@ -360,6 +364,8 @@ namespace sbd {
 
   }
 
+  
+
   template <>
   void MpiSlide(const std::vector<std::vector<size_t>> & A,
 		std::vector<std::vector<size_t>> & B,
@@ -369,7 +375,7 @@ namespace sbd {
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
     int mpi_dest   = (mpi_size+mpi_rank+slide) % mpi_size;
     int mpi_source = (mpi_size+mpi_rank-slide) % mpi_size;
-
+    
     std::vector<MPI_Request> req_size(2);
     std::vector<MPI_Status> sta_size(2);
 
@@ -412,7 +418,7 @@ namespace sbd {
     if( total_recv_size != 0 ) {
       MPI_Irecv(data_recv.data(),total_recv_size,SBD_MPI_SIZE_T,mpi_source,1,comm,&req_data[1]);
     }
-
+    
     if( total_send_size != 0 && total_recv_size != 0 ) {
       MPI_Waitall(2,req_data.data(),sta_data.data());
     } else if ( total_send_size != 0 && total_recv_size == 0 ) {
@@ -426,9 +432,53 @@ namespace sbd {
 	B[n][k] = data_recv[n*size_recv[1]+k];
       }
     }
-
+    
   }
 
+
+  template <>
+  void MpiSlide(const std::vector<size_t> & A,
+		std::vector<size_t> & B,
+		int slide,
+		MPI_Comm comm) {
+    int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
+    int mpi_size; MPI_Comm_size(comm,&mpi_size);
+    int mpi_dest   = (mpi_size+mpi_rank+slide) % mpi_size;
+    int mpi_source = (mpi_size+mpi_rank-slide) % mpi_size;
+    
+    std::vector<MPI_Request> req_size(2);
+    std::vector<MPI_Status> sta_size(2);
+    std::vector<size_t> size_send(1);
+    std::vector<size_t> size_recv(1);
+    size_send[0] = A.size();
+    MPI_Isend(size_send.data(),1,SBD_MPI_SIZE_T,mpi_dest,0,comm,&req_size[0]);
+    MPI_Irecv(size_recv.data(),1,SBD_MPI_SIZE_T,mpi_source,0,comm,&req_size[1]);
+    MPI_Waitall(2,req_size.data(),sta_size.data());
+    
+    size_t send_size = size_send[0];
+    size_t recv_size = size_recv[0];
+    B.resize(recv_size);
+    std::vector<MPI_Request> req_data(2);
+    std::vector<MPI_Status> sta_data(2);
+    
+    MPI_Datatype DataT = SBD_MPI_SIZE_T;
+    if( send_size != 0 ) {
+      MPI_Isend(A.data(),send_size,DataT,mpi_dest,1,comm,&req_data[0]);
+    }
+    if( recv_size != 0 ) {
+      MPI_Irecv(B.data(),recv_size,DataT,mpi_source,1,comm,&req_data[1]);
+    }
+    
+    if( send_size != 0 && recv_size != 0 ) {
+      MPI_Waitall(2,req_data.data(),sta_data.data());
+    } else if ( send_size != 0 && recv_size == 0 ) {
+      MPI_Waitall(1,&req_data[0],&sta_data[0]);
+    } else if ( send_size == 0 && recv_size != 0 ) {
+      MPI_Waitall(1,&req_data[1],&sta_data[1]);
+    }
+  }
+
+#ifdef SBD_TRADMODE
   template <typename ElemT>
   void MpiAllreduce(std::vector<ElemT> & A, MPI_Op op, MPI_Comm comm) {
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
@@ -436,9 +486,46 @@ namespace sbd {
 #if MPI_VERSION >= 4
     MPI_Allreduce_c(B.data(),A.data(),A.size(),DataT,op,comm);
 #else
-    MPI_Allreduce(B.data(),A.data(),A.size(),DataT,op,comm);
+    if (A.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("MPI_Allreduce: count exceeds INT_MAX (MPI<4). Use MPI-4 *_c API.");
+    }
+    MPI_Allreduce(B.data(),A.data(),static_cast<int>(A.size()),DataT,op,comm);
 #endif
   }
+
+  template <>
+  void MpiAllreduce(std::vector<size_t> & A, MPI_Op op, MPI_Comm comm) {
+    MPI_Datatype DataT = SBD_MPI_SIZE_T;
+    std::vector<size_t> B(A);
+#if MPI_VERSION >= 4
+    MPI_Allreduce_c(B.data(),A.data(),A.size(),DataT,op,comm);
+#else
+    if (A.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("MPI_Allreduce: count exceeds INT_MAX (MPI<4). Use MPI-4 *_c API.");
+    }
+    MPI_Allreduce(B.data(),A.data(),static_cast<int>(A.size()),DataT,op,comm);
+#endif
+  }
+#else
+  template <typename ElemT>
+  void MpiAllreduce(std::vector<ElemT> & A, MPI_Op op, MPI_Comm comm) {
+    MPI_Datatype DataT;
+    if constexpr (std::is_same_v<ElemT,size_t>) {
+      DataT = SBD_MPI_SIZE_T;
+    } else {
+      DataT = GetMpiType<ElemT>::MpiT;
+    }
+    std::vector<ElemT> B(A);
+#if MPI_VERSION >= 4
+    MPI_Allreduce_c(B.data(),A.data(),A.size(),DataT,op,comm);
+#else
+    if (A.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("MPI_Allreduce: count exceeds INT_MAX (MPI<4). Use MPI-4 *_c API.");
+    }
+    MPI_Allreduce(B.data(),A.data(),static_cast<int>(A.size()),DataT,op,comm);
+#endif
+  }
+#endif
 
   template <typename ElemT>
   void Mpi2dSlide(const std::vector<ElemT> & A,
@@ -475,7 +562,7 @@ namespace sbd {
     std::vector<size_t> size_send(1);
     std::vector<size_t> size_recv(1);
     size_send[0] = A.size();
-
+    
     MPI_Isend(size_send.data(),1,SBD_MPI_SIZE_T,
 	      mpi_dist,0,comm,&req_size[0]);
     MPI_Irecv(size_recv.data(),1,SBD_MPI_SIZE_T,
@@ -513,10 +600,10 @@ namespace sbd {
     } else if ( send_size == 0 && recv_size != 0 ) {
       MPI_Waitall(1,&req_data[1],&sta_data[1]);
     }
-
+    
   }
-
-
+		    
+  
 }
 
 #endif

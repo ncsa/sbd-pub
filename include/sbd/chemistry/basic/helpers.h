@@ -6,6 +6,7 @@
 #define SBD_CHEMISTRY_BASIC_HELPERS_H
 
 #include <cstring>
+#include <numeric>
 
 namespace sbd {
 
