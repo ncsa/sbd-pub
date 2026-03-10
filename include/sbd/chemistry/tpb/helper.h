@@ -652,7 +652,7 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
   helper.SinglesBetaCrAn_flat.resize(2 * singles_beta_total);
   helper.DoublesBetaCrAn_flat.resize(4 * doubles_beta_total);
 
-#pragma omp parallel
+#pragma omp parallel for
   for (size_t i = 0; i < nAlpha; i++) {
     for (size_t j = 0; j < helper.SinglesFromAlphaLen[i]; j++) {
       helper.SinglesFromAlpha_flat[helper.SinglesFromAlphaOffset[i] + j] =
@@ -672,7 +672,7 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
     }
   }
 
-#pragma omp parallel
+#pragma omp parallel for
   for (size_t i = 0; i < nBeta; i++) {
     for (size_t j = 0; j < helper.SinglesFromBetaLen[i]; j++) {
       helper.SinglesFromBeta_flat[helper.SinglesFromBetaOffset[i] + j] =
