@@ -265,7 +265,7 @@ namespace sbd {
 
       size_t ia_start = helper[0].braAlphaStart;
       size_t ia_end   = helper[0].braAlphaEnd;
-      size_t detSize  = (2*norbs + bit_length - 1) / bit_length;
+      size_t detSize  = (norbs + bit_length - 1) / bit_length;
       size_t AdetSize = (ia_end - ia_start)*detSize;
       size_t BdetSize = (ibEnd - ibBeg)*detSize;
       //-----------------------------------------------------------------------------------------
