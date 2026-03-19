@@ -11,6 +11,9 @@
 
 #include <limits> // For std::numeric_limits (bisection test)
 
+#define SBD_MAX_DETSIZE 16
+#define SBD_MAX_SPINORBITALS 256
+
   // one-electron and two-electron integrals
   size_t I1_size, I2_size, I2_Direct_size, I2_Exchange_size;
   double *I1_ptr;
@@ -175,7 +178,7 @@ inline ElemT ZeroExcite_device(const size_t *det, size_t bit_length, size_t L,
   ElemT energy = I0;
 
   // Get closed orbitals
-  int closed[256]; // Maximum 256 orbitals
+  int closed[SBD_MAX_SPINORBITALS]; // Maximum number of spin-orbitals
   int num_closed = 0;
 
   for (int i = 0; i < 2 * L; i++) {

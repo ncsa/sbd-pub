@@ -243,11 +243,11 @@ namespace sbd {
 
       // Task parameters
       size_t braAlphaStart = helper[task].braAlphaStart;
-      size_t braAlphaEnd = helper[task].braAlphaEnd;
+      size_t braAlphaEnd   = helper[task].braAlphaEnd;
       size_t braBetaStart = helper[task].braBetaStart;
-      size_t braBetaEnd = helper[task].braBetaEnd;
+      size_t braBetaEnd   = helper[task].braBetaEnd;
       size_t ketAlphaStart = helper[task].ketAlphaStart;
-      size_t ketBetaStart = helper[task].ketBetaStart;
+      size_t ketBetaStart  = helper[task].ketBetaStart;
 
       // block partition the braBeta loop over rank in the row communicator
       size_t ibBeg, ibEnd, nwork, extra, ncut;
@@ -263,19 +263,17 @@ namespace sbd {
          ibEnd = ibBeg + (nwork + 1);
       }
 
-      size_t ia_start = helper[0].braAlphaStart;
-      size_t ia_end   = helper[0].braAlphaEnd;
       size_t detSize  = (norbs + bit_length - 1) / bit_length;
-      size_t AdetSize = (ia_end - ia_start)*detSize;
+      size_t AdetSize = (braAlphaEnd - braAlphaStart)*detSize;
       size_t BdetSize = (ibEnd - ibBeg)*detSize;
       //-----------------------------------------------------------------------------------------
       // use simple arrays Adets, Bdets in place of std::vector<std::vector<size_t>> adets, bdets
       //-----------------------------------------------------------------------------------------
       size_t * Adets = (size_t *) malloc(AdetSize*sizeof(size_t));
       size_t * Bdets = (size_t *) malloc(BdetSize*sizeof(size_t));
-      for (size_t ia = ia_start; ia < ia_end; ia++) {
+      for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
         const size_t * ptr = adets[ia].data();
-        for (size_t d = 0; d < detSize; d++) Adets[d + (ia - ia_start)*detSize] = ptr[d];
+        for (size_t d = 0; d < detSize; d++) Adets[d + (ia - braAlphaStart)*detSize] = ptr[d];
       }
       for (size_t ib = ibBeg; ib < ibEnd; ib++) {
         const size_t * ptr = bdets[ib].data();
@@ -306,7 +304,7 @@ namespace sbd {
 
 	    size_t ia_local = ia - braAlphaStart;
 
-            size_t DetI[8];
+            size_t DetI[16];
             DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
@@ -351,8 +349,8 @@ namespace sbd {
 
             size_t ib_local = ib - braBetaStart;
 
-            size_t DetI[8];
-            DetFromAlphaBeta(&Adets[(ia - ia_start)*detSize],
+            size_t DetI[16];
+            DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
 
@@ -392,8 +390,8 @@ namespace sbd {
 	for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	  for(size_t ib = ibBeg; ib < ibEnd; ib++) {
 
-            size_t DetI[8];
-            DetFromAlphaBeta(&Adets[(ia - ia_start)*detSize],
+            size_t DetI[16];
+            DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
 
@@ -420,14 +418,17 @@ namespace sbd {
 	} // end for ia
       } // end taskType == 0
 
-      #pragma omp target exit data map(from: T_ptr[0: T_size], Wb_ptr[0 : Wb_size])
+      #pragma omp target exit data map(from: T_ptr[0: T_size], Wb_ptr[0 : Wb_size]) map(delete: Adets[0:AdetSize], Bdets[0:BdetSize])
+      // free the size_t arrays for alpha and beta bit-strings
+      free(Adets);
+      free(Bdets);
 
 #else
       // ---- CPU path: OpenMP threading ----
 #pragma omp parallel
       {
-	size_t ia_start = helper[task].braAlphaStart;
-	size_t ia_end   = helper[task].braAlphaEnd;
+	size_t braAlphaStart = helper[task].braAlphaStart;
+	size_t braAlphaEnd   = helper[task].braAlphaEnd;
 
 	auto DetI = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
 	std::vector<int> c(2,0);
@@ -435,7 +436,7 @@ namespace sbd {
 
 	if( helper[task].taskType == 2 ) { // beta range are same
 #pragma omp for	schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -474,7 +475,7 @@ namespace sbd {
 
 	} else if ( helper[task].taskType == 1 ) { // alpha range are same
 #pragma omp for schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -512,7 +513,7 @@ namespace sbd {
 
 	} else {
 #pragma omp for schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize

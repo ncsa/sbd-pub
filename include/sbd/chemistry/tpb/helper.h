@@ -80,11 +80,6 @@ namespace sbd {
     size_t ketBetaStart = helper.ketBetaStart;
     size_t ketBetaEnd = helper.ketBetaEnd;
 
-  std::vector<int> closed(norb);
-  std::vector<int> open(norb);
-  auto aDet = ADets[0];
-  auto bDet = BDets[0];
-
     helper.SinglesFromAlpha.resize(braAlphaEnd-braAlphaStart);
     helper.SinglesAlphaCrAn.resize(braAlphaEnd-braAlphaStart);
     helper.SinglesFromBeta.resize(braBetaEnd-braBetaStart);
@@ -93,6 +88,9 @@ namespace sbd {
     if (helper.taskType != 1) {
 #pragma omp parallel for
       for(size_t ib=braAlphaStart; ib < braAlphaEnd; ib++) {
+        std::vector<int> closed(norb);
+        std::vector<int> open(norb);
+        auto aDet = ADets[0];
         int nclosed = getOpenClosed(ADets[ib],bit_length,norb,open,closed);
         for(size_t j=0; j < nclosed; j++) {
   	  for(size_t k=0; k < norb-nclosed; k++) {
@@ -116,6 +114,9 @@ namespace sbd {
     if (helper.taskType != 2) {
 #pragma omp parallel for
       for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+        std::vector<int> closed(norb);
+        std::vector<int> open(norb);
+        auto bDet = BDets[0];
         int nclosed = getOpenClosed(BDets[ib],bit_length,norb,open,closed);
         for(size_t j=0; j < nclosed; j++) {
 	  for(size_t k=0; k < norb-nclosed; k++) {
