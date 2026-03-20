@@ -23,6 +23,15 @@ int main(int argc, char * argv[]) {
   int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
   int mpi_size; MPI_Comm_size(comm,&mpi_size);
 
+#ifdef USE_OMP_OFFLOAD
+  // set GPU device
+  int myDevice, numDevices;
+  numDevices = omp_get_num_devices();
+  if (numDevices > 0) myDevice = mpi_rank % numDevices;
+  else                myDevice = 0;
+  omp_set_default_device(myDevice);
+#endif
+
 #ifdef SBD_THRUST
   int numDevices, myDevice;
 #ifdef __CUDACC__

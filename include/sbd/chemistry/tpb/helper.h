@@ -80,55 +80,63 @@ namespace sbd {
     size_t ketBetaStart = helper.ketBetaStart;
     size_t ketBetaEnd = helper.ketBetaEnd;
 
-  std::vector<int> closed(norb);
-  std::vector<int> open(norb);
-  auto aDet = ADets[0];
-  auto bDet = BDets[0];
-
     helper.SinglesFromAlpha.resize(braAlphaEnd-braAlphaStart);
     helper.SinglesAlphaCrAn.resize(braAlphaEnd-braAlphaStart);
     helper.SinglesFromBeta.resize(braBetaEnd-braBetaStart);
     helper.SinglesBetaCrAn.resize(braBetaEnd-braBetaStart);
 
-    for(size_t ib=braAlphaStart; ib < braAlphaEnd; ib++) {
-      int nclosed = getOpenClosed(ADets[ib],bit_length,norb,open,closed);
-      for(size_t j=0; j < nclosed; j++) {
-	for(size_t k=0; k < norb-nclosed; k++) {
-	  aDet = ADets[ib];
-	  setocc(aDet,bit_length,closed[j],false);
-	  setocc(aDet,bit_length,open[k],true);
-	  auto itk = std::find(ADets.begin()+ketAlphaStart,
-			       ADets.begin()+ketAlphaEnd,
-			       aDet);
-	  if( itk != ADets.begin()+ketAlphaEnd ) {
-	    auto ik = std::distance(ADets.begin(),itk);
-	    helper.SinglesFromAlpha[ib-braAlphaStart].push_back(static_cast<size_t>(ik));
-	    helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*open[k]);
-	    helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*closed[j]);
+    if (helper.taskType != 1) {
+#pragma omp parallel for
+      for(size_t ib=braAlphaStart; ib < braAlphaEnd; ib++) {
+        std::vector<int> closed(norb);
+        std::vector<int> open(norb);
+        auto aDet = ADets[0];
+        int nclosed = getOpenClosed(ADets[ib],bit_length,norb,open,closed);
+        for(size_t j=0; j < nclosed; j++) {
+  	  for(size_t k=0; k < norb-nclosed; k++) {
+  	    aDet = ADets[ib];
+	    setocc(aDet,bit_length,closed[j],false);
+	    setocc(aDet,bit_length,open[k],true);
+	    auto itk = std::find(ADets.begin()+ketAlphaStart,
+			         ADets.begin()+ketAlphaEnd,
+			         aDet);
+	    if( itk != ADets.begin()+ketAlphaEnd ) {
+	      auto ik = std::distance(ADets.begin(),itk);
+	      helper.SinglesFromAlpha[ib-braAlphaStart].push_back(static_cast<size_t>(ik));
+	      helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*open[k]);
+	      helper.SinglesAlphaCrAn[ib-braAlphaStart].push_back(2*closed[j]);
+	    }
 	  }
-	}
+        }
       }
     }
 
-    for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
-      int nclosed = getOpenClosed(BDets[ib],bit_length,norb,open,closed);
-      for(size_t j=0; j < nclosed; j++) {
-	for(size_t k=0; k < norb-nclosed; k++) {
-	  bDet = BDets[ib];
-	  setocc(bDet,bit_length,closed[j],false);
-	  setocc(bDet,bit_length,open[k],true);
-	  auto itk = std::find(BDets.begin()+ketBetaStart,
-			       BDets.begin()+ketBetaEnd,
-			       bDet);
-	  if( itk != BDets.begin()+ketBetaEnd ) {
-	    auto ik = std::distance(BDets.begin(),itk);
-	    helper.SinglesFromBeta[ib-braBetaStart].push_back(static_cast<size_t>(ik));
-	    helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*open[k]+1);
-	    helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*closed[j]+1);
+    if (helper.taskType != 2) {
+#pragma omp parallel for
+      for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+        std::vector<int> closed(norb);
+        std::vector<int> open(norb);
+        auto bDet = BDets[0];
+        int nclosed = getOpenClosed(BDets[ib],bit_length,norb,open,closed);
+        for(size_t j=0; j < nclosed; j++) {
+	  for(size_t k=0; k < norb-nclosed; k++) {
+	    bDet = BDets[ib];
+	    setocc(bDet,bit_length,closed[j],false);
+	    setocc(bDet,bit_length,open[k],true);
+	    auto itk = std::find(BDets.begin()+ketBetaStart,
+			         BDets.begin()+ketBetaEnd,
+			         bDet);
+	    if( itk != BDets.begin()+ketBetaEnd ) {
+	      auto ik = std::distance(BDets.begin(),itk);
+	      helper.SinglesFromBeta[ib-braBetaStart].push_back(static_cast<size_t>(ik));
+	      helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*open[k]+1);
+	      helper.SinglesBetaCrAn[ib-braAlphaStart].push_back(2*closed[j]+1);
+	    }
 	  }
-	}
+        }
       }
     }
+
   }
 
   void GenerateDoubles(const std::vector<std::vector<size_t>> & ADets,
@@ -148,25 +156,30 @@ namespace sbd {
   helper.DoublesFromAlpha.resize(braAlphaEnd - braAlphaStart);
   helper.DoublesFromBeta.resize(braBetaEnd - braBetaStart);
 
+  if (helper.taskType == 2) {  
 #pragma omp parallel for
-  for (size_t ib = braAlphaStart; ib < braAlphaEnd; ib++) {
-    for (size_t ik = ketAlphaStart; ik < ketAlphaEnd; ik++) {
-      if (difference(ADets[ib], ADets[ik], bit_length, norb) == 4) {
-        helper.DoublesFromAlpha[ib - braAlphaStart].push_back(
+    for (size_t ib = braAlphaStart; ib < braAlphaEnd; ib++) {
+      for (size_t ik = ketAlphaStart; ik < ketAlphaEnd; ik++) {
+        if (difference(ADets[ib], ADets[ik], bit_length, norb) == 4) {
+          helper.DoublesFromAlpha[ib - braAlphaStart].push_back(
             static_cast<size_t>(ik));
+        }
       }
     }
   }
 
+  if (helper.taskType == 1) {  
 #pragma omp parallel for
-  for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
-    for (size_t ik = ketBetaStart; ik < ketBetaEnd; ik++) {
-      if (difference(BDets[ib], BDets[ik], bit_length, norb) == 4) {
-        helper.DoublesFromBeta[ib - braBetaStart].push_back(
+    for (size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
+      for (size_t ik = ketBetaStart; ik < ketBetaEnd; ik++) {
+        if (difference(BDets[ib], BDets[ik], bit_length, norb) == 4) {
+          helper.DoublesFromBeta[ib - braBetaStart].push_back(
             static_cast<size_t>(ik));
+        }
       }
     }
   }
+
 }
 
 void GenerateExcitation(const std::vector<std::vector<size_t>> &adets,
@@ -195,73 +208,118 @@ void GenerateExcitation(const std::vector<std::vector<size_t>> &adets,
 
     // count single and double excitations to save memory
 
+    // task types 2 and 0 compute single alpha excitations
+    if (helper.taskType != 1) {
     #pragma omp parallel for
-    for(size_t ia=braAlphaStart; ia < braAlphaEnd; ia++) {
-      size_t scount = 0; size_t dcount = 0;
-      for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
-        int d = difference(adets[ia],adets[ja],bit_length,norb);
-        if ( d == 2 ) scount++;
-        else if ( d == 4 ) dcount++;
-      }
+      for(size_t ia=braAlphaStart; ia < braAlphaEnd; ia++) {
+        size_t scount = 0;
+        for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+          int d = difference(adets[ia],adets[ja],bit_length,norb);
+          if ( d == 2 ) scount++;
+        }
 
-      std::vector<int> cr(2);
-      std::vector<int> an(2);
-      helper.SinglesFromAlpha[ia-braAlphaStart].reserve(scount);
-      helper.SinglesAlphaCrAn[ia-braAlphaStart].reserve(2*scount);
-      helper.DoublesFromAlpha[ia-braAlphaStart].reserve(dcount);
-      helper.DoublesAlphaCrAn[ia-braAlphaStart].reserve(4*dcount);
+        std::vector<int> cr(2);
+        std::vector<int> an(2);
+        helper.SinglesFromAlpha[ia-braAlphaStart].reserve(scount);
+        helper.SinglesAlphaCrAn[ia-braAlphaStart].reserve(2*scount);
 
-      for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
-        int d = difference(adets[ia],adets[ja],bit_length,norb);
-        if ( d == 2 ) {
-          helper.SinglesFromAlpha[ia-braAlphaStart].push_back(ja);
-	  OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
-	  helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
-	  helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
-        } else if ( d == 4 ) {
-          helper.DoublesFromAlpha[ia-braAlphaStart].push_back(ja);
-	  OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
-	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
-	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[1]);
-	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
-	  helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[1]);
+        for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+          int d = difference(adets[ia],adets[ja],bit_length,norb);
+          if ( d == 2 ) {
+            helper.SinglesFromAlpha[ia-braAlphaStart].push_back(ja);
+	    OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
+	    helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
+	    helper.SinglesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
+          } 
         }
       }
     }
 
+    // task type 2 computes double alpha excitations
+    if (helper.taskType == 2) {
+    #pragma omp parallel for
+      for(size_t ia=braAlphaStart; ia < braAlphaEnd; ia++) {
+        size_t dcount = 0;
+        for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+          int d = difference(adets[ia],adets[ja],bit_length,norb);
+          if ( d == 4 ) dcount++;
+        }
+
+        std::vector<int> cr(2);
+        std::vector<int> an(2);
+        helper.DoublesFromAlpha[ia-braAlphaStart].reserve(dcount);
+        helper.DoublesAlphaCrAn[ia-braAlphaStart].reserve(4*dcount);
+
+        for(size_t ja=ketAlphaStart; ja < ketAlphaEnd; ja++) {
+          int d = difference(adets[ia],adets[ja],bit_length,norb);
+          if ( d == 4 ) {
+            helper.DoublesFromAlpha[ia-braAlphaStart].push_back(ja);
+	    OrbitalDifference(adets[ia],adets[ja],bit_length,norb,cr,an);
+	    helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[0]);
+	    helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*cr[1]);
+	    helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[0]);
+	    helper.DoublesAlphaCrAn[ia-braAlphaStart].push_back(2*an[1]);
+          }
+        }
+      }
+    }
+
+    // task types 1 and 0 compute single beta excitations
+    if (helper.taskType != 2) {
 #pragma omp parallel for
-    for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
-      size_t scount = 0; size_t dcount = 0;
-      for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
-        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
-        if ( d == 2 ) scount++;
-        else if ( d == 4 ) dcount++;
-      }
+      for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+        size_t scount = 0;
+        for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+          int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+          if ( d == 2 ) scount++;
+        }
 
-      helper.SinglesFromBeta[ib-braBetaStart].reserve(scount);
-      helper.SinglesBetaCrAn[ib-braBetaStart].reserve(2*scount);
-      helper.DoublesFromBeta[ib-braBetaStart].reserve(dcount);
-      helper.DoublesBetaCrAn[ib-braBetaStart].reserve(4*dcount);
-      std::vector<int> cr(2);
-      std::vector<int> an(2);
+        helper.SinglesFromBeta[ib-braBetaStart].reserve(scount);
+        helper.SinglesBetaCrAn[ib-braBetaStart].reserve(2*scount);
+        std::vector<int> cr(2);
+        std::vector<int> an(2);
 
-      for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
-        int d = difference(bdets[ib],bdets[jb],bit_length,norb);
-        if ( d == 2 ) {
-          helper.SinglesFromBeta[ib-braBetaStart].push_back(jb);
-	  OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
-	  helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
-	  helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
-        } else if ( d == 4 ) {
-          helper.DoublesFromBeta[ib-braBetaStart].push_back(jb);
-	  OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
-	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
-	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[1]+1);
-	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
-	  helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[1]+1);
+        for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+          int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+          if ( d == 2 ) {
+            helper.SinglesFromBeta[ib-braBetaStart].push_back(jb);
+	    OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
+	    helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
+	    helper.SinglesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
+          }
         }
       }
     }
+
+    // task type 1 computes double beta excitations
+    if (helper.taskType == 1) {
+#pragma omp parallel for
+      for(size_t ib=braBetaStart; ib < braBetaEnd; ib++) {
+        size_t dcount = 0;
+        for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+          int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+          if ( d == 4 ) dcount++;
+        }
+
+        helper.DoublesFromBeta[ib-braBetaStart].reserve(dcount);
+        helper.DoublesBetaCrAn[ib-braBetaStart].reserve(4*dcount);
+        std::vector<int> cr(2);
+        std::vector<int> an(2);
+
+        for(size_t jb=ketBetaStart; jb < ketBetaEnd; jb++) {
+          int d = difference(bdets[ib],bdets[jb],bit_length,norb);
+          if ( d == 4 ) {
+            helper.DoublesFromBeta[ib-braBetaStart].push_back(jb);
+	    OrbitalDifference(bdets[ib],bdets[jb],bit_length,norb,cr,an);
+	    helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[0]+1);
+	    helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*cr[1]+1);
+	    helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[0]+1);
+	    helper.DoublesBetaCrAn[ib-braBetaStart].push_back(2*an[1]+1);
+          }
+        }
+      }
+    }
+
   }
 
   void TaskCommunicator(MPI_Comm comm,
@@ -595,6 +653,7 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
   helper.SinglesBetaCrAn_flat.resize(2 * singles_beta_total);
   helper.DoublesBetaCrAn_flat.resize(4 * doubles_beta_total);
 
+#pragma omp parallel for
   for (size_t i = 0; i < nAlpha; i++) {
     for (size_t j = 0; j < helper.SinglesFromAlphaLen[i]; j++) {
       helper.SinglesFromAlpha_flat[helper.SinglesFromAlphaOffset[i] + j] =
@@ -614,6 +673,7 @@ void FreeHelpers(std::vector<TaskHelpers> &helper) {
     }
   }
 
+#pragma omp parallel for
   for (size_t i = 0; i < nBeta; i++) {
     for (size_t j = 0; j < helper.SinglesFromBetaLen[i]; j++) {
       helper.SinglesFromBeta_flat[helper.SinglesFromBetaOffset[i] + j] =
@@ -796,17 +856,6 @@ std::vector<size_t> TaskCostSize(const std::vector<TaskHelpers> &helper,
   MPI_Comm_size(h_comm, &mpi_size_h);
   int mpi_rank_h;
   MPI_Comm_rank(h_comm, &mpi_rank_h);
-  size_t num_threads = 1;
-#pragma omp parallel
-    {
-      num_threads = omp_get_num_threads();
-    }
-
-    size_t chunk_size = 0;
-    if( helper.size() != 0 ) {
-      chunk_size = (helper[0].braAlphaEnd-helper[0].braAlphaStart) / num_threads;
-    }
-    std::vector<std::vector<size_t>> len(helper.size(),std::vector<size_t>(num_threads));
 
   size_t braAlphaSize = 0;
   size_t braBetaSize = 0;
@@ -815,54 +864,48 @@ std::vector<size_t> TaskCostSize(const std::vector<TaskHelpers> &helper,
     braBetaSize = helper[0].braBetaEnd - helper[0].braBetaStart;
   }
 
-#pragma omp parallel
-    {
-      size_t thread_id = omp_get_thread_num();
-      size_t ia_start = 0;
-      size_t ia_end   = 0;
-      if( helper.size() != 0 ) {
-	ia_start = thread_id * chunk_size     + helper[0].braAlphaStart;
-	ia_end   = (thread_id+1) * chunk_size + helper[0].braAlphaStart;
-	if( thread_id == num_threads - 1 ) {
-	  ia_end = helper[0].braAlphaEnd;
-	}
-      }
-      for(size_t task = 0; task < helper.size(); task++) {
-	for(size_t ia = ia_start; ia < ia_end; ia++) {
-	  for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
-	    size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
-	                    +ib-helper[task].braBetaStart;
-	    if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
-	    if ( helper[task].taskType == 0 ) {
-	      // two-particle excitation composed of single alpha and single beta
-	      len[task][thread_id] += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart]
-		                    * helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
-	    }
-	    else if ( helper[task].taskType == 1 ) {
-	      // single alpha excitation
-	      len[task][thread_id] += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart];
-	      // double alpha excitation
-	      len[task][thread_id] += helper[task].DoublesFromAlphaLen[ia-helper[task].braAlphaStart];
-	    }
-	    else if( helper[task].taskType == 2 ) {
-	      // single beta excitation
-	      len[task][thread_id] += helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
-	      // double beta excitation
-	      len[task][thread_id] += helper[task].DoublesFromBetaLen[ib-helper[task].braBetaStart];
-	    }
-	  } // end ib loop
-	} // end ia loop
-      } // end tasktype loop
-    } // end omp parallel for
+  size_t ia_start = 0;
+  size_t ia_end   = 0;
+  if( helper.size() != 0 ) {
+    ia_start = helper[0].braAlphaStart;
+    ia_end   = helper[0].braAlphaEnd;
+  }
 
-    std::vector<size_t> cost(helper.size());
-    for(size_t task=0; task < helper.size(); task++) {
-      cost[task] = 0.0;
-      for(size_t thread=0; thread < num_threads; thread++) {
-	cost[task] += len[task][thread];
-      }
-    }
-    return cost;
+  std::vector<size_t> cost(helper.size());
+
+  for(size_t task = 0; task < helper.size(); task++) {
+
+    size_t taskLen = 0; 
+#pragma omp parallel for reduction(+:taskLen) schedule(dynamic)
+    for(size_t ia = ia_start; ia < ia_end; ia++) {
+      for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
+        size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
+	                 +ib-helper[task].braBetaStart;
+        if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
+	if ( helper[task].taskType == 0 ) {
+	// two-particle excitation composed of single alpha and single beta
+	taskLen += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart]
+	        * helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
+	}
+	else if ( helper[task].taskType == 1 ) {
+	  // single alpha excitation
+	  taskLen += helper[task].SinglesFromAlphaLen[ia-helper[task].braAlphaStart];
+	  // double alpha excitation
+	  taskLen += helper[task].DoublesFromAlphaLen[ia-helper[task].braAlphaStart];
+	}
+	else if( helper[task].taskType == 2 ) {
+	  // single beta excitation
+	  taskLen += helper[task].SinglesFromBetaLen[ib-helper[task].braBetaStart];
+	  // double beta excitation
+	  taskLen += helper[task].DoublesFromBetaLen[ib-helper[task].braBetaStart];
+	}
+      } // end ib loop
+    } // end ia loop
+
+    cost[task] = taskLen;
+  } // end task loop
+
+  return cost;
   }
 
   void RemakeHelpers(const std::vector<std::vector<size_t>> & adet,

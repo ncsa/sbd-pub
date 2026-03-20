@@ -11,6 +11,9 @@
 
 #include <limits> // For std::numeric_limits (bisection test)
 
+#define SBD_MAX_DETSIZE 16
+#define SBD_MAX_SPINORBITALS 256
+
   // one-electron and two-electron integrals
   size_t I1_size, I2_size, I2_Direct_size, I2_Exchange_size;
   double *I1_ptr;
@@ -22,6 +25,48 @@ namespace sbd {
 
 // Declare all device functions for OpenMP target offload
 #pragma omp declare target
+
+// Device version using size_t arrays instead of std::vector<size_t>
+  void DetFromAlphaBeta(const size_t * A,
+                        const size_t * B,
+                        const size_t bit_length,
+                        const size_t L,
+                        size_t * D) {
+    int fsize = L / bit_length;
+    int half = bit_length / 2;
+    int extra = L - fsize*bit_length;
+    int case1 = (extra > 0) && (extra <= half);
+    int case2 = (extra > 0) && (extra >  half);
+    for (int j = 0; j < fsize; j++) {
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
+    }
+    if (case1) {
+       int j = fsize;
+       D[2*j] = 0;
+       for (int i = 0; i < extra; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+    }
+    if (case2) {
+       int j = fsize;
+       D[2*j] = 0; D[2*j + 1] = 0;
+       for (int i = 0; i < half; i++) {
+          if (A[j] & (1L << i)) D[2*j] |= (1L << (2*i));
+          if (B[j] & (1L << i)) D[2*j] |= (1L << (2*i + 1));
+       }
+       for (int i = 0; i < extra - half; i++) {
+          if (A[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i));
+          if (B[j] & (1L << (i + half))) D[2*j + 1] |= (1L << (2*i + 1));
+       }
+    }
+  }
 
 // Device-side parity computation (5-parameter version)
 template <typename ElemT>
@@ -133,7 +178,7 @@ inline ElemT ZeroExcite_device(const size_t *det, size_t bit_length, size_t L,
   ElemT energy = I0;
 
   // Get closed orbitals
-  int closed[256]; // Maximum 256 orbitals
+  int closed[SBD_MAX_SPINORBITALS]; // Maximum number of spin-orbitals
   int num_closed = 0;
 
   for (int i = 0; i < 2 * L; i++) {
@@ -183,8 +228,9 @@ inline ElemT OneExcite_device(const size_t *det, size_t bit_length, int i,
   int dsize = (norbs_spin + bit_length - 1) / bit_length;
   for (int x = 0; x < dsize; x++) {
     size_t bits = det[x];
-    for (int pos = 0; pos < bit_length; pos++) {
-       if ((bits & 1ULL) == 1ULL) {
+    int pos = 0;
+    while (bits != 0) {
+       if (bits & 1) {
           int j = x * bit_length + pos;
           // Use twoInt_device helper for cleaner code
           // I2.Value(a,i,j,j) - I2.Value(a,j,j,i)
@@ -193,6 +239,7 @@ inline ElemT OneExcite_device(const size_t *det, size_t bit_length, int i,
           energy += term1 - term2;
         }
         bits >>= 1;
+        pos++;
      }
   }
   return ElemT(sgn) * energy;
