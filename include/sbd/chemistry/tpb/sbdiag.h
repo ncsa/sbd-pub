@@ -5,6 +5,8 @@
 #ifndef SBD_CHEMISTRY_TPB_SBDIAG_H
 #define SBD_CHEMISTRY_TPB_SBDIAG_H
 
+#include "sbd/framework/nvtx.h"
+
 namespace sbd {
 
   namespace tpb {
@@ -239,10 +241,13 @@ namespace sbd {
 	auto time_start_qcham = std::chrono::high_resolution_clock::now();
 #ifdef SBD_THRUST
 	auto time_start_mult_init = std::chrono::high_resolution_clock::now();
-	device_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L),
-					adet_comm_size,bdet_comm_size, helper, I0, I1, I2,
-					h_comm,b_comm,t_comm,
-	                sbd_data.use_precalculated_dets, sbd_data.max_memory_gb_for_determinants, sbd_data.thrust_collapse_loops);
+        {
+            SBD_NVTX_RANGE_COLOR("device_mult.Init", __LINE__);
+            device_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L),
+                             adet_comm_size,bdet_comm_size, helper, I0, I1, I2,
+                             h_comm,b_comm,t_comm,
+                             sbd_data.use_precalculated_dets, sbd_data.max_memory_gb_for_determinants, sbd_data.thrust_collapse_loops);
+        }
 	auto time_end_mult_init = std::chrono::high_resolution_clock::now();
 	auto elapsed_mult_init_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_mult_init-time_start_mult_init).count();
 	double elapsed_mult_init = 1.0e-6 * elapsed_mult_init_count;
@@ -251,7 +256,10 @@ namespace sbd {
 	}
 
 	thrust::device_vector<double> hii;
-	device_mult.makeQChamDiagTerms(hii);
+        {
+            SBD_NVTX_RANGE_COLOR("device_mult.makeQChamDiagTerms", __LINE__);
+            device_mult.makeQChamDiagTerms(hii);
+        }
 #else
 	std::vector<double> hii;
 	sbd::makeQChamDiagTerms(adet,bdet,bit_length,L,
@@ -267,11 +275,13 @@ namespace sbd {
 
 #ifdef SBD_THRUST
 	if( method == 0 ) {
-		sbd::Davidson(hii, W, device_mult,
-				max_it,max_nb,eps,max_time);
+            SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
+            sbd::Davidson(hii, W, device_mult,
+                          max_it,max_nb,eps,max_time);
 	} else {
-		sbd::Lanczos(hii, W, device_mult,
-				max_it,max_nb,eps);
+            SBD_NVTX_RANGE_COLOR("Lanczos", __LINE__);
+            sbd::Lanczos(hii, W, device_mult,
+                         max_it,max_nb,eps);
 	}
 #else
 	if( method == 0 ) {
@@ -312,13 +322,16 @@ namespace sbd {
 
 	auto time_start_mult = std::chrono::high_resolution_clock::now();
 #ifdef SBD_THRUST
-    // copyin W
-    thrust::device_vector<double> W_dev(W.size());
-    thrust::copy_n(W.begin(), W.size(), W_dev.begin());
+        // copyin W
+        thrust::device_vector<double> W_dev(W.size());
+        thrust::copy_n(W.begin(), W.size(), W_dev.begin());
 
-    thrust::device_vector<double> C_dev(C.size(), 0.0);
+        thrust::device_vector<double> C_dev(C.size(), 0.0);
 
-	device_mult.run(hii, W_dev, C_dev);
+        {
+            SBD_NVTX_RANGE_COLOR("device_mult.run", __LINE__);
+            device_mult.run(hii, W_dev, C_dev);
+        }
 
 	thrust::copy_n(C_dev.begin(), C_dev.size(), C.begin());
 #else
@@ -476,9 +489,12 @@ namespace sbd {
 
 	auto time_start_meas = std::chrono::high_resolution_clock::now();
 #ifdef SBD_THRUST
-	device_mult.correlation(W,
-		one_p_rdm,
-	    two_p_rdm);
+        {
+            SBD_NVTX_RANGE_COLOR("device_mult.correlation", __LINE__);
+            device_mult.correlation(W,
+                                    one_p_rdm,
+                                    two_p_rdm);
+        }
 #else
 	Correlation(W,adet,bdet,bit_length,L,
 		    adet_comm_size,bdet_comm_size,
