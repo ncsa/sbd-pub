@@ -8,9 +8,13 @@
 #include <chrono>
 #include <cstdio>
 
+#include "sbd/framework/nvtx.h"
 
 // per thread DetI, DetJ storage size (1GB max)
 #define MAX_DET_SIZE 134217728
+
+// Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
+// #define SBD_USE_STRIDED_RANK_DISTRIBUTION
 
 namespace sbd
 {
@@ -331,10 +335,6 @@ void MultTPBThrust<ElemT>::UpdateDet(size_t task)
     }
 }
 
-
-
-
-
 template <typename ElemT>
 class MultAlphaBeta : public MultKernelBase<ElemT>
 {
@@ -362,7 +362,9 @@ public:
         size_t jb = helper.SinglesFromBetaKetIndex[k];
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
+#endif
             size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
                             + jb - helper.ketBetaStart;
 
@@ -372,7 +374,9 @@ public:
                                         helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
                                         helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
             atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         }
+#endif
     }
 };
 
@@ -791,7 +795,10 @@ void MultTPBThrust<ElemT>::run(
 
     if (mpi_rank_t == 0) {
         auto ci = thrust::counting_iterator<size_t>(0);
-        thrust::for_each_n(thrust::device, ci, T[active_T].size(), Wb_init_kernel(Wb, hii, T[active_T]));
+        {
+            SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+            thrust::for_each_n(thrust::device, ci, T[active_T].size(), Wb_init_kernel(Wb, hii, T[active_T]));
+        }
     }
 
     double time_slid = 0.0;
@@ -866,36 +873,62 @@ void MultTPBThrust<ElemT>::run(
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                 auto cis = thrust::counting_iterator<size_t>(0);
-                thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                }
 
                 size = helper[task].size_double_alpha * braBetaSize;
                 MultDoubleAlpha double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                 auto cid = thrust::counting_iterator<size_t>(0);
-                thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                }
             } else if(helper[task].taskType == 1) {
                 size = helper[task].size_single_beta * braAlphaSize;
                 MultSingleBeta single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                 auto cis = thrust::counting_iterator<size_t>(0);
-                thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                }
 
                 size = helper[task].size_double_beta * braAlphaSize;
                 MultDoubleBeta double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                 auto cid = thrust::counting_iterator<size_t>(0);
-                thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                }
             } else {
                 size = helper[task].size_single_alpha * helper[task].size_single_beta;
 
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto ci = thrust::counting_iterator<size_t>(0);
-                thrust::for_each_n(thrust::device, ci, size, kernel);
+#else
+                size_t size_local = (size <= mpi_rank_h) ? 0 : (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                size = size_local;
+                auto ci = thrust::make_transform_iterator(
+                    thrust::counting_iterator<size_t>(0),
+                    [=] __host__ __device__ (size_t t) {
+                        return mpi_rank_h + (mpi_size_h * t);
+                    }
+                    );
+#endif
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    thrust::for_each_n(thrust::device, ci, size, kernel);
+                }
             }
         } else {
             size = braAlphaSize * braBetaSize;
@@ -916,7 +949,10 @@ void MultTPBThrust<ElemT>::run(
                     kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                     auto ci = thrust::counting_iterator<size_t>(0);
-                    thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    {
+                        SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                        thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    }
                     offset += num_threads;
                 }
             } else if(helper[task].taskType == 1) {
@@ -931,7 +967,10 @@ void MultTPBThrust<ElemT>::run(
                     kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                     auto ci = thrust::counting_iterator<size_t>(0);
-                    thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    {
+                        SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                        thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    }
                     offset += num_threads;
                 }
             } else {
@@ -946,7 +985,10 @@ void MultTPBThrust<ElemT>::run(
                     kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 
                     auto ci = thrust::counting_iterator<size_t>(0);
-                    thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    {
+                        SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                        thrust::for_each_n(thrust::device, ci, num_threads, kernel);
+                    }
                     offset += num_threads;
                 }
             }
@@ -962,10 +1004,14 @@ void MultTPBThrust<ElemT>::run(
     auto time_mult_end = std::chrono::high_resolution_clock::now();
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
-    if (mpi_size_t > 1)
+    if (mpi_size_t > 1) {
+        SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
         MpiAllreduce(Wb, MPI_SUM, this->t_comm_);
-    if (mpi_size_h > 1)
+    }
+    if (mpi_size_h > 1) {
+        SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
         MpiAllreduce(Wb, MPI_SUM, this->h_comm_);
+    }
     auto time_comm_end = std::chrono::high_resolution_clock::now();
 
 #ifdef SBD_DEBUG_MULT
