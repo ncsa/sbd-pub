@@ -14,7 +14,7 @@
 #define MAX_DET_SIZE 134217728
 
 // Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
-// #define SBD_USE_STRIDED_RANK_DISTRIBUTION
+#define SBD_USE_STRIDED_RANK_DISTRIBUTION
 
 namespace sbd
 {
@@ -363,20 +363,20 @@ public:
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
-        if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                            + jb - helper.ketBetaStart;
 
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                       + jb - helper.ketBetaStart;
 
-            ElemT eij = this->TwoExcite(DetI,
-                                        helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
-                                        helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-            atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
-        }
-#endif
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+
+        ElemT eij = this->TwoExcite(DetI,
+                                    helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
+                                    helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+        if (eij == 0) return;
+
+        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
     }
 };
 
@@ -408,15 +408,19 @@ public:
         size_t jb = ib;
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-        if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                            + jb - helper.ketBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
 
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                       + jb - helper.ketBetaStart;
 
-            ElemT eij = this->OneExcite(DetI, helper.SinglesAlphaCrAnSM[j], helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha]);
-            atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
-        }
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+
+        ElemT eij = this->OneExcite(DetI, helper.SinglesAlphaCrAnSM[j], helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha]);
+        if (eij == 0) return;
+
+        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
     }
 };
 
@@ -446,17 +450,21 @@ public:
         size_t ib = k + helper.braBetaStart;
         size_t jb = ib;
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-        if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                            + jb - helper.ketBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
 
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                       + jb - helper.ketBetaStart;
 
-            ElemT eij = this->TwoExcite(DetI,
-                                        helper.DoublesAlphaCrAnSM[j], helper.DoublesAlphaCrAnSM[j + helper.size_double_alpha],
-                                        helper.DoublesAlphaCrAnSM[j + 2 * helper.size_double_alpha], helper.DoublesAlphaCrAnSM[j + 3 * helper.size_double_alpha]);
-            atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
-        }
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+
+        ElemT eij = this->TwoExcite(DetI,
+                                    helper.DoublesAlphaCrAnSM[j], helper.DoublesAlphaCrAnSM[j + helper.size_double_alpha],
+                                    helper.DoublesAlphaCrAnSM[j + 2 * helper.size_double_alpha], helper.DoublesAlphaCrAnSM[j + 3 * helper.size_double_alpha]);
+        if (eij == 0) return;
+
+        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
     }
 };
 
@@ -486,15 +494,19 @@ public:
         size_t ib = helper.SinglesFromBetaBraIndex[k];
         size_t jb = helper.SinglesFromBetaKetIndex[k];
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-        if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                            + jb - helper.ketBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
 
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                       + jb - helper.ketBetaStart;
 
-            ElemT eij = this->OneExcite(DetI, helper.SinglesBetaCrAnSM[k], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-            atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
-        }
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+
+        ElemT eij = this->OneExcite(DetI, helper.SinglesBetaCrAnSM[k], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+        if (eij == 0) return;
+
+        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
     }
 };
 
@@ -524,17 +536,21 @@ public:
         size_t ib = helper.DoublesFromBetaBraIndex[k];
         size_t jb = helper.DoublesFromBetaKetIndex[k];
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-        if( (braIdx % this->mpi_size_h) == this->mpi_rank_h ) {
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                            + jb - helper.ketBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
 
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                       + jb - helper.ketBetaStart;
 
-            ElemT eij = this->TwoExcite(DetI,
-                                        helper.DoublesBetaCrAnSM[k], helper.DoublesBetaCrAnSM[k + helper.size_double_beta],
-                                        helper.DoublesBetaCrAnSM[k + 2 * helper.size_double_beta], helper.DoublesBetaCrAnSM[k + 3 * helper.size_double_beta]);
-            atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
-        }
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+
+        ElemT eij = this->TwoExcite(DetI,
+                                    helper.DoublesBetaCrAnSM[k], helper.DoublesBetaCrAnSM[k + helper.size_double_beta],
+                                    helper.DoublesBetaCrAnSM[k + 2 * helper.size_double_beta], helper.DoublesBetaCrAnSM[k + 3 * helper.size_double_beta]);
+        if (eij == 0) return;
+
+        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
     }
 };
 
@@ -868,62 +884,95 @@ void MultTPBThrust<ElemT>::run(
             UpdateDet(task);
 
             if (helper[task].taskType == 2) {
+                //
                 size = helper[task].size_single_alpha * braBetaSize;
                 MultSingleAlpha single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto cis = thrust::counting_iterator<size_t>(0);
+#else
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                auto cis = thrust::make_transform_iterator(
+                    thrust::counting_iterator<size_t>(0),
+                    [=] __host__ __device__ (size_t t) {
+                        return mpi_rank_h + (mpi_size_h * t);
+                    });
+#endif
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cis, size, single_kernel);
                 }
 
+                //
                 size = helper[task].size_double_alpha * braBetaSize;
                 MultDoubleAlpha double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto cid = thrust::counting_iterator<size_t>(0);
+#else
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                auto cid = thrust::make_transform_iterator(
+                    thrust::counting_iterator<size_t>(0),
+                    [=] __host__ __device__ (size_t t) {
+                        return mpi_rank_h + (mpi_size_h * t);
+                    });
+#endif
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cid, size, double_kernel);
                 }
             } else if(helper[task].taskType == 1) {
+                //
                 size = helper[task].size_single_beta * braAlphaSize;
                 MultSingleBeta single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto cis = thrust::counting_iterator<size_t>(0);
+#else
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                auto cis = thrust::make_transform_iterator(
+                    thrust::counting_iterator<size_t>(0),
+                    [=] __host__ __device__ (size_t t) {
+                        return mpi_rank_h + (mpi_size_h * t);
+                    });
+#endif
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cis, size, single_kernel);
                 }
 
+                //
                 size = helper[task].size_double_beta * braAlphaSize;
                 MultDoubleBeta double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto cid = thrust::counting_iterator<size_t>(0);
+#else
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                auto cid = thrust::make_transform_iterator(
+                    thrust::counting_iterator<size_t>(0),
+                    [=] __host__ __device__ (size_t t) {
+                        return mpi_rank_h + (mpi_size_h * t);
+                    });
+#endif
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cid, size, double_kernel);
                 }
             } else {
+                //
                 size = helper[task].size_single_alpha * helper[task].size_single_beta;
-
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto ci = thrust::counting_iterator<size_t>(0);
 #else
-                size_t size_local = (size <= mpi_rank_h) ? 0 : (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
-                size = size_local;
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
                         return mpi_rank_h + (mpi_size_h * t);
-                    }
-                    );
+                    });
 #endif
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
