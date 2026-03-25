@@ -5,14 +5,14 @@
 #ifndef SBD_CHEMISTRY_DAVIDSON_THRUST_H
 #define SBD_CHEMISTRY_DAVIDSON_THRUST_H
 
+#include "sbd/framework/nvtx.h"
+
 #include "sbd/framework/jacobi.h"
 #ifdef __CUDACC__
 #include "sbd/framework/cuda_reduce.h"
 #else
 #include "sbd/framework/hip_reduce.h"
 #endif
-
-#include "sbd/framework/nvtx.h"
 
 #include "sbd/framework/thrust_kernels.h"
 
@@ -203,14 +203,22 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                  Patch for stability on Fugaku
                 */
             // #ifdef SBD_FUAGKUPATCH
-            if (mpi_size_t > 1)
+            if (mpi_size_t > 1) {
+                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
-            if (mpi_size_h > 1)
+            }
+            if (mpi_size_h > 1) {
+                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
-            if (mpi_size_t > 1)
+            }
+            if (mpi_size_t > 1) {
+                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(R, MPI_SUM, mult.t_comm());
-            if (mpi_size_h > 1)
+            }
+            if (mpi_size_h > 1) {
+                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(R, MPI_SUM, mult.h_comm());
+            }
             if (mpi_size_h * mpi_size_t > 1) {
                 ElemT volp(1.0 / (mpi_size_h * mpi_size_t));
                 {
@@ -234,7 +242,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             RealT norm_R;
             Normalize(R, norm_R, mult.b_comm());
 
-        	// std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
+            // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 
 #ifdef SBD_DEBUG_DAVIDSON

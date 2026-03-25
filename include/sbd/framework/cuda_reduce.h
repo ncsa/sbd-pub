@@ -134,6 +134,8 @@ __global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
 template <typename Function>
 double precise_reduce_sum_with_function(Function func, size_t size)
 {
+    SBD_NVTX_RANGE_COLOR("precise_reduce_sum_with_function", __LINE__);
+
     size_t n, nt, nb;
     nb = 1;
     nt = size;

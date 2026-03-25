@@ -5,6 +5,8 @@
 #ifndef SBD_FRAMEWORK_THRUST_KERNELS_H
 #define SBD_FRAMEWORK_THRUST_KERNELS_H
 
+#include "sbd/framework/nvtx.h"
+
 namespace sbd
 {
 
@@ -58,6 +60,8 @@ void Normalize(thrust::device_vector<ElemT>& X,
                RealT& res,
                MPI_Comm comm)
 {
+    SBD_NVTX_RANGE_COLOR("Normalize", __LINE__);
+
     res = 0.0;
     RealT sum = 0.0;
 
@@ -73,12 +77,18 @@ void Normalize(thrust::device_vector<ElemT>& X,
     sum = precise_reduce_sum_with_function(kernel, X.size());
 
     MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
-    MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
+    }
     res = std::sqrt(res);
     ElemT factor = ElemT(1.0 / res);
 
-//    thrust::transform(thrust::device, X.begin(), X.end(), thrust::constant_iterator<ElemT>(factor), X.begin(), thrust::multiplies<ElemT>());
-    thrust::transform(thrust::device, X.begin(), X.end(), X.begin(), AX_kernel<ElemT>(factor));
+    {
+        SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+        // thrust::transform(thrust::device, X.begin(), X.end(), thrust::constant_iterator<ElemT>(factor), X.begin(), thrust::multiplies<ElemT>());
+        thrust::transform(thrust::device, X.begin(), X.end(), X.begin(), AX_kernel<ElemT>(factor));
+    }
 }
 
 template <typename ElemT, typename RealT>
@@ -87,6 +97,8 @@ void InnerProduct(const thrust::device_vector<ElemT>& X,
                   RealT& res,
                   MPI_Comm comm)
 {
+    SBD_NVTX_RANGE_COLOR("InnerProduct", __LINE__);
+
     res = 0.0;
     RealT sum = 0.0;
 
@@ -103,7 +115,10 @@ void InnerProduct(const thrust::device_vector<ElemT>& X,
     sum = precise_reduce_sum_with_function(kernel, X.size());
 
     MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
-    MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
+    }
 }
 
 }
