@@ -14,7 +14,9 @@
 #define MAX_DET_SIZE 134217728
 
 // Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
-#define SBD_USE_STRIDED_RANK_DISTRIBUTION
+// #define SBD_USE_STRIDED_RANK_DISTRIBUTION
+// #define SBD_USE_VECTORIZATION
+// #define SBD_USE_HASHTABLE
 
 namespace sbd
 {
@@ -1123,34 +1125,41 @@ void MultTPBThrust<ElemT>::run(
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto ci = thrust::counting_iterator<size_t>(0);
-#else
-#if 1
+#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_VECTORIZATION
+                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
+                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
+#else // #ifndef SBD_USE_VECTORIZATION
+#ifndef SBD_USE_HASHTABLE
                 constexpr int VecLen = 2;
                 MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
                 size = (size + VecLen - 1) / VecLen;
-#else
+#else // #ifndef SBD_USE_HASHTABLE
                 constexpr int VecLen = 2;
-                constexpr int BufLen = 256;
-                MultAlphaBeta_VecSmem<ElemT, VecLen, BufLen> kernel(helper[task], Wb, T[active_T], *this);
+                constexpr int HashLen = 256;
+                MultAlphaBeta_VecSmem<ElemT, VecLen, HashLen>
+                    kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
                 size = (size + VecLen - 1) / VecLen;
-                if (size % BufLen) {
-                    size += (BufLen - (size % BufLen));
+                if (size % HashLen) {
+                    size += (HashLen - (size % HashLen));
                 }
                 if (size % 256) {
                     size += (256 - (size % 256));
                 }
-#endif
+#endif // #ifndef SBD_USE_HASHTABLE
+#endif // #ifndef SBD_USE_VECTORIZATION
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
                         return mpi_rank_h + (mpi_size_h * t);
                         // return t + (size * mpi_rank_h);
                     });
-#endif
+#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, ci, size, kernel);
