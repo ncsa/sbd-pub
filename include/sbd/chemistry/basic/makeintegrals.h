@@ -40,6 +40,64 @@ namespace sbd {
 	I1(j-1,i-1) = Conjugate(ElemT(value));
       } else {
 	I2(i-1,j-1,k-1,l-1) = ElemT(value);
+	I2(j-1,i-1,k-1,l-1) = ElemT(value);
+	I2(i-1,j-1,l-1,k-1) = ElemT(value);
+	I2(j-1,i-1,l-1,k-1) = ElemT(value);
+	I2(k-1,l-1,i-1,j-1) = ElemT(value);
+	I2(k-1,l-1,j-1,i-1) = ElemT(value);
+	I2(l-1,k-1,i-1,j-1) = ElemT(value);
+	I2(l-1,k-1,j-1,i-1) = ElemT(value);
+      }
+    }
+
+    I2.DirectMat.resize(4*L*L);
+    I2.ExchangeMat.resize(4*L*L);
+    for(int i=0; i < L; i++) {
+      for(int j=0; j < L; j++) {
+	I2.Direct(2*i,2*j) = I2.Value(2*i,2*i,2*j,2*j);
+	I2.Direct(2*i,2*j+1) = I2.Value(2*i,2*i,2*j+1,2*j+1);
+	I2.Direct(2*i+1,2*j) = I2.Value(2*i+1,2*i+1,2*j,2*j);
+	I2.Direct(2*i+1,2*j+1) = I2.Value(2*i+1,2*i+1,2*j+1,2*j+1);
+	I2.Exchange(2*i,2*j) = I2.Value(2*i,2*j,2*j,2*i);
+	I2.Exchange(2*i,2*j+1) = I2.Value(2*i,2*j+1,2*j+1,2*i);
+	I2.Exchange(2*i+1,2*j) = I2.Value(2*i+1,2*j,2*j,2*i+1);
+	I2.Exchange(2*i+1,2*j+1) = I2.Value(2*i+1,2*j+1,2*j+1,2*i+1);
+      }
+    }
+  }
+#elif _UHFCPLX
+  template <typename ElemT>
+  void SetupIntegrals(const FCIDump & fcidump,
+		      int & L,
+		      int & N,
+		      ElemT & I0,
+		      oneInt<ElemT> & I1,
+		      twoInt<ElemT> & I2) {
+
+    for(const auto & [key, value] : fcidump.header) {
+      if( key == std::string("NORB") ) {
+	L = std::atoi(value.c_str());
+      }
+      if( key == std::string("NELEC") ) {
+	N = std::atoi(value.c_str());
+      }
+    }
+
+    I1.norbs = 2 * L;
+    I1.store.resize(4*L*L,ElemT(0.0));
+
+    int B = L*L*L*L*4;
+    I2.norbs = L;
+    I2.store.resize(B,ElemT(0.0));
+
+    for(const auto & [value, i, j, k, l] : fcidump.integrals) {
+      if( (i==0) && (k==0) && (j==0) && (l==0) ) {
+	I0 = ElemT(value);
+      } else if( (k==l) && (k==0) ) {
+	I1(i-1,j-1) = ElemT(value);
+	I1(j-1,i-1) = Conjugate(ElemT(value));
+      } else {
+	I2(i-1,j-1,k-1,l-1) = ElemT(value);
 	I2(k-1,l-1,i-1,j-1) = ElemT(value);
 	I2(j-1,i-1,l-1,k-1) = Conjugate(ElemT(value));
 	I2(l-1,k-1,j-1,i-1) = Conjugate(ElemT(value));
