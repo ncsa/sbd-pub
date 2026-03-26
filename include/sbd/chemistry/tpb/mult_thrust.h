@@ -362,6 +362,12 @@ public:
         size_t jb = helper.SinglesFromBetaKetIndex[k];
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
+
+        // if (blockIdx.x == 0) {
+        //     printf("# threadIdx.x:%lu, i:%lu, j:%lu, k:%lu, ia:%lu, ja:%lu, ib:%lu, jb:%lu, braIdx:%lu\n",
+        //            threadIdx.x, i, j, k, ia, ja, ib, jb, braIdx);
+        // }
+
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
@@ -377,6 +383,62 @@ public:
         if (eij == 0) return;
 
         atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
+    }
+};
+
+
+template <typename ElemT, int VecLen = 2>
+class MultAlphaBeta_Vec : public MultKernelBase<ElemT>
+{
+protected:
+    TaskHelpersThrust<ElemT> helper;
+public:
+    MultAlphaBeta_Vec(const TaskHelpersThrust<ElemT>& h,
+                      const thrust::device_vector<ElemT>& v_wb,
+                      const thrust::device_vector<ElemT>& v_t,
+                      const MultTPBThrust<ElemT>& data
+        ) : MultKernelBase<ElemT>(v_wb, v_t, data)
+    {
+        helper = h;
+    }
+
+    // kernel entry point
+    __device__ __host__ void operator()(size_t i0)
+    {
+        ElemT eij[VecLen];
+        int64_t braIdx[VecLen];
+        #pragma unroll
+        for (size_t i = 0; i < VecLen; i++) {
+            size_t j = (VecLen*i0 + i) / helper.size_single_beta;
+            size_t k = (VecLen*i0 + i) % helper.size_single_beta;
+
+            braIdx[i] = -1;
+            eij[i] = 0;
+            if (j >= helper.size_single_alpha) continue;
+
+            size_t ia = helper.SinglesFromAlphaBraIndex[j];
+            size_t ja = helper.SinglesFromAlphaKetIndex[j];
+            size_t ib = helper.SinglesFromBetaBraIndex[k];
+            size_t jb = helper.SinglesFromBetaKetIndex[k];
+            braIdx[i] = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
+                       + ib - helper.braBetaStart;
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+            eij[i] = this->TwoExcite(DetI,
+                                     helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
+                                     helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+            eij[i] *= this->T[ketIdx];
+        }
+        for (size_t i = 0; i < VecLen; i++) {
+            if (braIdx[i] < 0) return;
+            if (eij[i] == 0) continue;
+            if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
+                eij[i+1] += eij[i];
+                continue;
+            }
+            atomicAdd(this->Wb + braIdx[i], eij[i]);
+        }
     }
 };
 
@@ -962,12 +1024,16 @@ void MultTPBThrust<ElemT>::run(
             } else {
                 //
                 size = helper[task].size_single_alpha * helper[task].size_single_beta;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 auto ci = thrust::counting_iterator<size_t>(0);
 #else
-                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
+                constexpr int VecLen = 2;
+                MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
+                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
+                size = (size + mpi_size_h - 1) / mpi_size_h;
+                size = (size + VecLen - 1) / VecLen;
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
