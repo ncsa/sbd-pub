@@ -443,6 +443,101 @@ public:
 };
 
 
+template <typename ElemT, int VecLen = 2, int BufLen = 256>
+class MultAlphaBeta_VecSmem : public MultKernelBase<ElemT>
+{
+protected:
+    TaskHelpersThrust<ElemT> helper;
+public:
+    MultAlphaBeta_VecSmem(const TaskHelpersThrust<ElemT>& h,
+                          const thrust::device_vector<ElemT>& v_wb,
+                          const thrust::device_vector<ElemT>& v_t,
+                          const MultTPBThrust<ElemT>& data
+        ) : MultKernelBase<ElemT>(v_wb, v_t, data)
+    {
+        helper = h;
+    }
+
+    // kernel entry point
+    __device__ void operator()(size_t i0)
+    {
+        __shared__ int32_t smem_braIdx[BufLen];
+        constexpr int32_t HASH_INIT_VALUE = -1;
+        __shared__ ElemT smem_eij[BufLen];
+        const int tid = threadIdx.x;
+
+        for (int i = tid; i < BufLen; i += blockDim.x) {
+            smem_braIdx[i] = HASH_INIT_VALUE;
+            smem_eij[i] = 0;
+        }
+        __syncthreads();
+
+        ElemT eij[VecLen];
+        int32_t braIdx[VecLen];
+        #pragma unroll
+        for (int i = 0; i < VecLen; i++) {
+            size_t j = (VecLen*i0 + i) / helper.size_single_beta;
+            size_t k = (VecLen*i0 + i) % helper.size_single_beta;
+
+            braIdx[i] = -1;
+            eij[i] = 0;
+            if (j >= helper.size_single_alpha) continue;
+
+            size_t ia = helper.SinglesFromAlphaBraIndex[j];
+            size_t ja = helper.SinglesFromAlphaKetIndex[j];
+            size_t ib = helper.SinglesFromBetaBraIndex[k];
+            size_t jb = helper.SinglesFromBetaKetIndex[k];
+            braIdx[i] = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
+                       + ib - helper.braBetaStart;
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+            eij[i] = this->TwoExcite(DetI,
+                                     helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
+                                     helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+            eij[i] *= this->T[ketIdx];
+
+            for (int h = 0; h < BufLen; h++) {
+                int idx = (braIdx[i] + h) % BufLen;
+                if (smem_braIdx[idx] == braIdx[i]) break;
+                if (smem_braIdx[idx] != HASH_INIT_VALUE) continue;
+                int32_t old = atomicCAS(smem_braIdx + idx, HASH_INIT_VALUE, braIdx[i]);
+                if ((old == HASH_INIT_VALUE) || (old == braIdx[i])) break;
+            }
+        }
+        __syncthreads();
+
+        for (int i = 0; i < VecLen; i++) {
+            if (braIdx[i] < 0) continue;
+            if (eij[i] == 0) continue;
+            if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
+                eij[i+1] += eij[i];
+                continue;
+            }
+
+            int idx = -1;
+            for (int h = 0; h < BufLen; h++) {
+                int probe = (braIdx[i] + h) % BufLen;
+                if (smem_braIdx[probe] != braIdx[i]) continue;
+                idx = probe;
+                break;
+            }
+            if (idx >= 0) {
+                atomicAdd(smem_eij + idx, eij[i]);
+            } else {
+                atomicAdd(this->Wb + braIdx[i], eij[i]);
+            }
+        }
+        __syncthreads();
+
+        for (int i = tid; i < BufLen; i += blockDim.x) {
+            if ((smem_braIdx[i] == HASH_INIT_VALUE) || (smem_eij[i] == 0)) continue;
+            atomicAdd(this->Wb + smem_braIdx[i], smem_eij[i]);
+        }
+    }
+};
+
+
 template <typename ElemT>
 class MultSingleAlpha : public MultKernelBase<ElemT>
 {
@@ -1029,15 +1124,31 @@ void MultTPBThrust<ElemT>::run(
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto ci = thrust::counting_iterator<size_t>(0);
 #else
+#if 1
                 constexpr int VecLen = 2;
                 MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
                 size = (size + VecLen - 1) / VecLen;
+#else
+                constexpr int VecLen = 2;
+                constexpr int BufLen = 256;
+                MultAlphaBeta_VecSmem<ElemT, VecLen, BufLen> kernel(helper[task], Wb, T[active_T], *this);
+                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
+                size = (size + mpi_size_h - 1) / mpi_size_h;
+                size = (size + VecLen - 1) / VecLen;
+                if (size % BufLen) {
+                    size += (BufLen - (size % BufLen));
+                }
+                if (size % 256) {
+                    size += (256 - (size % 256));
+                }
+#endif
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
                         return mpi_rank_h + (mpi_size_h * t);
+                        // return t + (size * mpi_rank_h);
                     });
 #endif
                 {
