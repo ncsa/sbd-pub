@@ -55,6 +55,9 @@ namespace sbd {
     
     MpiAllreduce(D,MPI_SUM,adet_comm); // each elements are already obtained
     MpiAllreduce(D,MPI_SUM,bdet_comm); // fill the different elements
+
+    MPI_Comm_free(&adet_comm);
+    MPI_Comm_free(&bdet_comm);
   }
 
   template <typename ElemT, typename RealT>
@@ -179,6 +182,9 @@ namespace sbd {
     
     MpiAllreduce(D,MPI_SUM,adet_comm); // each elements are already obtained
     MpiAllreduce(D,MPI_SUM,bdet_comm); // fill the different elements
+
+    MPI_Comm_free(&adet_comm);
+    MPI_Comm_free(&bdet_comm);
   }
 
   template <typename ElemT, typename RealT>

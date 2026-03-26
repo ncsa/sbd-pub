@@ -171,6 +171,9 @@ namespace sbd {
     }
     sort_bitarray(res_adet);
     sort_bitarray(res_bdet);
+
+    MPI_Comm_free(&adet_comm);
+    MPI_Comm_free(&bdet_comm);
   }
 
 
@@ -311,6 +314,9 @@ namespace sbd {
     }
     sort_bitarray(res_adet);
     sort_bitarray(res_bdet);
+
+    MPI_Comm_free(&adet_comm);
+    MPI_Comm_free(&bdet_comm);
   }
   
 }

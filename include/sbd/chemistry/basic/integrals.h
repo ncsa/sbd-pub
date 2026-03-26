@@ -21,6 +21,46 @@ namespace sbd {
     }
   };
   
+#ifdef _UHF
+  template <typename ElemT>
+  class twoInt {
+  public:
+    std::vector<ElemT> store;
+    ElemT maxEntry;
+    ElemT zero;
+    int norbs;
+    std::vector<ElemT> DirectMat;
+    std::vector<ElemT> ExchangeMat;
+    twoInt() : zero(0.0), maxEntry(100.0) {}
+    inline ElemT & operator()(int i, int j, int k, int l) {
+      zero = ElemT(0.0);
+      if(!((i%2 == j%2)&&(k%2==l%2))) return zero;
+      int I = i/2; int J = j/2; int K = k/2; int L=l/2;
+      int S = i%2 + 2 * (k%2);
+      return store[I+J*norbs+K*norbs*norbs+L*norbs*norbs*norbs+S*norbs*norbs*norbs*norbs];
+    }
+    inline ElemT & Direct(int i, int j) {
+      return DirectMat[i+2*norbs*j];
+    }
+    inline ElemT & Exchange(int i, int j) {
+      return ExchangeMat[i+2*norbs*j];
+    }
+
+    inline ElemT Value(int i, int j, int k, int l) const {
+      if(!((i%2 == j%2)&&(k%2==l%2))) return zero;
+      int I = i/2; int J = j/2; int K = k/2; int L=l/2;
+      int S = i%2 + 2 * (k%2);
+      return store[I+J*norbs+K*norbs*norbs+L*norbs*norbs*norbs+S*norbs*norbs*norbs*norbs];
+    }
+    inline ElemT DirectValue(int i, int j) const {
+      return DirectMat[i+2*norbs*j];
+    }
+    inline ElemT ExchangeValue(int i, int j) const {
+      return ExchangeMat[i+2*norbs*j];
+    }
+    
+  };
+#else
   template <typename ElemT>
   class twoInt {
   public:
@@ -42,10 +82,10 @@ namespace sbd {
       return store[a*(a+1)/2+b];
     }
     inline ElemT & Direct(int i, int j) {
-      return DirectMat[i+norbs*j];
+      return DirectMat[i+2*norbs*j];
     }
     inline ElemT & Exchange(int i, int j) {
-      return ExchangeMat[i+norbs*j];
+      return ExchangeMat[i+2*norbs*j];
     }
 
     inline ElemT Value(int i, int j, int k, int l) const {
@@ -58,13 +98,14 @@ namespace sbd {
       return store[a*(a+1)/2+b];
     }
     inline ElemT DirectValue(int i, int j) const {
-      return DirectMat[i+norbs*j];
+      return DirectMat[i+2*norbs*j];
     }
     inline ElemT ExchangeValue(int i, int j) const {
-      return ExchangeMat[i+norbs*j];
+      return ExchangeMat[i+2*norbs*j];
     }
     
   };
+#endif
   
 } // end namespace sbd
 

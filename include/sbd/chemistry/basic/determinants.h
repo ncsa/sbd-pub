@@ -445,9 +445,9 @@ namespace sbd {
                 energy += I1.Value(i, i);
                 for (int j = i + 1; j < 2 * L; j++) {
                     if (getocc(det, bit_length, j)) {
-                        energy += I2.DirectValue(i / 2, j / 2);
+                        energy += I2.DirectValue(i, j);
                         if ((i % 2) == (j % 2)) {
-                            energy -= I2.ExchangeValue(i / 2, j / 2);
+                            energy -= I2.ExchangeValue(i, j);
                         }
                     }
                 }

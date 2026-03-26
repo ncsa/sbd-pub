@@ -118,9 +118,9 @@ public:
                 energy += I1.Value(i, i);
                 for (int j = i + 1; j < 2 * norbs; j++) {
                     if (getocc(det, j)) {
-                        energy += I2.DirectValue(i / 2, j / 2);
+                        energy += I2.DirectValue(i, j);
                         if ((i % 2) == (j % 2)) {
-                            energy -= I2.ExchangeValue(i / 2, j / 2);
+                            energy -= I2.ExchangeValue(i, j);
                         }
                     }
                 }

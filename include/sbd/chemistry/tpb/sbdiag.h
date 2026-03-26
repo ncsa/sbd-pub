@@ -597,6 +597,9 @@ namespace sbd {
 
       FreeHelpers(helper);
 
+      MPI_Comm_free(&h_comm);
+      MPI_Comm_free(&b_comm);
+      MPI_Comm_free(&t_comm);
     } // end void diag function
 
     /**

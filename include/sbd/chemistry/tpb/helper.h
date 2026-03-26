@@ -276,6 +276,7 @@ namespace sbd {
     MPI_Comm_split(basis_area_comm,t_comm_color,mpi_rank,&t_comm);
     MPI_Comm_split(basis_area_comm,b_comm_color,mpi_rank,&b_comm);
 
+    MPI_Comm_free(&basis_area_comm);
   }
 
   size_t SizeOfVector(TaskHelpers & helper) {
