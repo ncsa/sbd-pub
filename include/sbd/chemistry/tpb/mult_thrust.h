@@ -14,8 +14,8 @@
 #define MAX_DET_SIZE 134217728
 
 // Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
-#define SBD_USE_STRIDED_RANK_DISTRIBUTION
-#define SBD_USE_VECTORIZATION
+// #define SBD_USE_STRIDED_RANK_DISTRIBUTION
+// #define SBD_USE_VECTORIZATION
 // #define SBD_USE_HASHTABLE
 
 namespace sbd
@@ -352,33 +352,43 @@ public:
         helper = h;
     }
 
-    // kernel entry point
-    __device__ __host__ void operator()(size_t i)
-    {
+    __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
+        braIdx = -1;
+        eij = 0;
         size_t j = i / helper.size_single_beta;
-        size_t k = i - j * helper.size_single_beta;
-
+        size_t k = i % helper.size_single_beta;
+        if (j >= helper.size_single_alpha) return;
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
         size_t ja = helper.SinglesFromAlphaKetIndex[j];
         size_t ib = helper.SinglesFromBetaBraIndex[k];
         size_t jb = helper.SinglesFromBetaKetIndex[k];
-
-        size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
+        braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
+                  ib - helper.braBetaStart;
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
-
-        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                       + jb - helper.ketBetaStart;
-
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-
-        ElemT eij = this->TwoExcite(DetI,
-                                    helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
-                                    helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-        if (eij == 0) return;
-
-        atomicAdd(this->Wb + braIdx, eij * this->T[ketIdx]);
+        eij = this->TwoExcite(
+            DetI,
+            helper.SinglesAlphaCrAnSM[j],
+            helper.SinglesBetaCrAnSM[k],
+            helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha],
+            helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+        if (eij != 0) {
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            eij *= this->T[ketIdx];
+        }
+    }        
+    
+    // kernel entry point
+    __device__ __host__ void operator()(size_t i)
+    {
+        int64_t braIdx;
+        ElemT eij;
+        loop_body(i, braIdx, eij);
+        if (braIdx < 0 || eij == 0) return;
+        atomicAdd(this->Wb + braIdx, eij);
     }
 };
 
@@ -398,38 +408,48 @@ public:
         helper = h;
     }
 
+    __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
+        braIdx = -1;
+        eij = 0;
+        size_t j = i / helper.size_single_beta;
+        size_t k = i % helper.size_single_beta;
+        if (j >= helper.size_single_alpha) return;
+        size_t ia = helper.SinglesFromAlphaBraIndex[j];
+        size_t ja = helper.SinglesFromAlphaKetIndex[j];
+        size_t ib = helper.SinglesFromBetaBraIndex[k];
+        size_t jb = helper.SinglesFromBetaKetIndex[k];
+        braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
+                  ib - helper.braBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        eij = this->TwoExcite(
+            DetI,
+            helper.SinglesAlphaCrAnSM[j],
+            helper.SinglesBetaCrAnSM[k],
+            helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha],
+            helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+        if (eij != 0) {
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            eij *= this->T[ketIdx];
+        }
+    }        
+
     // kernel entry point
     __device__ __host__ void operator()(size_t i0)
     {
         ElemT eij[VecLen];
         int64_t braIdx[VecLen];
         #pragma unroll
-        for (size_t i = 0; i < VecLen; i++) {
-            size_t j = (VecLen*i0 + i) / helper.size_single_beta;
-            size_t k = (VecLen*i0 + i) % helper.size_single_beta;
-
-            braIdx[i] = -1;
-            eij[i] = 0;
-            if (j >= helper.size_single_alpha) continue;
-
-            size_t ia = helper.SinglesFromAlphaBraIndex[j];
-            size_t ja = helper.SinglesFromAlphaKetIndex[j];
-            size_t ib = helper.SinglesFromBetaBraIndex[k];
-            size_t jb = helper.SinglesFromBetaKetIndex[k];
-            braIdx[i] = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
-                       + ib - helper.braBetaStart;
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                           + jb - helper.ketBetaStart;
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-            eij[i] = this->TwoExcite(DetI,
-                                     helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
-                                     helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-            eij[i] *= this->T[ketIdx];
+        for (size_t i1 = 0; i1 < VecLen; i1++) {
+            size_t i = (VecLen * i0) + i1;
+            loop_body(i, braIdx[i1], eij[i1]);
         }
         #pragma unroll
         for (size_t i = 0; i < VecLen; i++) {
-            if (braIdx[i] < 0) continue;
-            if (eij[i] == 0) continue;
+            if ((braIdx[i] < 0) || (eij[i] == 0)) continue;
             if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
                 eij[i+1] += eij[i];
                 continue;
@@ -440,13 +460,13 @@ public:
 };
 
 
-template <typename ElemT, int VecLen = 2, int BufLen = 256>
-class MultAlphaBeta_VecSmem : public MultKernelBase<ElemT>
+template <typename ElemT, int VecLen = 2, int HashLen = 256>
+class MultAlphaBeta_VecHash : public MultKernelBase<ElemT>
 {
 protected:
     TaskHelpersThrust<ElemT> helper;
 public:
-    MultAlphaBeta_VecSmem(const TaskHelpersThrust<ElemT>& h,
+    MultAlphaBeta_VecHash(const TaskHelpersThrust<ElemT>& h,
                           const thrust::device_vector<ElemT>& v_wb,
                           const thrust::device_vector<ElemT>& v_t,
                           const MultTPBThrust<ElemT>& data
@@ -455,15 +475,43 @@ public:
         helper = h;
     }
 
+    __device__ inline void loop_body(size_t i, int32_t& braIdx, ElemT& eij) {
+        braIdx = -1;
+        eij = 0;
+        size_t j = i / helper.size_single_beta;
+        size_t k = i % helper.size_single_beta;
+        if (j >= helper.size_single_alpha) return;
+        size_t ia = helper.SinglesFromAlphaBraIndex[j];
+        size_t ja = helper.SinglesFromAlphaKetIndex[j];
+        size_t ib = helper.SinglesFromBetaBraIndex[k];
+        size_t jb = helper.SinglesFromBetaKetIndex[k];
+        braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
+                  ib - helper.braBetaStart;
+#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
+#endif
+        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
+        eij = this->TwoExcite(
+            DetI,
+            helper.SinglesAlphaCrAnSM[j],
+            helper.SinglesBetaCrAnSM[k],
+            helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha],
+            helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
+        if (eij != 0) {
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            eij *= this->T[ketIdx];
+        }
+    }        
+
     // kernel entry point
     __device__ void operator()(size_t i0)
     {
-        __shared__ int32_t smem_braIdx[BufLen];
         constexpr int32_t HASH_INIT_VALUE = -1;
-        __shared__ ElemT smem_eij[BufLen];
+        __shared__ int32_t smem_braIdx[HashLen];
+        __shared__ ElemT smem_eij[HashLen];
         const int tid = threadIdx.x;
-
-        for (int i = tid; i < BufLen; i += blockDim.x) {
+        for (int i = tid; i < HashLen; i += blockDim.x) {
             smem_braIdx[i] = HASH_INIT_VALUE;
             smem_eij[i] = 0;
         }
@@ -472,49 +520,30 @@ public:
         ElemT eij[VecLen];
         int32_t braIdx[VecLen];
         #pragma unroll
-        for (int i = 0; i < VecLen; i++) {
-            size_t j = (VecLen*i0 + i) / helper.size_single_beta;
-            size_t k = (VecLen*i0 + i) % helper.size_single_beta;
-
-            braIdx[i] = -1;
-            eij[i] = 0;
-            if (j >= helper.size_single_alpha) continue;
-
-            size_t ia = helper.SinglesFromAlphaBraIndex[j];
-            size_t ja = helper.SinglesFromAlphaKetIndex[j];
-            size_t ib = helper.SinglesFromBetaBraIndex[k];
-            size_t jb = helper.SinglesFromBetaKetIndex[k];
-            braIdx[i] = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
-                       + ib - helper.braBetaStart;
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                           + jb - helper.ketBetaStart;
-            size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-            eij[i] = this->TwoExcite(DetI,
-                                     helper.SinglesAlphaCrAnSM[j], helper.SinglesBetaCrAnSM[k],
-                                     helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha], helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-            eij[i] *= this->T[ketIdx];
-
-            for (int h = 0; h < BufLen; h++) {
-                int idx = (braIdx[i] + h) % BufLen;
-                if (smem_braIdx[idx] == braIdx[i]) break;
+        for (size_t i1 = 0; i1 < VecLen; i1++) {
+            size_t i = (VecLen * i0) + i1;
+            loop_body(i, braIdx[i1], eij[i1]);
+            if ((braIdx[i1] < 0) || (eij[i1] == 0)) continue;
+            for (int h = 0; h < HashLen; h++) {
+                int idx = (braIdx[i1] + h) % HashLen;
+                if (smem_braIdx[idx] == braIdx[i1]) break;
                 if (smem_braIdx[idx] != HASH_INIT_VALUE) continue;
-                int32_t old = atomicCAS(smem_braIdx + idx, HASH_INIT_VALUE, braIdx[i]);
-                if ((old == HASH_INIT_VALUE) || (old == braIdx[i])) break;
+                int32_t old = atomicCAS(smem_braIdx + idx, HASH_INIT_VALUE, braIdx[i1]);
+                if ((old == HASH_INIT_VALUE) || (old == braIdx[i1])) break;
             }
         }
         __syncthreads();
 
         for (int i = 0; i < VecLen; i++) {
-            if (braIdx[i] < 0) continue;
-            if (eij[i] == 0) continue;
+            if ((braIdx[i] < 0) || (eij[i] == 0)) continue;
             if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
                 eij[i+1] += eij[i];
                 continue;
             }
 
             int idx = -1;
-            for (int h = 0; h < BufLen; h++) {
-                int probe = (braIdx[i] + h) % BufLen;
+            for (int h = 0; h < HashLen; h++) {
+                int probe = (braIdx[i] + h) % HashLen;
                 if (smem_braIdx[probe] != braIdx[i]) continue;
                 idx = probe;
                 break;
@@ -527,7 +556,7 @@ public:
         }
         __syncthreads();
 
-        for (int i = tid; i < BufLen; i += blockDim.x) {
+        for (int i = tid; i < HashLen; i += blockDim.x) {
             if ((smem_braIdx[i] == HASH_INIT_VALUE) || (smem_eij[i] == 0)) continue;
             atomicAdd(this->Wb + smem_braIdx[i], smem_eij[i]);
         }
@@ -782,12 +811,7 @@ public:
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
-
-        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                       + jb - helper.ketBetaStart;
-
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-
         if (AlphaOrBeta == SB_MULT_ALPHA) {
             if (SingleOrDouble == SB_MULT_SINGLE) {
                 // SingleAlpha
@@ -821,7 +845,11 @@ public:
                     helper.DoublesBetaCrAnSM[k + 3 * helper.size_double_beta]);
             }
         }
-        eij *= this->T[ketIdx];
+        if (eij != 0) {
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            eij *= this->T[ketIdx];
+        }
     }
     
     // kernel entry point
@@ -903,12 +931,7 @@ public:
 #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
-
-        size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                       + jb - helper.ketBetaStart;
-
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-
         if (AlphaOrBeta == SB_MULT_ALPHA) {
             if (SingleOrDouble == SB_MULT_SINGLE) {
                 // SingleAlpha
@@ -942,7 +965,11 @@ public:
                     helper.DoublesBetaCrAnSM[k + 3 * helper.size_double_beta]);
             }
         }
-        eij *= this->T[ketIdx];
+        if (eij != 0) {
+            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
+                           + jb - helper.ketBetaStart;
+            eij *= this->T[ketIdx];
+        }
     }
     
     // kernel entry point
@@ -1434,7 +1461,7 @@ void MultTPBThrust<ElemT>::run(
 #else // #ifndef SBD_USE_HASHTABLE
                 constexpr int VecLen = 2;
                 constexpr int HashLen = 256;
-                MultAlphaBeta_VecSmem<ElemT, VecLen, HashLen>
+                MultAlphaBeta_VecHash<ElemT, VecLen, HashLen>
                     kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
