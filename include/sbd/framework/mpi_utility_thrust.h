@@ -9,6 +9,8 @@
 
 #include "mpi.h"
 
+#include "sbd/framework/nvtx.h"
+
 namespace sbd
 {
 
@@ -17,6 +19,7 @@ namespace sbd
 template <typename ElemT>
 void MpiAllreduce(thrust::device_vector<ElemT> &A, MPI_Op op, MPI_Comm comm)
 {
+    SBD_NVTX_RANGE_COLOR("MpiAllreduce", __LINE__);
     // Calling MPI functions directly on the `device_vector` sometimes caused instability,
     // so copy them to the host temporarily.
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
@@ -31,10 +34,21 @@ void MpiAllreduce(thrust::device_vector<ElemT> &A, MPI_Op op, MPI_Comm comm)
 template <typename ElemT>
 void MpiAllreduce(thrust::device_vector<ElemT> &A, MPI_Op op, MPI_Comm comm)
 {
+    SBD_NVTX_RANGE_COLOR("MpiAllreduce", __LINE__);
     std::cout << "   TEST MpiAllreduce" << std::endl;
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
-    thrust::device_vector<ElemT> B(A);
-    MPI_Allreduce((ElemT *)thrust::raw_pointer_cast(B.data()), (ElemT *)thrust::raw_pointer_cast(A.data()), A.size(), DataT, op, comm);
+#if 0
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", __LINE__);
+        thrust::device_vector<ElemT> B(A);
+        MPI_Allreduce((ElemT *)thrust::raw_pointer_cast(B.data()), (ElemT *)thrust::raw_pointer_cast(A.data()), A.size(), DataT, op, comm);
+    }
+#else
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce (MPI_IN_PLACE)", __LINE__);
+        MPI_Allreduce(MPI_IN_PLACE, (ElemT *)thrust::raw_pointer_cast(A.data()), A.size(), DataT, op, comm);
+    }
+#endif
 }
 
 #endif // SBD_THRUST_SAFE_MPI_ALLREDUCE

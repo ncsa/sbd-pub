@@ -204,19 +204,15 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 */
             // #ifdef SBD_FUAGKUPATCH
             if (mpi_size_t > 1) {
-                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
             }
             if (mpi_size_h > 1) {
-                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
             }
             if (mpi_size_t > 1) {
-                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(R, MPI_SUM, mult.t_comm());
             }
             if (mpi_size_h > 1) {
-                SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
                 MpiAllreduce(R, MPI_SUM, mult.h_comm());
             }
             if (mpi_size_h * mpi_size_t > 1) {

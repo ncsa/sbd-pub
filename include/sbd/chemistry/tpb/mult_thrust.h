@@ -1561,11 +1561,9 @@ void MultTPBThrust<ElemT>::run(
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
     if (mpi_size_t > 1) {
-        SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
         MpiAllreduce(Wb, MPI_SUM, this->t_comm_);
     }
     if (mpi_size_h > 1) {
-        SBD_NVTX_RANGE_COLOR("MpiAllreduce", 0);
         MpiAllreduce(Wb, MPI_SUM, this->h_comm_);
     }
     auto time_comm_end = std::chrono::high_resolution_clock::now();
