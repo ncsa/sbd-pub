@@ -25,7 +25,10 @@ void MpiAllreduce(thrust::device_vector<ElemT> &A, MPI_Op op, MPI_Comm comm)
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
     std::vector<ElemT> h_send(A.size()), h_recv(A.size());
     thrust::copy(A.begin(), A.end(), h_send.begin());
-    MPI_Allreduce(h_send.data(), h_recv.data(), static_cast<int>(h_send.size()), DataT, op, comm);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Allreduce(h_send.data(), h_recv.data(), static_cast<int>(h_send.size()), DataT, op, comm);
+    }
     thrust::copy(h_recv.begin(), h_recv.end(), A.begin());
 }
 
@@ -37,15 +40,15 @@ void MpiAllreduce(thrust::device_vector<ElemT> &A, MPI_Op op, MPI_Comm comm)
     SBD_NVTX_RANGE_COLOR("MpiAllreduce", __LINE__);
     std::cout << "   TEST MpiAllreduce" << std::endl;
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
-#if 0
+#if 1
+    thrust::device_vector<ElemT> B(A);
     {
-        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", __LINE__);
-        thrust::device_vector<ElemT> B(A);
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
         MPI_Allreduce((ElemT *)thrust::raw_pointer_cast(B.data()), (ElemT *)thrust::raw_pointer_cast(A.data()), A.size(), DataT, op, comm);
     }
 #else
     {
-        SBD_NVTX_RANGE_COLOR("MPI_Allreduce (MPI_IN_PLACE)", __LINE__);
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce (MPI_IN_PLACE)", 0);
         MPI_Allreduce(MPI_IN_PLACE, (ElemT *)thrust::raw_pointer_cast(A.data()), A.size(), DataT, op, comm);
     }
 #endif

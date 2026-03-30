@@ -135,9 +135,11 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     thrust::copy_n(W.begin(), W.size(), W_dev.begin());
 
     for (int it = 0; it < max_iteration; it++) {
+        SBD_NVTX_RANGE_COLOR("for (int it ...", __LINE__ + it);
         C[0] = W_dev;
 
         for (int ib = 0; ib < nb; ib++) {
+            SBD_NVTX_RANGE_COLOR("for (int ib ...", __LINE__ + ib);
             auto step_start = std::chrono::high_resolution_clock::now();
 
             //Zero(HC[ib]);
