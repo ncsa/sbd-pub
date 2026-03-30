@@ -1259,6 +1259,7 @@ void MultTPBThrust<ElemT>::run(
 
     double time_slid = 0.0;
     for (size_t task = 0; task < helper.size(); task++) {
+        SBD_NVTX_RANGE_COLOR("for (size_t task ...", __LINE__ + task);
 #ifdef SBD_DEBUG_MULT
         auto time_task_start = std::chrono::high_resolution_clock::now();
         std::cout << " Start multiplication for task " << task << " at (h,b,t) = ("
