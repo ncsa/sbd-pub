@@ -8,6 +8,10 @@
 #include <chrono>
 #include <cstdio>
 
+#ifdef SBD_USE_NCCL
+#include <nccl.h>
+#endif
+
 #include "sbd/framework/nvtx.h"
 
 // per thread DetI, DetJ storage size (1GB max)
@@ -71,6 +75,11 @@ public:
         MPI_Comm h_comm_in,
         MPI_Comm b_comm_in,
         MPI_Comm t_comm_in,
+#ifdef SBD_USE_NCCL
+        ncclComm_t h_nccl_comm,
+        ncclComm_t b_nccl_comm,
+        ncclComm_t t_nccl_comm,
+#endif
         bool use_pre_dets,
         int max_gb_dets,
         bool collapse);
@@ -83,9 +92,9 @@ public:
 
     void makeQChamDiagTerms(thrust::device_vector<ElemT> &hii);
 
-	void correlation(const std::vector<ElemT> & w,
-				std::vector<std::vector<ElemT>> & onebody_out,
-				std::vector<std::vector<ElemT>> & twobody_out);
+    void correlation(const std::vector<ElemT> & w,
+                     std::vector<std::vector<ElemT>> & onebody_out,
+                     std::vector<std::vector<ElemT>> & twobody_out);
 };
 
 // contructor for Mult data
@@ -102,12 +111,18 @@ void MultTPBThrust<ElemT>::Init(
     const oneInt<ElemT> &I1_in,
     const twoInt<ElemT> &I2_in,
     MPI_Comm h_comm_in,
-	MPI_Comm b_comm_in,
-	MPI_Comm t_comm_in,
+    MPI_Comm b_comm_in,
+    MPI_Comm t_comm_in,
+#ifdef SBD_USE_NCCL
+    ncclComm_t h_nccl_comm,
+    ncclComm_t b_nccl_comm,
+    ncclComm_t t_nccl_comm,
+#endif
     bool use_pre_dets,
     int max_gb_dets,
     bool collapse)
 {
+    SBD_NVTX_RANGE_COLOR("Init", __LINE__);
     this->bit_length_ = bit_length_in;
     this->norbs_ = norbs_in;
     this->D_size_ = (2 * norbs_in + bit_length_in - 1) / bit_length_in;
@@ -116,6 +131,11 @@ void MultTPBThrust<ElemT>::Init(
     this->h_comm_ = h_comm_in;
     this->b_comm_ = b_comm_in;
     this->t_comm_ = t_comm_in;
+#ifdef SBD_USE_NCCL
+    this->h_nccl_comm_ = h_nccl_comm;
+    this->b_nccl_comm_ = b_nccl_comm;
+    this->t_nccl_comm_ = t_nccl_comm;
+#endif
 
     adet_comm_size = adet_comm_size_in;
     bdet_comm_size = bdet_comm_size_in;
@@ -1562,10 +1582,18 @@ void MultTPBThrust<ElemT>::run(
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
     if (mpi_size_h > 1) {
+#ifdef SBD_USE_NCCL
+        nccl_allreduce(Wb, ncclSum, this->h_nccl_comm_);
+#else
         MpiAllreduce(Wb, MPI_SUM, this->h_comm_);
+#endif
     }
     if (mpi_size_t > 1) {
+#ifdef SBD_USE_NCCL
+        nccl_allreduce(Wb, ncclSum, this->t_nccl_comm_);
+#else
         MpiAllreduce(Wb, MPI_SUM, this->t_comm_);
+#endif
     }
     auto time_comm_end = std::chrono::high_resolution_clock::now();
 

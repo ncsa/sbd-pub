@@ -11,6 +11,54 @@
 
 #include "sbd/framework/nvtx.h"
 
+#ifdef SBD_USE_NCCL
+#include <nccl.h>
+#include <type_traits>
+
+template <typename T>
+struct NcclDataType;
+
+template <>
+struct NcclDataType<float> {
+    static constexpr ncclDataType_t value = ncclFloat;
+};
+
+template <>
+struct NcclDataType<double> {
+    static constexpr ncclDataType_t value = ncclDouble;
+};
+
+template <>
+struct NcclDataType<int> {
+    static constexpr ncclDataType_t value = ncclInt;
+};
+
+template <>
+struct NcclDataType<int64_t> {
+    static constexpr ncclDataType_t value = ncclInt64;
+};
+
+#define CHECK_NCCL(cmd) \
+    do {                                                        \
+        ncclResult_t r = cmd;                                   \
+        if (r != ncclSuccess) {                                 \
+            fprintf(stderr, "NCCL error %s at %s:%d\n",         \
+                    ncclGetErrorString(r), __FILE__, __LINE__); \
+            std::exit(EXIT_FAILURE);                            \
+        }                                                       \
+    } while (0)
+
+#define CHECK_CUDA(cmd) \
+    do {                                                        \
+        cudaError_t e = cmd;                                    \
+        if (e != cudaSuccess) {                                 \
+            fprintf(stderr, "CUDA error %s at %s:%d\n",         \
+                    cudaGetErrorString(e), __FILE__, __LINE__); \
+            std::exit(EXIT_FAILURE);                            \
+        }                                                       \
+    } while (0)
+#endif // #ifdef SBD_USE_NCCL
+
 namespace sbd
 {
 
@@ -392,6 +440,31 @@ public:
     }
 };
 
+#ifdef SBD_USE_NCCL
+void init_nccl_comm(ncclComm_t *nccl_comm, MPI_Comm mpi_comm)
+{
+    SBD_NVTX_RANGE_COLOR("init_nccl_comm", __LINE__);
+    ncclUniqueId id;
+    CHECK_NCCL(ncclGetUniqueId(&id));
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Bcast", 0);
+        MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, mpi_comm);
+    }
+    int mpi_size; MPI_Comm_size(mpi_comm, &mpi_size);
+    int mpi_rank; MPI_Comm_rank(mpi_comm, &mpi_rank);
+    CHECK_NCCL(ncclCommInitRank(nccl_comm, mpi_size, id, mpi_rank));
+}
+
+template <typename ElemT>
+void nccl_allreduce(thrust::device_vector<ElemT> &A, ncclRedOp_t nccl_op, ncclComm_t nccl_comm, cudaStream_t stream = 0)
+{
+    SBD_NVTX_RANGE_COLOR("nccl_allreduce", __LINE__);
+    ElemT *buff = thrust::raw_pointer_cast(A.data());
+    size_t count = A.size();
+    CHECK_NCCL(ncclAllReduce(buff, buff, count, NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+}
+#endif // #ifdef SBD_USE_NCCL
 
 }
 

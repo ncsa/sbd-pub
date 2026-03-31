@@ -5,6 +5,10 @@
 #ifndef SBD_CHEMISTRY_DAVIDSON_THRUST_H
 #define SBD_CHEMISTRY_DAVIDSON_THRUST_H
 
+#ifdef SBD_USE_NCCL
+#include <nccl.h>
+#endif
+
 #include "sbd/framework/nvtx.h"
 
 #include "sbd/framework/jacobi.h"
@@ -47,10 +51,14 @@ template <typename ElemT>
 void GetTotalD_Thrust(const thrust::device_vector<ElemT> & hii,
         thrust::device_vector<ElemT>& dii,
         MPI_Comm h_comm) {
+    SBD_NVTX_RANGE_COLOR("GetTotalD_Thrust", __LINE__);
     int size_d = hii.size();
     dii.resize(hii.size());
     MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
-    MPI_Allreduce((ElemT*)thrust::raw_pointer_cast(hii.data()), (ElemT*)thrust::raw_pointer_cast(dii.data()), size_d, DataT, MPI_SUM, h_comm);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Allreduce((ElemT*)thrust::raw_pointer_cast(hii.data()), (ElemT*)thrust::raw_pointer_cast(dii.data()), size_d, DataT, MPI_SUM, h_comm);
+    }
 }
 
 /**
@@ -80,11 +88,13 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 RealT eps,
                 RealT max_time)
 {
+    SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
     RealT eps_reg = 1.0e-12;
 
     std::vector<thrust::device_vector<ElemT>> C(num_block);
     std::vector<thrust::device_vector<ElemT>> HC(num_block);
     for (int i = 0; i < num_block; i++) {
+        SBD_NVTX_RANGE_COLOR("for (int i ...", __LINE__ + i);
         C[i].resize(W.size());
         HC[i].resize(W.size());
     }
@@ -206,16 +216,32 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 */
             // #ifdef SBD_FUAGKUPATCH
             if (mpi_size_t > 1) {
+#ifdef SBD_USE_NCCL
+                nccl_allreduce(W_dev, ncclSum, mult.t_nccl_comm());
+#else
                 MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
+#endif
             }
             if (mpi_size_h > 1) {
+#ifdef SBD_USE_NCCL
+                nccl_allreduce(W_dev, ncclSum, mult.h_nccl_comm());
+#else
                 MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
+#endif
             }
             if (mpi_size_t > 1) {
+#ifdef SBD_USE_NCCL
+                nccl_allreduce(R, ncclSum, mult.t_nccl_comm());
+#else
                 MpiAllreduce(R, MPI_SUM, mult.t_comm());
+#endif
             }
             if (mpi_size_h > 1) {
+#ifdef SBD_USE_NCCL
+                nccl_allreduce(R, ncclSum, mult.h_nccl_comm());
+#else
                 MpiAllreduce(R, MPI_SUM, mult.h_comm());
+#endif
             }
             if (mpi_size_h * mpi_size_t > 1) {
                 ElemT volp(1.0 / (mpi_size_h * mpi_size_t));

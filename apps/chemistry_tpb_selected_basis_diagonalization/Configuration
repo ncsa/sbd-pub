@@ -45,3 +45,5 @@ CCFLAGS= -std=c++17 -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_no
 CCFLAGS+= -DSBD_USE_NVTX
 CCFLAGS+= -DSBD_THRUST_SAFE_MPI_ALLREDUCE
 SYSLIB= -llapack -lblas
+# CCFLAGS+= -DSBD_USE_NCCL
+# SYSLIB+= -lnccl

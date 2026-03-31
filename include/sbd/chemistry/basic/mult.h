@@ -8,6 +8,11 @@
 #include <chrono>
 #include <cstdio>
 
+#ifdef SBD_USE_NCCL
+#include <nccl.h>
+#endif
+
+
 namespace sbd
 {
 
@@ -21,6 +26,11 @@ protected:
     MPI_Comm h_comm_;
     MPI_Comm b_comm_;
     MPI_Comm t_comm_;
+#ifdef SBD_USE_NCCL
+    ncclComm_t h_nccl_comm_;
+    ncclComm_t b_nccl_comm_;
+    ncclComm_t t_nccl_comm_;
+#endif
 public:
     MultBase() {}
 
@@ -55,6 +65,20 @@ public:
     {
         return t_comm_;
     }
+#ifdef SBD_USE_NCCL
+    inline ncclComm_t h_nccl_comm(void) const
+    {
+        return h_nccl_comm_;
+    }
+    inline ncclComm_t b_nccl_comm(void) const
+    {
+        return b_nccl_comm_;
+    }
+    inline ncclComm_t t_nccl_comm(void) const
+    {
+        return t_nccl_comm_;
+    }
+#endif
 
 #ifdef SBD_THRUST
     virtual void run(const thrust::device_vector<ElemT> &hii,

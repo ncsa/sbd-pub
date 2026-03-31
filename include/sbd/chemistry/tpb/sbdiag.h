@@ -5,6 +5,10 @@
 #ifndef SBD_CHEMISTRY_TPB_SBDIAG_H
 #define SBD_CHEMISTRY_TPB_SBDIAG_H
 
+#ifdef SBD_USE_NCCL
+#include <nccl.h>
+#endif
+
 #include "sbd/framework/nvtx.h"
 
 namespace sbd {
@@ -203,6 +207,27 @@ namespace sbd {
       int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
       int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
 
+#ifdef SBD_USE_NCCL
+      ncclComm_t h_nccl_comm;
+      if (mpi_size_h > 1) {
+          init_nccl_comm(&h_nccl_comm, h_comm);
+          thrust::device_vector<double> A(1, 0.0);
+          nccl_allreduce(A, ncclSum, h_nccl_comm);
+      }
+      ncclComm_t b_nccl_comm;
+      if (mpi_size_b > 1) {
+          init_nccl_comm(&b_nccl_comm, b_comm);
+          thrust::device_vector<double> A(1, 0.0);
+          nccl_allreduce(A, ncclSum, b_nccl_comm);
+      }
+      ncclComm_t t_nccl_comm;
+      if (mpi_size_t > 1) {
+          init_nccl_comm(&t_nccl_comm, t_comm);
+          thrust::device_vector<double> A(1, 0.0);
+          nccl_allreduce(A, ncclSum, t_nccl_comm);
+      }
+      fprintf(stderr, "# NCCL communicators have been created.\n");
+#endif
       /**
 	 Initialize/Load wave function
       */
@@ -246,6 +271,9 @@ namespace sbd {
             device_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L),
                              adet_comm_size,bdet_comm_size, helper, I0, I1, I2,
                              h_comm,b_comm,t_comm,
+#ifdef SBD_USE_NCCL
+                             h_nccl_comm, b_nccl_comm, t_nccl_comm,
+#endif
                              sbd_data.use_precalculated_dets, sbd_data.max_memory_gb_for_determinants, sbd_data.thrust_collapse_loops);
         }
 	auto time_end_mult_init = std::chrono::high_resolution_clock::now();
@@ -275,7 +303,6 @@ namespace sbd {
 
 #ifdef SBD_THRUST
 	if( method == 0 ) {
-            SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
             sbd::Davidson(hii, W, device_mult,
                           max_it,max_nb,eps,max_time);
 	} else {
