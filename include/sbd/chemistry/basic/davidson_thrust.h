@@ -140,6 +140,11 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     std::vector<double> onestep_times(num_block * max_iteration, 0.0);
     auto start_time = std::chrono::high_resolution_clock::now();
 
+#ifdef SBD_USE_CUBLAS
+    // workspace for BatchedInnerProduct_GEMV
+    thrust::device_vector<ElemT> workspace(nb * W.size() + nb);
+#endif
+
     // copyin W
     thrust::device_vector<ElemT> W_dev(W.size());
     thrust::copy_n(W.begin(), W.size(), W_dev.begin());
@@ -160,10 +165,20 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 mult.run(hii, C[ib], HC[ib]);
             }
 
+#ifdef SBD_USE_CUBLAS
+            std::vector<ElemT> res(ib+1);
+            BatchedInnerProduct_GEMV(C, ib+1, HC[ib], res, mult.b_comm(),
+                                     thrust::raw_pointer_cast(workspace.data()));
+            for (int jb = 0; jb <= ib; jb++) {
+                H[jb + nb * ib] = res[jb];
+                H[ib + nb * jb] = Conjugate(res[jb]);
+            }
+#else
             for (int jb = 0; jb <= ib; jb++) {
                 InnerProduct(C[jb], HC[ib], H[jb + nb * ib], mult.b_comm());
                 H[ib + nb * jb] = Conjugate(H[jb + nb * ib]);
             }
+#endif
             for (int jb = 0; jb <= ib; jb++) {
                 for (int kb = 0; kb <= ib; kb++) {
                     U[jb + nb * kb] = H[jb + nb * kb];
@@ -308,6 +323,18 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 }
 
                 // Gram-Schmidt orthogonalization
+#ifdef SBD_USE_CUBLAS
+                std::vector<ElemT> res(ib+1);
+                BatchedInnerProduct_GEMV(C, ib+1, C[ib+1], res, mult.b_comm(),
+                                         thrust::raw_pointer_cast(workspace.data()));
+                for (int kb = 0; kb < ib + 1; kb++) {
+                    ElemT olap = res[kb] * ElemT(-1.0);
+                    {
+                        SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+                        thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
+                    }
+                }
+#else
                 for (int kb = 0; kb < ib + 1; kb++) {
                     ElemT olap;
                     InnerProduct(C[kb], C[ib+1], olap, mult.b_comm());
@@ -317,6 +344,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                         thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
                     }
                 }
+#endif
 
                 RealT norm_C;
                 Normalize(C[ib + 1], norm_C, mult.b_comm());
