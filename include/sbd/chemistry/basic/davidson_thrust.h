@@ -145,6 +145,14 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     thrust::device_vector<ElemT> workspace(nb * W.size() + nb);
 #endif
 
+    cudaStream_t stream = 0;
+#ifdef SBD_USE_THRUST_NOSYNC
+    auto policy = thrust::cuda::par_nosync.on(stream);
+#else
+    auto policy = thrust::cuda::par.on(stream);
+    // auto policy = thrust::device;
+#endif
+
     // copyin W
     thrust::device_vector<ElemT> W_dev(W.size());
     thrust::copy_n(W.begin(), W.size(), W_dev.begin());
@@ -194,16 +202,18 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // ElemT x = U[0];
                 // W[is] = C[0][is] * x;
-                //thrust::transform(thrust::device, C[0].begin(), C[0].end(), thrust::constant_iterator<ElemT>(U[0]), W_dev.begin(), thrust::multiplies<ElemT>());
-                thrust::transform(thrust::device, C[0].begin(), C[0].end(), W_dev.begin(), AX_kernel<ElemT>(U[0]));
+                // thrust::transform(thrust::device, C[0].begin(), C[0].end(), thrust::constant_iterator<ElemT>(U[0]), W_dev.begin(), thrust::multiplies<ElemT>());
+                // thrust::transform(thrust::device, C[0].begin(), C[0].end(), W_dev.begin(), AX_kernel<ElemT>(U[0]));
+                thrust::transform(policy, C[0].begin(), C[0].end(), W_dev.begin(), AX_kernel<ElemT>(U[0]));
             }
 
             {
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // x = ElemT(-1.0) * U[0];
                 // R[is] = HC[0][is] * x;
-                //thrust::transform(thrust::device, HC[0].begin(), HC[0].end(), thrust::constant_iterator<ElemT>(-U[0]), R.begin(), thrust::multiplies<ElemT>());
-                thrust::transform(thrust::device, HC[0].begin(), HC[0].end(), R.begin(), AX_kernel<ElemT>(-U[0]));
+                // thrust::transform(thrust::device, HC[0].begin(), HC[0].end(), thrust::constant_iterator<ElemT>(-U[0]), R.begin(), thrust::multiplies<ElemT>());
+                // thrust::transform(thrust::device, HC[0].begin(), HC[0].end(), R.begin(), AX_kernel<ElemT>(-U[0]));
+                thrust::transform(policy, HC[0].begin(), HC[0].end(), R.begin(), AX_kernel<ElemT>(-U[0]));
             }
 
             for (int kb = 1; kb <= ib; kb++) {
@@ -211,20 +221,26 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                     SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                     // x = U[kb];
                     // W[is] += C[kb][is] * x;
-                    thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), W_dev.begin(), W_dev.begin(), AXPY_kernel<ElemT>(U[kb]));
+                    // thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), W_dev.begin(), W_dev.begin(), AXPY_kernel<ElemT>(U[kb]));
+                    thrust::transform(policy, C[kb].begin(), C[kb].end(), W_dev.begin(), W_dev.begin(), AXPY_kernel<ElemT>(U[kb]));
                 }
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                     // x = ElemT(-1.0) * U[kb];
                     // R[is] += HC[kb][is] * x;
-                    thrust::transform(thrust::device, HC[kb].begin(), HC[kb].end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(-U[kb]));
+                    // thrust::transform(thrust::device, HC[kb].begin(), HC[kb].end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(-U[kb]));
+                    thrust::transform(policy, HC[kb].begin(), HC[kb].end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(-U[kb]));
                 }
             }
             {
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // R[is] += E[0] * W[is];
-                thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(E[0]));
+                // thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(E[0]));
+                thrust::transform(policy, W_dev.begin(), W_dev.end(), R.begin(), R.begin(), AXPY_kernel<ElemT>(E[0]));
             }
+#ifdef SBD_USE_THRUST_NOSYNC
+            cudaStreamSynchronize(stream);
+#endif
 
             /**
                  Patch for stability on Fugaku
@@ -263,15 +279,20 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                     // W[is] *= volp;
-                    //thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), thrust::constant_iterator<ElemT>(volp), W_dev.begin(), thrust::multiplies<ElemT>());
-                    thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), W_dev.begin(), AX_kernel<ElemT>(volp));
+                    // thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), thrust::constant_iterator<ElemT>(volp), W_dev.begin(), thrust::multiplies<ElemT>());
+                    // thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), W_dev.begin(), AX_kernel<ElemT>(volp));
+                    thrust::transform(policy, W_dev.begin(), W_dev.end(), W_dev.begin(), AX_kernel<ElemT>(volp));
                 }
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                     // R[is] *= volp;
-                    //thrust::transform(thrust::device, R.begin(), R.end(), thrust::constant_iterator<ElemT>(volp), R.begin(), thrust::multiplies<ElemT>());
-                    thrust::transform(thrust::device, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
+                    // thrust::transform(thrust::device, R.begin(), R.end(), thrust::constant_iterator<ElemT>(volp), R.begin(), thrust::multiplies<ElemT>());
+                    // thrust::transform(thrust::device, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
+                    thrust::transform(policy, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
                 }
+#ifdef SBD_USE_THRUST_NOSYNC
+                cudaStreamSynchronize(stream);
+#endif
             }
             // #endif
 
@@ -319,7 +340,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 auto ci = thrust::counting_iterator<size_t>(0);
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, ci, W.size(), Determine_kernel(C[ib + 1], R, dii, eps_reg, E[0]));
+                    thrust::for_each_n(policy, ci, W.size(), Determine_kernel(C[ib + 1], R, dii, eps_reg, E[0]));
                 }
 
                 // Gram-Schmidt orthogonalization
@@ -331,7 +352,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                     ElemT olap = res[kb] * ElemT(-1.0);
                     {
                         SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                        thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
+                        thrust::transform(policy, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
                     }
                 }
 #else
@@ -341,9 +362,12 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                     olap *= ElemT(-1.0);
                     {
                         SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                        thrust::transform(thrust::device, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
+                        thrust::transform(policy, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
                     }
                 }
+#endif
+#ifdef SBD_USE_THRUST_NOSYNC
+                cudaStreamSynchronize(stream);
 #endif
 
                 RealT norm_C;
