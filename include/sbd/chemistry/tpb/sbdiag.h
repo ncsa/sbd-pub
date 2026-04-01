@@ -207,27 +207,6 @@ namespace sbd {
       int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
       int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
 
-#ifdef SBD_USE_NCCL
-      ncclComm_t h_nccl_comm;
-      if (mpi_size_h > 1) {
-          init_nccl_comm(&h_nccl_comm, h_comm);
-          thrust::device_vector<double> A(1, 0.0);
-          nccl_allreduce(A, ncclSum, h_nccl_comm);
-      }
-      ncclComm_t b_nccl_comm;
-      if (mpi_size_b > 1) {
-          init_nccl_comm(&b_nccl_comm, b_comm);
-          thrust::device_vector<double> A(1, 0.0);
-          nccl_allreduce(A, ncclSum, b_nccl_comm);
-      }
-      ncclComm_t t_nccl_comm;
-      if (mpi_size_t > 1) {
-          init_nccl_comm(&t_nccl_comm, t_comm);
-          thrust::device_vector<double> A(1, 0.0);
-          nccl_allreduce(A, ncclSum, t_nccl_comm);
-      }
-      fprintf(stderr, "# NCCL communicators have been created.\n");
-#endif
       /**
 	 Initialize/Load wave function
       */
@@ -246,6 +225,29 @@ namespace sbd {
       if( mpi_rank == 0 ) {
 	std::cout << " Elapsed time for init " << elapsed_init << " (sec) " << std::endl;
       }
+
+#ifdef SBD_USE_NCCL
+      // Initialize NCCL communicators
+      ncclComm_t h_nccl_comm;
+      if (mpi_size_h > 1) {
+          init_nccl_comm(&h_nccl_comm, h_comm);
+          thrust::device_vector<double> A(W.size(), 0.0);
+          nccl_allreduce(A, ncclSum, h_nccl_comm);
+      }
+      ncclComm_t b_nccl_comm;
+      if (mpi_size_b > 1) {
+          init_nccl_comm(&b_nccl_comm, b_comm);
+          thrust::device_vector<double> A(W.size(), 0.0);
+          nccl_allreduce(A, ncclSum, b_nccl_comm);
+      }
+      ncclComm_t t_nccl_comm;
+      if (mpi_size_t > 1) {
+          init_nccl_comm(&t_nccl_comm, t_comm);
+          thrust::device_vector<double> A(W.size(), 0.0);
+          nccl_allreduce(A, ncclSum, t_nccl_comm);
+      }
+      fprintf(stderr, "# NCCL communicators have been created.\n");
+#endif
 
 #ifdef SBD_THRUST
 	// multiplyer class for TPB on Thrust
