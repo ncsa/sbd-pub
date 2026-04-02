@@ -65,9 +65,8 @@ void Normalize(thrust::device_vector<ElemT>& X,
                MPI_Comm comm)
 {
     SBD_NVTX_RANGE_COLOR("Normalize", __LINE__);
-
     res = 0.0;
-    RealT sum = 0.0;
+    if (X.empty()) return;
 
     /*
     // If CUDA native kernel can not be used, use host code
@@ -77,22 +76,56 @@ void Normalize(thrust::device_vector<ElemT>& X,
     thrust::copy_n(hx.begin(), hx.size(), X.begin());
     */
 
+#ifndef SBD_USE_CUBLAS
     auto kernel = dot_product_kernel<RealT>(X, X);
-    sum = precise_reduce_sum_with_function(kernel, X.size());
-
-    MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
+    RealT sum = precise_reduce_sum_with_function(kernel, X.size());
     {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
         MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
     }
     res = std::sqrt(res);
+    if (res == RealT(0)) {
+        return;
+    }
     ElemT factor = ElemT(1.0 / res);
-
     {
         SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
         // thrust::transform(thrust::device, X.begin(), X.end(), thrust::constant_iterator<ElemT>(factor), X.begin(), thrust::multiplies<ElemT>());
         thrust::transform(thrust::device, X.begin(), X.end(), X.begin(), AX_kernel<ElemT>(factor));
     }
+#else
+    static_assert(std::is_same<ElemT, RealT>::value,
+                  "Normalize with cuBLAS currently requires ElemT == RealT");
+    RealT local_sum = sbd::Dot(X, X);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
+        MPI_Allreduce(&local_sum, &res, 1, DataT, MPI_SUM, comm);
+    }
+    res = std::sqrt(res);
+    if (res == RealT(0)) {
+        return;
+    }
+    ElemT factor = ElemT(1.0 / res);
+    cudaStream_t stream = 0;
+    auto& ctx = sbd::GetCublasContext();
+    ctx.set_pointer_mode_host();
+    ctx.set_stream(stream);
+    const int n = static_cast<int>(X.size());
+    ElemT* x_ptr = thrust::raw_pointer_cast(X.data());
+    if constexpr (std::is_same<ElemT, float>::value) {
+        sbd::CheckCublas(
+            cublasSscal(ctx.get(), n, &factor, x_ptr, 1),
+            "cublasSscal failed");
+    }
+    else if constexpr (std::is_same<ElemT, double>::value) {
+        sbd::CheckCublas(
+            cublasDscal(ctx.get(), n, &factor, x_ptr, 1),
+            "cublasDscal failed");
+    }
+    cudaStreamSynchronize(stream);
+#endif
 }
 
 template <typename ElemT, typename RealT>
@@ -115,11 +148,11 @@ void InnerProduct(const thrust::device_vector<ElemT>& X,
     InnerProduct(hx, hy, res, comm);
     */
 
-#ifdef SBD_USE_CUBLAS
-    sum = sbd::Dot(X, Y);
-#else
+#ifndef SBD_USE_CUBLAS
     auto kernel = dot_product_kernel<RealT>(X, Y);
     sum = precise_reduce_sum_with_function(kernel, X.size());
+#else
+    sum = sbd::Dot(X, Y);
 #endif
     {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
