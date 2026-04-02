@@ -26,10 +26,12 @@ protected:
     MPI_Comm h_comm_;
     MPI_Comm b_comm_;
     MPI_Comm t_comm_;
+    MPI_Comm a_comm_;
 #ifdef SBD_USE_NCCL
     ncclComm_t h_nccl_comm_;
     ncclComm_t b_nccl_comm_;
     ncclComm_t t_nccl_comm_;
+    ncclComm_t a_nccl_comm_;
 #endif
 public:
     MultBase() {}
@@ -65,6 +67,10 @@ public:
     {
         return t_comm_;
     }
+    inline MPI_Comm a_comm(void) const
+    {
+        return a_comm_;
+    }
 #ifdef SBD_USE_NCCL
     inline ncclComm_t h_nccl_comm(void) const
     {
@@ -77,6 +83,10 @@ public:
     inline ncclComm_t t_nccl_comm(void) const
     {
         return t_nccl_comm_;
+    }
+    inline ncclComm_t a_nccl_comm(void) const
+    {
+        return a_nccl_comm_;
     }
 #endif
 

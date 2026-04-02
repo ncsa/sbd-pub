@@ -182,9 +182,10 @@ namespace sbd {
       MPI_Comm h_comm;
       MPI_Comm b_comm;
       MPI_Comm t_comm;
+      MPI_Comm a_comm;
       sbd::TaskCommunicator(comm,
 			    h_comm_size,adet_comm_size,bdet_comm_size,task_comm_size,
-			    h_comm,b_comm,t_comm);
+			    h_comm,b_comm,t_comm,a_comm);
 
       auto time_start_help = std::chrono::high_resolution_clock::now();
       sbd::MakeHelpers(adet,bdet,bit_length,L,helper,
@@ -201,11 +202,13 @@ namespace sbd {
       }
 
       int mpi_rank_h; MPI_Comm_rank(h_comm,&mpi_rank_h);
+      int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
       int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
+      int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
       int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
       int mpi_size_t; MPI_Comm_size(t_comm,&mpi_size_t);
-      int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
-      int mpi_size_h; MPI_Comm_size(h_comm,&mpi_size_h);
+      int mpi_rank_a; MPI_Comm_rank(a_comm,&mpi_rank_a);
+      int mpi_size_a; MPI_Comm_size(a_comm,&mpi_size_a);
 
       /**
 	 Initialize/Load wave function
@@ -229,22 +232,28 @@ namespace sbd {
 #ifdef SBD_USE_NCCL
       // Initialize NCCL communicators
       ncclComm_t h_nccl_comm;
-      if (mpi_size_h > 1) {
+      ncclComm_t b_nccl_comm;
+      ncclComm_t t_nccl_comm;
+      ncclComm_t a_nccl_comm;
+      if (0 && mpi_size_h > 1) {
           init_nccl_comm(&h_nccl_comm, h_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, h_nccl_comm);
       }
-      ncclComm_t b_nccl_comm;
-      if (mpi_size_b > 1) {
+      if (0 && mpi_size_b > 1) {
           init_nccl_comm(&b_nccl_comm, b_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, b_nccl_comm);
       }
-      ncclComm_t t_nccl_comm;
-      if (mpi_size_t > 1) {
+      if (0 && mpi_size_t > 1) {
           init_nccl_comm(&t_nccl_comm, t_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, t_nccl_comm);
+      }
+      if (mpi_size_a > 1) {
+          init_nccl_comm(&a_nccl_comm, a_comm);
+          thrust::device_vector<double> A(W.size(), 0.0);
+          nccl_allreduce(A, ncclSum, a_nccl_comm);
       }
       fprintf(stderr, "# NCCL communicators have been created.\n");
 #endif
@@ -272,9 +281,9 @@ namespace sbd {
             SBD_NVTX_RANGE_COLOR("device_mult.Init", __LINE__);
             device_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L),
                              adet_comm_size,bdet_comm_size, helper, I0, I1, I2,
-                             h_comm,b_comm,t_comm,
+                             h_comm,b_comm,t_comm,a_comm,
 #ifdef SBD_USE_NCCL
-                             h_nccl_comm, b_nccl_comm, t_nccl_comm,
+                             h_nccl_comm, b_nccl_comm, t_nccl_comm, a_nccl_comm,
 #endif
                              sbd_data.use_precalculated_dets, sbd_data.max_memory_gb_for_determinants, sbd_data.thrust_collapse_loops);
         }

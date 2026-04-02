@@ -112,6 +112,10 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     MPI_Comm_rank(mult.t_comm(), &mpi_rank_t);
     int mpi_size_t;
     MPI_Comm_size(mult.t_comm(), &mpi_size_t);
+    int mpi_rank_a;
+    MPI_Comm_rank(mult.a_comm(), &mpi_rank_a);
+    int mpi_size_a;
+    MPI_Comm_size(mult.a_comm(), &mpi_size_a);
 
     ElemT *H = (ElemT *)calloc(num_block * num_block, sizeof(ElemT));
     ElemT *U = (ElemT *)calloc(num_block * num_block, sizeof(ElemT));
@@ -246,34 +250,21 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                  Patch for stability on Fugaku
                 */
             // #ifdef SBD_FUAGKUPATCH
-            if (mpi_size_t > 1) {
 #ifdef SBD_USE_NCCL
-                nccl_allreduce(W_dev, ncclSum, mult.t_nccl_comm());
+            if (mpi_size_a > 1) {
+                nccl_allreduce(W_dev, ncclSum, mult.a_nccl_comm());
+                nccl_allreduce(R, ncclSum, mult.a_nccl_comm());
+            }
 #else
+            if (mpi_size_t > 1) {
                 MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
-#endif
-            }
-            if (mpi_size_h > 1) {
-#ifdef SBD_USE_NCCL
-                nccl_allreduce(W_dev, ncclSum, mult.h_nccl_comm());
-#else
-                MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
-#endif
-            }
-            if (mpi_size_t > 1) {
-#ifdef SBD_USE_NCCL
-                nccl_allreduce(R, ncclSum, mult.t_nccl_comm());
-#else
                 MpiAllreduce(R, MPI_SUM, mult.t_comm());
-#endif
             }
             if (mpi_size_h > 1) {
-#ifdef SBD_USE_NCCL
-                nccl_allreduce(R, ncclSum, mult.h_nccl_comm());
-#else
+                MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
                 MpiAllreduce(R, MPI_SUM, mult.h_comm());
-#endif
             }
+#endif
             if (mpi_size_h * mpi_size_t > 1) {
                 ElemT volp(1.0 / (mpi_size_h * mpi_size_t));
                 {

@@ -75,10 +75,12 @@ public:
         MPI_Comm h_comm_in,
         MPI_Comm b_comm_in,
         MPI_Comm t_comm_in,
+        MPI_Comm a_comm_in,
 #ifdef SBD_USE_NCCL
         ncclComm_t h_nccl_comm,
         ncclComm_t b_nccl_comm,
         ncclComm_t t_nccl_comm,
+        ncclComm_t a_nccl_comm,
 #endif
         bool use_pre_dets,
         int max_gb_dets,
@@ -113,10 +115,12 @@ void MultTPBThrust<ElemT>::Init(
     MPI_Comm h_comm_in,
     MPI_Comm b_comm_in,
     MPI_Comm t_comm_in,
+    MPI_Comm a_comm_in,
 #ifdef SBD_USE_NCCL
     ncclComm_t h_nccl_comm,
     ncclComm_t b_nccl_comm,
     ncclComm_t t_nccl_comm,
+    ncclComm_t a_nccl_comm,
 #endif
     bool use_pre_dets,
     int max_gb_dets,
@@ -131,10 +135,12 @@ void MultTPBThrust<ElemT>::Init(
     this->h_comm_ = h_comm_in;
     this->b_comm_ = b_comm_in;
     this->t_comm_ = t_comm_in;
+    this->a_comm_ = a_comm_in;
 #ifdef SBD_USE_NCCL
     this->h_nccl_comm_ = h_nccl_comm;
     this->b_nccl_comm_ = b_nccl_comm;
     this->t_nccl_comm_ = t_nccl_comm;
+    this->a_nccl_comm_ = a_nccl_comm;
 #endif
 
     adet_comm_size = adet_comm_size_in;
@@ -1239,6 +1245,11 @@ void MultTPBThrust<ElemT>::run(
     MPI_Comm_size(this->t_comm_, &mpi_size_t);
     int mpi_rank_t;
     MPI_Comm_rank(this->t_comm_, &mpi_rank_t);
+    int mpi_size_a;
+    MPI_Comm_size(this->a_comm_, &mpi_size_a);
+    int mpi_rank_a;
+    MPI_Comm_rank(this->a_comm_, &mpi_rank_a);
+
     size_t braAlphaSize = 0;
     size_t braBetaSize = 0;
 
@@ -1581,20 +1592,18 @@ void MultTPBThrust<ElemT>::run(
     auto time_mult_end = std::chrono::high_resolution_clock::now();
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
-    if (mpi_size_h > 1) {
 #ifdef SBD_USE_NCCL
-        nccl_allreduce(Wb, ncclSum, this->h_nccl_comm_);
-#else
-        MpiAllreduce(Wb, MPI_SUM, this->h_comm_);
-#endif
+    if (mpi_size_a > 1) {
+        nccl_allreduce(Wb, ncclSum, this->a_nccl_comm_);
     }
+#else
     if (mpi_size_t > 1) {
-#ifdef SBD_USE_NCCL
-        nccl_allreduce(Wb, ncclSum, this->t_nccl_comm_);
-#else
         MpiAllreduce(Wb, MPI_SUM, this->t_comm_);
-#endif
     }
+    if (mpi_size_h > 1) {
+        MpiAllreduce(Wb, MPI_SUM, this->h_comm_);
+    }
+#endif
     auto time_comm_end = std::chrono::high_resolution_clock::now();
 
 #ifdef SBD_DEBUG_MULT
