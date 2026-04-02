@@ -331,7 +331,121 @@ void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
     }
     cudaStreamSynchronize(stream);
 }
+
+template <typename ElemT>
+void GramSchmidtOrthogonalize_GEMV(const std::vector<thrust::device_vector<ElemT>>& C,
+                                   size_t num_X,
+                                   thrust::device_vector<ElemT>& Y,
+                                   MPI_Comm comm,
+                                   ElemT* ws_ptr = nullptr)
+{
+    SBD_NVTX_RANGE_COLOR("GramSchmidtOrthogonalize_GEMV", __LINE__);
+    if (num_X == 0) return;
+
+    assert(num_X <= C.size());
+    cudaStream_t stream = 0;
+    const size_t N = Y.size();
+
+    // workspace layout:
+    // [ X_flat (num_X * N) ][ res_dev (num_X) ]
+    thrust::device_vector<ElemT> X_flat_local;
+    thrust::device_vector<ElemT> res_dev_local;
+    ElemT* X_flat_ptr;
+    ElemT* res_dev_ptr;
+    if (ws_ptr == nullptr) {
+        X_flat_local.resize(num_X * N);
+        res_dev_local.resize(num_X);
+        X_flat_ptr = thrust::raw_pointer_cast(X_flat_local.data());
+        res_dev_ptr = thrust::raw_pointer_cast(res_dev_local.data());
+    } else {
+        X_flat_ptr = ws_ptr;
+        res_dev_ptr = ws_ptr + (num_X * N);
+    }
+
+    // 1. pack C[0..num_X-1] once
+    for (size_t i = 0; i < num_X; i++) {
+        assert(C[i].size() == N);
+        cudaMemcpyAsync(
+            X_flat_ptr + (N * i),
+            thrust::raw_pointer_cast(C[i].data()),
+            sizeof(ElemT) * N,
+            cudaMemcpyDeviceToDevice,
+            stream);
+    }
+
+    auto& ctx = sbd::GetCublasContext();
+    ctx.set_pointer_mode_host();
+    ctx.set_stream(stream);
+
+    const ElemT one = static_cast<ElemT>(1.0);
+    const ElemT zero = static_cast<ElemT>(0.0);
+    const ElemT minus_one = static_cast<ElemT>(-1.0);
+
+    const ElemT* A = X_flat_ptr;
+    const ElemT* y_in = thrust::raw_pointer_cast(Y.data());
+    ElemT* y_out = thrust::raw_pointer_cast(Y.data());
+
+    const int n = static_cast<int>(N);
+    const int m = static_cast<int>(num_X);
+
+    // 2. local overlaps: res_dev = A^T * Y
+    if constexpr (std::is_same<ElemT, float>::value) {
+        sbd::CheckCublas(
+            cublasSgemv(ctx.get(), CUBLAS_OP_T, n, m,
+                        &one, A, n, y_in, 1,
+                        &zero, res_dev_ptr, 1),
+            "cublasSgemv (A^T * Y) failed");
+    }
+    else if constexpr (std::is_same<ElemT, double>::value) {
+        sbd::CheckCublas(
+            cublasDgemv(ctx.get(), CUBLAS_OP_T, n, m,
+                        &one, A, n, y_in, 1,
+                        &zero, res_dev_ptr, 1),
+            "cublasDgemv (A^T * Y) failed");
+    }
+    else {
+        static_assert(!sizeof(ElemT), "Unsupported type for GramSchmidtOrthogonalize_GEMV");
+    }
+
+    // 3. copy overlaps to host and allreduce
+    std::vector<ElemT> res_host(num_X);
+    cudaMemcpyAsync(res_host.data(), res_dev_ptr, sizeof(ElemT) * num_X,
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+        MPI_Allreduce(MPI_IN_PLACE, res_host.data(), static_cast<int>(num_X), DataT, MPI_SUM, comm);
+    }
+
+    // 4. negate overlaps and copy back to device
+    for (size_t i = 0; i < num_X; i++) {
+        res_host[i] *= minus_one;
+    }
+    cudaMemcpyAsync(res_dev_ptr, res_host.data(), sizeof(ElemT) * num_X,
+                    cudaMemcpyHostToDevice, stream);
+
+    // 5. Y = Y + A * res
+    if constexpr (std::is_same<ElemT, float>::value) {
+        sbd::CheckCublas(
+            cublasSgemv(ctx.get(), CUBLAS_OP_N, n, m,
+                        &one, A, n, res_dev_ptr, 1,
+                        &one, y_out, 1),
+            "cublasSgemv (Y + A * res) failed");
+    }
+    else if constexpr (std::is_same<ElemT, double>::value) {
+        sbd::CheckCublas(
+            cublasDgemv(ctx.get(), CUBLAS_OP_N, n, m,
+                        &one, A, n, res_dev_ptr, 1,
+                        &one, y_out, 1),
+            "cublasDgemv (Y + A * res) failed");
+    }
+    cudaStreamSynchronize(stream);
+}
 #endif
+
+
+
 
 }
 

@@ -344,6 +344,12 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 
                 // Gram-Schmidt orthogonalization
 #ifdef SBD_USE_CUBLAS
+
+#if 1
+                GramSchmidtOrthogonalize_GEMV(
+                    C, ib + 1, C[ib + 1], mult.b_comm(),
+                    thrust::raw_pointer_cast(workspace.data()));
+#else
                 std::vector<ElemT> res(ib+1);
                 BatchedInnerProduct_GEMV(C, ib+1, C[ib+1], res, mult.b_comm(),
                                          thrust::raw_pointer_cast(workspace.data()));
@@ -352,7 +358,9 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 }
                 BatchedAXPY_GEMV(C, ib+1, res, C[ib+1],
                                  thrust::raw_pointer_cast(workspace.data()));
-#else
+#endif
+
+#else // #ifdef SBD_USE_CUBLAS
                 for (int kb = 0; kb < ib + 1; kb++) {
                     ElemT olap;
                     InnerProduct(C[kb], C[ib+1], olap, mult.b_comm());
@@ -362,10 +370,10 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                         thrust::transform(policy, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
                     }
                 }
-#endif
 #ifdef SBD_USE_THRUST_NOSYNC
                 cudaStreamSynchronize(stream);
 #endif
+#endif // #ifdef SBD_USE_CUBLAS
 
                 RealT norm_C;
                 Normalize(C[ib + 1], norm_C, mult.b_comm());
