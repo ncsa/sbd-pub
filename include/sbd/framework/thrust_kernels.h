@@ -128,6 +128,77 @@ void Normalize(thrust::device_vector<ElemT>& X,
 #endif
 }
 
+#ifdef SBD_USE_CUBLAS
+template <typename ElemT, typename RealT>
+void Normalize2(thrust::device_vector<ElemT>& X0,
+                thrust::device_vector<ElemT>& X1,
+                RealT& norm0,
+                RealT& norm1,
+                MPI_Comm comm)
+{
+    SBD_NVTX_RANGE_COLOR("Normalize2", __LINE__);
+    static_assert(std::is_same<ElemT, RealT>::value,
+                  "Normalize2 currently requires ElemT == RealT");
+
+    norm0 = RealT(0);
+    norm1 = RealT(0);
+    RealT local[2]  = {RealT(0), RealT(0)};
+    RealT global[2] = {RealT(0), RealT(0)};
+    if (!X0.empty()) {
+        local[0] = sbd::Dot(X0, X0);
+    }
+    if (!X1.empty()) {
+        local[1] = sbd::Dot(X1, X1);
+    }
+    {
+        SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
+        MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
+        MPI_Allreduce(local, global, 2, DataT, MPI_SUM, comm);
+    }
+    norm0 = std::sqrt(global[0]);
+    norm1 = std::sqrt(global[1]);
+    cudaStream_t stream = 0;
+    auto& ctx = sbd::GetCublasContext();
+    ctx.set_pointer_mode_host();
+    ctx.set_stream(stream);
+    if (norm0 != RealT(0) && !X0.empty()) {
+        ElemT factor0 = ElemT(1.0 / norm0);
+        const int n0 = static_cast<int>(X0.size());
+        ElemT* x0_ptr = thrust::raw_pointer_cast(X0.data());
+        if constexpr (std::is_same<ElemT, float>::value) {
+            sbd::CheckCublas(
+                cublasSscal(ctx.get(), n0, &factor0, x0_ptr, 1),
+                "cublasSscal failed for X0");
+        }
+        else if constexpr (std::is_same<ElemT, double>::value) {
+            sbd::CheckCublas(
+                cublasDscal(ctx.get(), n0, &factor0, x0_ptr, 1),
+                "cublasDscal failed for X0");
+        }
+        else {
+            static_assert(!sizeof(ElemT), "Unsupported type for Normalize2");
+        }
+    }
+    if (norm1 != RealT(0) && !X1.empty()) {
+        ElemT factor1 = ElemT(1.0 / norm1);
+        const int n1 = static_cast<int>(X1.size());
+        ElemT* x1_ptr = thrust::raw_pointer_cast(X1.data());
+
+        if constexpr (std::is_same<ElemT, float>::value) {
+            sbd::CheckCublas(
+                cublasSscal(ctx.get(), n1, &factor1, x1_ptr, 1),
+                "cublasSscal failed for X1");
+        }
+        else if constexpr (std::is_same<ElemT, double>::value) {
+            sbd::CheckCublas(
+                cublasDscal(ctx.get(), n1, &factor1, x1_ptr, 1),
+                "cublasDscal failed for X1");
+        }
+    }
+    cudaStreamSynchronize(stream);
+}
+#endif
+
 template <typename ElemT, typename RealT>
 void InnerProduct(const thrust::device_vector<ElemT>& X,
                   const thrust::device_vector<ElemT>& Y,

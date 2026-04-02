@@ -297,11 +297,13 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             // #endif
 
             RealT norm_W;
-            Normalize(W_dev, norm_W, mult.b_comm());
-
             RealT norm_R;
+#ifdef SBD_USE_CUBLAS
+            Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm());
+#else
+            Normalize(W_dev, norm_W, mult.b_comm());
             Normalize(R, norm_R, mult.b_comm());
-
+#endif
             // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 
