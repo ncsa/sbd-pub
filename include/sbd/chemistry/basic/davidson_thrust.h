@@ -329,7 +329,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 }
             }
 #endif
-
             if (norm_R < eps) {
                 do_continue = false;
                 break;
@@ -349,12 +348,10 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 BatchedInnerProduct_GEMV(C, ib+1, C[ib+1], res, mult.b_comm(),
                                          thrust::raw_pointer_cast(workspace.data()));
                 for (int kb = 0; kb < ib + 1; kb++) {
-                    ElemT olap = res[kb] * ElemT(-1.0);
-                    {
-                        SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                        thrust::transform(policy, C[kb].begin(), C[kb].end(), C[ib + 1].begin(), C[ib + 1].begin(), AXPY_kernel<ElemT>(olap));
-                    }
+                    res[kb] *= ElemT(-1.0);
                 }
+                BatchedAXPY_GEMV(C, ib+1, res, C[ib+1],
+                                 thrust::raw_pointer_cast(workspace.data()));
 #else
                 for (int kb = 0; kb < ib + 1; kb++) {
                     ElemT olap;

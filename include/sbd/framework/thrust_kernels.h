@@ -260,6 +260,77 @@ void BatchedInnerProduct_GEMV(std::vector<thrust::device_vector<ElemT>>& X,
         MPI_Allreduce(res.data(), Z.data(), num_X, DataT, MPI_SUM, comm);
     }
 }
+
+template <typename ElemT>
+void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
+                      size_t num_X,
+                      const std::vector<ElemT>& alpha_host,
+                      thrust::device_vector<ElemT>& Y,
+                      ElemT* ws_ptr = nullptr)
+{
+    SBD_NVTX_RANGE_COLOR("BatchedAXPY_GEMV", __LINE__);
+    if (num_X == 0) return;
+
+    assert(num_X <= X.size());
+    assert(num_X <= alpha_host.size());
+    cudaStream_t stream = 0;
+    const size_t N = Y.size();
+    thrust::device_vector<ElemT> X_flat;
+    thrust::device_vector<ElemT> alpha_dev;
+    ElemT* X_flat_ptr;
+    ElemT* alpha_dev_ptr;
+    if (ws_ptr == nullptr) {
+        X_flat.resize(num_X * N);
+        alpha_dev.resize(num_X);
+        X_flat_ptr   = thrust::raw_pointer_cast(X_flat.data());
+        alpha_dev_ptr = thrust::raw_pointer_cast(alpha_dev.data());
+    } else {
+        X_flat_ptr    = ws_ptr;
+        alpha_dev_ptr = ws_ptr + (num_X * N);
+    }
+    for (size_t i = 0; i < num_X; i++) {
+        assert(X[i].size() == N);
+        cudaMemcpyAsync(
+            X_flat_ptr + (N * i),
+            thrust::raw_pointer_cast(X[i].data()),
+            sizeof(ElemT) * N,
+            cudaMemcpyDeviceToDevice,
+            stream);
+    }
+    cudaMemcpyAsync(
+        alpha_dev_ptr,
+        alpha_host.data(),
+        sizeof(ElemT) * num_X,
+        cudaMemcpyHostToDevice,
+        stream);
+
+    auto& ctx = sbd::GetCublasContext();
+    ctx.set_pointer_mode_host();
+    ctx.set_stream(stream);
+
+    const ElemT one = static_cast<ElemT>(1.0);
+    const ElemT* A = X_flat_ptr;
+    const ElemT* x = alpha_dev_ptr;
+    ElemT* y = thrust::raw_pointer_cast(Y.data());
+    if constexpr (std::is_same<ElemT, float>::value) {
+        sbd::CheckCublas(
+            cublasSgemv(ctx.get(), CUBLAS_OP_N, N, num_X,
+                        &one, A, N, x, 1,
+                        &one, y, 1),
+            "cublasSgemv failed");
+    }
+    else if constexpr (std::is_same<ElemT, double>::value) {
+        sbd::CheckCublas(
+            cublasDgemv(ctx.get(), CUBLAS_OP_N, N, num_X,
+                        &one, A, N, x, 1,
+                        &one, y, 1),
+            "cublasDgemv failed");
+    }
+    else {
+        static_assert(!sizeof(ElemT), "Unsupported type for BatchedAXPY_GEMV");
+    }
+    cudaStreamSynchronize(stream);
+}
 #endif
 
 }
