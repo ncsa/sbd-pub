@@ -152,11 +152,13 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #endif
 
     cudaStream_t stream = 0;
+    auto policy_nosync = thrust::cuda::par_nosync.on(stream);
+    auto policy_sync = thrust::cuda::par.on(stream);
+    // auto policy_sync = thrust::device;
 #ifdef SBD_USE_THRUST_NOSYNC
-    auto policy = thrust::cuda::par_nosync.on(stream);
+    auto policy = policy_nosync;
 #else
-    auto policy = thrust::cuda::par.on(stream);
-    // auto policy = thrust::device;
+    auto policy = policy_sync;
 #endif
 
     // copyin W
@@ -207,6 +209,30 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #else
             hp_numeric::MatHeev(jobz, uplo, ib + 1, U, nb, E);
 #endif
+
+#ifdef SBD_USE_CUBLAS
+            std::vector<ElemT> alpha_W(ib+1);
+            std::vector<ElemT> alpha_R(ib+1);
+            for (int kb = 0; kb <= ib; kb++) {
+                alpha_W[kb] = U[kb];
+                alpha_R[kb] = -U[kb];
+            }
+            // W_dev = C * alpha_W
+            BatchedAXPY_GEMV(C, ib + 1, alpha_W, W_dev, ElemT(0),
+                             thrust::raw_pointer_cast(workspace.data()), stream);
+            // R = HC * alpha_R
+            BatchedAXPY_GEMV(HC, ib + 1, alpha_R, R, ElemT(0),
+                             thrust::raw_pointer_cast(workspace.data()), stream);
+            {
+                SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+                // R += E[0] * W
+                thrust::transform(policy_nosync,
+                                  W_dev.begin(), W_dev.end(), R.begin(), R.begin(),
+                                  AXPY_kernel<ElemT>(E[0]));
+            }
+            cudaStreamSynchronize(stream);
+
+#else // #ifdef SBD_USE_CUBLAS
             {
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // ElemT x = U[0];
@@ -214,7 +240,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 // thrust::transform(thrust::device, C[0].begin(), C[0].end(), thrust::constant_iterator<ElemT>(U[0]), W_dev.begin(), thrust::multiplies<ElemT>());
                 thrust::transform(policy, C[0].begin(), C[0].end(), W_dev.begin(), AX_kernel<ElemT>(U[0]));
             }
-
             {
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // x = ElemT(-1.0) * U[0];
@@ -222,7 +247,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 // thrust::transform(thrust::device, HC[0].begin(), HC[0].end(), thrust::constant_iterator<ElemT>(-U[0]), R.begin(), thrust::multiplies<ElemT>());
                 thrust::transform(policy, HC[0].begin(), HC[0].end(), R.begin(), AX_kernel<ElemT>(-U[0]));
             }
-
             for (int kb = 1; kb <= ib; kb++) {
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
@@ -245,6 +269,8 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #ifdef SBD_USE_THRUST_NOSYNC
             cudaStreamSynchronize(stream);
 #endif
+
+#endif // #ifdef SBD_USE_CUBLAS
 
             /**
                  Patch for stability on Fugaku
@@ -360,7 +386,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 for (int kb = 0; kb < ib + 1; kb++) {
                     res[kb] *= ElemT(-1.0);
                 }
-                BatchedAXPY_GEMV(C, ib+1, res, C[ib+1],
+                BatchedAXPY_GEMV(C, ib+1, res, C[ib+1], static_cast<ElemT>(1.0),
                                  thrust::raw_pointer_cast(workspace.data()));
 #endif
 #else // #ifdef SBD_USE_CUBLAS

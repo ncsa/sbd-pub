@@ -332,75 +332,103 @@ void BatchedInnerProduct_GEMV(std::vector<thrust::device_vector<ElemT>>& X,
     }
 }
 
+// Internal implementation of batched AXPY via GEMV:
+// computes Y = X * alpha + beta * Y after packing X into a column-major matrix.
+// This routine only enqueues work onto the given stream; synchronization is
+// handled by the caller.
 template <typename ElemT>
-void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
-                      size_t num_X,
-                      const std::vector<ElemT>& alpha_host,
-                      thrust::device_vector<ElemT>& Y,
-                      ElemT* ws_ptr = nullptr)
+void BatchedAXPY_GEMV_impl(const std::vector<thrust::device_vector<ElemT>>& X,
+                           size_t num_X,
+                           const ElemT* alpha_dev_ptr,
+                           thrust::device_vector<ElemT>& Y,
+                           ElemT beta,
+                           ElemT* ws_ptr = nullptr,
+                           cudaStream_t stream = 0)
 {
-    SBD_NVTX_RANGE_COLOR("BatchedAXPY_GEMV", __LINE__);
+    SBD_NVTX_RANGE_COLOR("BatchedAXPY_GEMV_impl", __LINE__);
     if (num_X == 0) return;
-
     assert(num_X <= X.size());
-    assert(num_X <= alpha_host.size());
-    cudaStream_t stream = 0;
     const size_t N = Y.size();
-    thrust::device_vector<ElemT> X_flat;
-    thrust::device_vector<ElemT> alpha_dev;
-    ElemT* X_flat_ptr;
-    ElemT* alpha_dev_ptr;
+    thrust::device_vector<ElemT> X_flat_local;
+    ElemT* X_flat_ptr = nullptr;
     if (ws_ptr == nullptr) {
-        X_flat.resize(num_X * N);
-        alpha_dev.resize(num_X);
-        X_flat_ptr   = thrust::raw_pointer_cast(X_flat.data());
-        alpha_dev_ptr = thrust::raw_pointer_cast(alpha_dev.data());
+        X_flat_local.resize(num_X * N);
+        X_flat_ptr = thrust::raw_pointer_cast(X_flat_local.data());
     } else {
-        X_flat_ptr    = ws_ptr;
-        alpha_dev_ptr = ws_ptr + (num_X * N);
+        X_flat_ptr = ws_ptr;
     }
     for (size_t i = 0; i < num_X; i++) {
         assert(X[i].size() == N);
-        cudaMemcpyAsync(
-            X_flat_ptr + (N * i),
-            thrust::raw_pointer_cast(X[i].data()),
-            sizeof(ElemT) * N,
-            cudaMemcpyDeviceToDevice,
-            stream);
+        CHECK_CUDA(cudaMemcpyAsync(
+                       X_flat_ptr + (N * i), thrust::raw_pointer_cast(X[i].data()),
+                       sizeof(ElemT) * N, cudaMemcpyDeviceToDevice, stream));
     }
-    cudaMemcpyAsync(
-        alpha_dev_ptr,
-        alpha_host.data(),
-        sizeof(ElemT) * num_X,
-        cudaMemcpyHostToDevice,
-        stream);
-
     auto& ctx = sbd::GetCublasContext();
     ctx.set_pointer_mode_host();
     ctx.set_stream(stream);
-
+    const int n = static_cast<int>(N);
+    const int m = static_cast<int>(num_X);
     const ElemT one = static_cast<ElemT>(1.0);
     const ElemT* A = X_flat_ptr;
-    const ElemT* x = alpha_dev_ptr;
     ElemT* y = thrust::raw_pointer_cast(Y.data());
     if constexpr (std::is_same<ElemT, float>::value) {
         sbd::CheckCublas(
-            cublasSgemv(ctx.get(), CUBLAS_OP_N, N, num_X,
-                        &one, A, N, x, 1,
-                        &one, y, 1),
+            cublasSgemv(ctx.get(), CUBLAS_OP_N, n, m,
+                        &one, A, n, alpha_dev_ptr, 1,
+                        &beta, y, 1),
             "cublasSgemv failed");
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
         sbd::CheckCublas(
-            cublasDgemv(ctx.get(), CUBLAS_OP_N, N, num_X,
-                        &one, A, N, x, 1,
-                        &one, y, 1),
+            cublasDgemv(ctx.get(), CUBLAS_OP_N, n, m,
+                        &one, A, n, alpha_dev_ptr, 1,
+                        &beta, y, 1),
             "cublasDgemv failed");
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for BatchedAXPY_GEMV");
     }
-    cudaStreamSynchronize(stream);
+}
+
+// When ws_ptr is provided, it must have space for both the packed matrix
+// buffer (Y.size() * num_X elements).
+template <typename ElemT>
+void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
+                      size_t num_X,
+                      const thrust::device_vector<ElemT>& alpha_dev,
+                      thrust::device_vector<ElemT>& Y,
+                      ElemT beta,
+                      ElemT* ws_ptr = nullptr,
+                      cudaStream_t stream = 0)
+{
+    assert(num_X <= alpha_dev.size());
+    ElemT *alpha_dev_ptr = thrust::raw_pointer_cast(alpha_dev.data());
+    BatchedAXPY_GEMV_impl(X, num_X, alpha_dev_ptr, Y, beta, ws_ptr, stream);
+}
+
+// When ws_ptr is provided, it must have space for both the packed matrix
+// buffer (Y.size() * num_X elements) and the alpha vector (num_X elements).
+template <typename ElemT>
+void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
+                      size_t num_X,
+                      const std::vector<ElemT>& alpha_host,
+                      thrust::device_vector<ElemT>& Y,
+                      ElemT beta,
+                      ElemT* ws_ptr = nullptr,
+                      cudaStream_t stream = 0)
+{
+    assert(num_X <= alpha_host.size());
+    ElemT *alpha_dev_ptr = nullptr;
+    thrust::device_vector<ElemT> alpha_dev;
+    if (ws_ptr == nullptr) {
+        alpha_dev.resize(num_X);
+        alpha_dev_ptr = thrust::raw_pointer_cast(alpha_dev.data());
+    } else {
+        alpha_dev_ptr = ws_ptr + (Y.size() * num_X);
+    }
+    CHECK_CUDA(cudaMemcpyAsync(alpha_dev_ptr, alpha_host.data(),
+                               sizeof(ElemT) * num_X, cudaMemcpyHostToDevice, stream));
+    BatchedAXPY_GEMV_impl(X, num_X, alpha_dev_ptr, Y, beta, ws_ptr, stream);
 }
 
 template <typename ElemT>
@@ -514,9 +542,6 @@ void GramSchmidtOrthogonalize_GEMV(const std::vector<thrust::device_vector<ElemT
     cudaStreamSynchronize(stream);
 }
 #endif
-
-
-
 
 }
 
