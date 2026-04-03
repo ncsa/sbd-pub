@@ -182,6 +182,10 @@ namespace sbd {
       MPI_Comm h_comm;
       MPI_Comm b_comm;
       MPI_Comm t_comm;
+      // a_comm is introduced as a combined communicator of t_comm and h_comm.
+      // This enables replacing consecutive AllReduce operations over t_comm
+      // and h_comm with a single collective call, reducing communication
+      // overhead and latency.
       MPI_Comm a_comm;
       sbd::TaskCommunicator(comm,
 			    h_comm_size,adet_comm_size,bdet_comm_size,task_comm_size,
@@ -230,22 +234,25 @@ namespace sbd {
       }
 
 #ifdef SBD_USE_NCCL
-      // Initialize NCCL communicators
+      // Initialize NCCL communicators.
+      // Only a_nccl_comm is initialized, as all collective operations are
+      // performed on a_comm. Other NCCL communicators (h_comm, b_comm, t_comm)
+      // are omitted to reduce initialization overhead and resource usage.
       ncclComm_t h_nccl_comm;
       ncclComm_t b_nccl_comm;
       ncclComm_t t_nccl_comm;
       ncclComm_t a_nccl_comm;
-      if (0 && mpi_size_h > 1) {
+      if (false && mpi_size_h > 1) {
           init_nccl_comm(&h_nccl_comm, h_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, h_nccl_comm);
       }
-      if (0 && mpi_size_b > 1) {
+      if (false && mpi_size_b > 1) {
           init_nccl_comm(&b_nccl_comm, b_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, b_nccl_comm);
       }
-      if (0 && mpi_size_t > 1) {
+      if (false && mpi_size_t > 1) {
           init_nccl_comm(&t_nccl_comm, t_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, t_nccl_comm);

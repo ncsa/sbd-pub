@@ -18,9 +18,9 @@
 #define MAX_DET_SIZE 134217728
 
 // Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
-// #define SBD_USE_STRIDED_RANK_DISTRIBUTION
-// #define SBD_USE_VECTORIZATION
-// #define SBD_USE_HASHTABLE
+#define SBD_USE_STRIDED_RANK_DISTRIBUTION
+#define SBD_USE_VECTORIZATION
+// #define SBD_USE_HASHTABLE  // (*) this is experimental
 
 namespace sbd
 {
@@ -419,6 +419,12 @@ public:
 };
 
 
+// NOTE: "Vec" here refers to processing multiple elements per thread (thread
+// coarsening), not SIMD vectorization. Memory accesses are not contiguous and
+// no vector instructions are used. The main purpose is to increase work per
+// thread and reduce the number of global atomic operations, as adjacent
+// elements often update the same memory locations and can be accumulated within
+// a thread before issuing a single atomic update.
 template <typename ElemT, int VecLen = 2>
 class MultAlphaBeta_Vec : public MultKernelBase<ElemT>
 {
@@ -434,6 +440,10 @@ public:
         helper = h;
     }
 
+    // NOTE: loop_body is intentionally duplicated in both MultAlphaBeta and
+    // MultAlphaBeta_Vec. While it would be cleaner to share the implementation
+    // via inheritance, doing so resulted in noticeable performance degradation,
+    // so the duplication is kept to preserve performance.
     __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
         braIdx = -1;
         eij = 0;
@@ -486,6 +496,11 @@ public:
 };
 
 
+// NOTE: Experimental implementation.
+// Extends MultAlphaBeta_Vec by using a hash-based scheme to aggregate atomic
+// updates in shared memory at the thread-block level, aiming to reduce global
+// atomic operations. However, no performance improvement was observed in
+// practice, so this remains an experimental approach.
 template <typename ElemT, int VecLen = 2, int HashLen = 256>
 class MultAlphaBeta_VecHash : public MultKernelBase<ElemT>
 {
@@ -770,6 +785,9 @@ public:
 #define SB_MULT_SINGLE 0
 #define SB_MULT_DOUBLE 1
 
+// MultUnified unifies multiple kernel variants into a single template-based
+// implementation, allowing shared application of optimizations (e.g., thread
+// coarsening) and avoiding code duplication across individual kernels.
 template <typename ElemT, int AlphaOrBeta, int SingleOrDouble>
 class MultUnified : public MultKernelBase<ElemT>
 {
@@ -889,7 +907,10 @@ public:
     }
 };
 
-
+// MultUnified_Vec extends MultUnified by applying thread coarsening (multiple
+// elements per thread). This is not SIMD vectorization; memory accesses are not
+// contiguous. The goal is to reduce global atomic operations by accumulating
+// contributions within a thread before issuing atomic updates.
 template <typename ElemT, int AlphaOrBeta, int SingleOrDouble, int VecLen = 2>
 class MultUnified_Vec : public MultKernelBase<ElemT>
 {
@@ -905,6 +926,10 @@ public:
         helper = h;
     }
     
+    // NOTE: loop_body is intentionally duplicated in both MultUnified and
+    // MultUnified_Vec. While it would be cleaner to share the implementation
+    // via inheritance, doing so resulted in noticeable performance degradation,
+    // so the duplication is kept to preserve performance.
     __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
         braIdx = -1;
         eij = 0;

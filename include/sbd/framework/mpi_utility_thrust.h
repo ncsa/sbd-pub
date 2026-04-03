@@ -464,6 +464,58 @@ void nccl_allreduce(thrust::device_vector<ElemT> &A, ncclRedOp_t nccl_op, ncclCo
     CHECK_NCCL(ncclAllReduce(buff, buff, count, NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
     CHECK_CUDA(cudaStreamSynchronize(stream));
 }
+
+template <typename ElemT>
+void nccl_allreduce2(thrust::device_vector<ElemT>& A,
+                     thrust::device_vector<ElemT>& B,
+                     ncclRedOp_t nccl_op,
+                     ncclComm_t nccl_comm,
+                     void* ws_ptr = nullptr,
+                     cudaStream_t stream = 0)
+{
+    SBD_NVTX_RANGE_COLOR("nccl_allreduce2", __LINE__);
+    const size_t nA = A.size();
+    const size_t nB = B.size();
+    const size_t nTotal = nA + nB;
+    if (nTotal == 0) return;
+
+    thrust::device_vector<ElemT> ws_local;
+    ElemT* packed_ptr = nullptr;
+    if (ws_ptr == nullptr) {
+        ws_local.resize(nTotal);
+        packed_ptr = thrust::raw_pointer_cast(ws_local.data());
+    } else {
+        packed_ptr = static_cast<ElemT*>(ws_ptr);
+    }
+    ElemT* A_ptr = nA ? thrust::raw_pointer_cast(A.data()) : nullptr;
+    ElemT* B_ptr = nB ? thrust::raw_pointer_cast(B.data()) : nullptr;
+
+    // pack
+    if (nA > 0) {
+        CHECK_CUDA(cudaMemcpyAsync(packed_ptr, A_ptr, sizeof(ElemT) * nA,
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
+    if (nB > 0) {
+        CHECK_CUDA(cudaMemcpyAsync(packed_ptr + nA, B_ptr, sizeof(ElemT) * nB,
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
+
+    // single allreduce on packed buffer (in-place)
+    CHECK_NCCL(
+        ncclAllReduce((const void*)packed_ptr, (void*)packed_ptr, nTotal,
+                      NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
+
+    // unpack
+    if (nA > 0) {
+        CHECK_CUDA(cudaMemcpyAsync(A_ptr, packed_ptr, sizeof(ElemT) * nA,
+                            cudaMemcpyDeviceToDevice, stream));
+    }
+    if (nB > 0) {
+        CHECK_CUDA(cudaMemcpyAsync(B_ptr, packed_ptr + nA, sizeof(ElemT) * nB,
+                                   cudaMemcpyDeviceToDevice, stream));
+    }
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+}
 #endif // #ifdef SBD_USE_NCCL
 
 }
