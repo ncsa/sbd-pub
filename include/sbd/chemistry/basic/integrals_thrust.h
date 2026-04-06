@@ -76,13 +76,26 @@ public:
 
     inline __device__ __host__ ElemT &Direct(int i, int j)
     {
-        return DirectMat[i + norbs * j];
+        return DirectMat[i + 2 * norbs * j];
     }
     inline __device__ __host__ ElemT &Exchange(int i, int j)
     {
-        return ExchangeMat[i + norbs * j];
+        return ExchangeMat[i + 2 * norbs * j];
     }
 
+#ifdef _UHF
+    inline __device__ __host__ ElemT Value(int i, int j, int k, int l) const
+    {
+        if (!((i % 2 == j % 2) && (k % 2 == l % 2)))
+            return zero;
+        int I = i / 2;
+        int J = j / 2;
+        int K = k / 2;
+        int L = l / 2;
+        int S = i % 2 + 2 * (k % 2);
+        return store[I+J*norbs+K*norbs*norbs+L*norbs*norbs*norbs+S*norbs*norbs*norbs*norbs];
+    }
+#else
     inline __device__ __host__ ElemT Value(int i, int j, int k, int l) const
     {
         if (!((i % 2 == j % 2) && (k % 2 == l % 2)))
@@ -97,13 +110,15 @@ public:
         int b = std::min(ij, kl);
         return store[a * (a + 1) / 2 + b];
     }
+#endif
+
     inline __device__ __host__ ElemT DirectValue(int i, int j) const
     {
-        return DirectMat[i + norbs * j];
+        return DirectMat[i + 2 * norbs * j];
     }
     inline __device__ __host__ ElemT ExchangeValue(int i, int j) const
     {
-        return ExchangeMat[i + norbs * j];
+        return ExchangeMat[i + 2 * norbs * j];
     }
 };
 
