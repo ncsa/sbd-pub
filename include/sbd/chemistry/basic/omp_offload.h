@@ -69,7 +69,6 @@ namespace sbd {
   }
 
 // Device-side parity computation (5-parameter version)
-template <typename ElemT>
 inline void parity_device(const size_t *dets, size_t bit_length, int start,
                           int end, double &sgn) {
   if (start > end)
@@ -222,7 +221,7 @@ template <typename ElemT>
 inline ElemT OneExcite_device(const size_t *det, size_t bit_length, int i,
                               int a, const ElemT *I1, const ElemT *I2, int norbs_spin) {
   double sgn = 1.0;
-  parity_device<ElemT>(det, bit_length, (i < a) ? i : a, (i > a) ? i : a, sgn);
+  parity_device(det, bit_length, (i < a) ? i : a, (i > a) ? i : a, sgn);
   int idx_ai = a * norbs_spin + i;
   ElemT energy = I1[idx_ai];
   int dsize = (norbs_spin + bit_length - 1) / bit_length;
@@ -255,8 +254,8 @@ inline ElemT TwoExcite_device(const size_t *det, size_t bit_length, int i,
   int A = (a < b) ? a : b;
   int B = (a > b) ? a : b;
 
-  parity_device<ElemT>(det, bit_length, (I < A) ? I : A, (I > A) ? I : A, sgn);
-  parity_device<ElemT>(det, bit_length, (J < B) ? J : B, (J > B) ? J : B, sgn);
+  parity_device(det, bit_length, (I < A) ? I : A, (I > A) ? I : A, sgn);
+  parity_device(det, bit_length, (J < B) ? J : B, (J > B) ? J : B, sgn);
 
   if (A > J || B < I)
     sgn *= -1.0;

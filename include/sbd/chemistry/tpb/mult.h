@@ -304,7 +304,7 @@ namespace sbd {
 
 	    size_t ia_local = ia - braAlphaStart;
 
-            size_t DetI[16];
+            size_t DetI[SBD_MAX_DETSIZE];
             DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
@@ -349,7 +349,7 @@ namespace sbd {
 
             size_t ib_local = ib - braBetaStart;
 
-            size_t DetI[16];
+            size_t DetI[SBD_MAX_DETSIZE];
             DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
@@ -390,7 +390,7 @@ namespace sbd {
 	for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	  for(size_t ib = ibBeg; ib < ibEnd; ib++) {
 
-            size_t DetI[16];
+            size_t DetI[SBD_MAX_DETSIZE];
             DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
                              &Bdets[(ib - ibBeg)*detSize],
                              bit_length, norbs, DetI);
