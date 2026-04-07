@@ -79,6 +79,8 @@ void GetTotalD_Thrust(const thrust::device_vector<ElemT> & hii,
     @param[in] max_time: Maximum time allowed to perform the calculation
     */
 
+#ifndef SBD_USE_CUBLAS
+
 template <typename ElemT, typename RealT>
 void Davidson(const thrust::device_vector<ElemT> &hii,
                 std::vector<ElemT> &W,
@@ -144,13 +146,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     std::vector<double> onestep_times(num_block * max_iteration, 0.0);
     auto start_time = std::chrono::high_resolution_clock::now();
 
-#ifdef SBD_USE_CUBLAS
-    // Workspace for BatchedInnerProduct_GEMV, GramSchmidtOrthogonalize_GEMV,
-    // and nccl_allreduce2.
-    size_t ws_size = std::max(nb * W.size() + nb, 2 * W.size());
-    thrust::device_vector<ElemT> workspace(ws_size);
-#endif
-
     cudaStream_t stream = 0;
     auto policy_nosync = thrust::cuda::par_nosync.on(stream);
     auto policy_sync = thrust::cuda::par.on(stream);
@@ -181,23 +176,10 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 mult.run(hii, C[ib], HC[ib]);
             }
 
-#ifdef SBD_USE_CUBLAS
-            // Use GEMV to compute multiple inner products in a batched manner,
-            // reducing GPU kernel launches and improving memory access
-            // efficiency compared to individual dot product evaluations.
-            std::vector<ElemT> res(ib+1);
-            BatchedInnerProduct_GEMV(C, ib+1, HC[ib], res, mult.b_comm(),
-                                     thrust::raw_pointer_cast(workspace.data()));
-            for (int jb = 0; jb <= ib; jb++) {
-                H[jb + nb * ib] = res[jb];
-                H[ib + nb * jb] = Conjugate(res[jb]);
-            }
-#else
             for (int jb = 0; jb <= ib; jb++) {
                 InnerProduct(C[jb], HC[ib], H[jb + nb * ib], mult.b_comm());
                 H[ib + nb * jb] = Conjugate(H[jb + nb * ib]);
             }
-#endif
             for (int jb = 0; jb <= ib; jb++) {
                 for (int kb = 0; kb <= ib; kb++) {
                     U[jb + nb * kb] = H[jb + nb * kb];
@@ -210,29 +192,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             hp_numeric::MatHeev(jobz, uplo, ib + 1, U, nb, E);
 #endif
 
-#ifdef SBD_USE_CUBLAS
-            std::vector<ElemT> alpha_W(ib+1);
-            std::vector<ElemT> alpha_R(ib+1);
-            for (int kb = 0; kb <= ib; kb++) {
-                alpha_W[kb] = U[kb];
-                alpha_R[kb] = -U[kb];
-            }
-            // W_dev = C * alpha_W
-            BatchedAXPY_GEMV(C, ib + 1, alpha_W, W_dev, ElemT(0),
-                             thrust::raw_pointer_cast(workspace.data()), stream);
-            // R = HC * alpha_R
-            BatchedAXPY_GEMV(HC, ib + 1, alpha_R, R, ElemT(0),
-                             thrust::raw_pointer_cast(workspace.data()), stream);
-            {
-                SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                // R += E[0] * W
-                thrust::transform(policy_nosync,
-                                  W_dev.begin(), W_dev.end(), R.begin(), R.begin(),
-                                  AXPY_kernel<ElemT>(E[0]));
-            }
-            cudaStreamSynchronize(stream);
-
-#else // #ifdef SBD_USE_CUBLAS
             {
                 SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
                 // ElemT x = U[0];
@@ -270,24 +229,14 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             cudaStreamSynchronize(stream);
 #endif
 
-#endif // #ifdef SBD_USE_CUBLAS
-
             /**
                  Patch for stability on Fugaku
                 */
             // #ifdef SBD_FUAGKUPATCH
 #ifdef SBD_USE_NCCL
             if (mpi_size_a > 1) {
-#if 1
-                // Fuse two AllReduce operations by packing W_dev and R into
-                // a single buffer, reducing NCCL collective launch overhead
-                // (2 calls -> 1 call).
-                nccl_allreduce2(W_dev, R, ncclSum, mult.a_nccl_comm(),
-                                thrust::raw_pointer_cast(workspace.data()));
-#else
                 nccl_allreduce(W_dev, ncclSum, mult.a_nccl_comm());
                 nccl_allreduce(R, ncclSum, mult.a_nccl_comm());
-#endif
             }
 #else
             if (mpi_size_t > 1) {
@@ -321,14 +270,8 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 
             RealT norm_W;
             RealT norm_R;
-#ifdef SBD_USE_CUBLAS
-            // Normalize W_dev and R together to reduce MPI_Allreduce overhead
-            // by combining two reductions into a single collective call.
-            Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm());
-#else
             Normalize(W_dev, norm_W, mult.b_comm());
             Normalize(R, norm_R, mult.b_comm());
-#endif
             // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 #ifdef SBD_DEBUG_DAVIDSON
@@ -369,27 +312,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 }
 
                 // Gram-Schmidt orthogonalization
-#ifdef SBD_USE_CUBLAS
-#if 1
-                // GramSchmidtOrthogonalize_GEMV is functionally equivalent to
-                // BatchedInnerProduct_GEMV followed by BatchedAXPY_GEMV, but
-                // avoids redundant packing of C by reusing a single packed
-                // representation in the workspace, reducing memory traffic and
-                // kernel launch overhead.
-                GramSchmidtOrthogonalize_GEMV(
-                    C, ib + 1, C[ib + 1], mult.b_comm(),
-                    thrust::raw_pointer_cast(workspace.data()));
-#else
-                std::vector<ElemT> res(ib+1);
-                BatchedInnerProduct_GEMV(C, ib+1, C[ib+1], res, mult.b_comm(),
-                                         thrust::raw_pointer_cast(workspace.data()));
-                for (int kb = 0; kb < ib + 1; kb++) {
-                    res[kb] *= ElemT(-1.0);
-                }
-                BatchedAXPY_GEMV(C, ib+1, res, C[ib+1], static_cast<ElemT>(1.0),
-                                 thrust::raw_pointer_cast(workspace.data()));
-#endif
-#else // #ifdef SBD_USE_CUBLAS
                 for (int kb = 0; kb < ib + 1; kb++) {
                     ElemT olap;
                     InnerProduct(C[kb], C[ib+1], olap, mult.b_comm());
@@ -402,7 +324,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #ifdef SBD_USE_THRUST_NOSYNC
                 cudaStreamSynchronize(stream);
 #endif
-#endif // #ifdef SBD_USE_CUBLAS
 
                 RealT norm_C;
                 Normalize(C[ib + 1], norm_C, mult.b_comm());
@@ -449,6 +370,323 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     free(U);
     free(E);
 }
+
+#else  // #ifndef SBD_USE_CUBLAS
+
+template <typename ElemT, typename RealT>
+void Davidson(const thrust::device_vector<ElemT> &hii,
+                std::vector<ElemT> &W,
+                MultBase<ElemT>& mult,
+                int max_iteration,
+                int num_block,
+                RealT eps,
+                RealT max_time)
+{
+    SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
+    RealT eps_reg = 1.0e-12;
+    ElemT *C, *HC;
+    CHECK_CUDA(cudaMalloc(&C, sizeof(ElemT)*num_block*W.size()));
+    CHECK_CUDA(cudaMalloc(&HC, sizeof(ElemT)*num_block*W.size()));
+    thrust::device_vector<ElemT> C_tmp(W.size());
+    thrust::device_vector<ElemT> HC_tmp(W.size());
+    thrust::device_vector<ElemT> R(W.size());
+    thrust::device_vector<ElemT> dii;
+    int mpi_rank_h;
+    MPI_Comm_rank(mult.h_comm(), &mpi_rank_h);
+    int mpi_size_h;
+    MPI_Comm_size(mult.h_comm(), &mpi_size_h);
+    int mpi_rank_b;
+    MPI_Comm_rank(mult.b_comm(), &mpi_rank_b);
+    int mpi_size_b;
+    MPI_Comm_size(mult.b_comm(), &mpi_size_b);
+    int mpi_rank_t;
+    MPI_Comm_rank(mult.t_comm(), &mpi_rank_t);
+    int mpi_size_t;
+    MPI_Comm_size(mult.t_comm(), &mpi_size_t);
+    int mpi_rank_a;
+    MPI_Comm_rank(mult.a_comm(), &mpi_rank_a);
+    int mpi_size_a;
+    MPI_Comm_size(mult.a_comm(), &mpi_size_a);
+
+    ElemT *H = (ElemT *)calloc(num_block * num_block, sizeof(ElemT));
+    ElemT *U = (ElemT *)calloc(num_block * num_block, sizeof(ElemT));
+    RealT *E = (RealT *)malloc(num_block * sizeof(RealT));
+    char jobz = 'V';
+    char uplo = 'U';
+    int nb = num_block;
+    MPI_Datatype DataE = GetMpiType<RealT>::MpiT;
+    MPI_Datatype DataH = GetMpiType<ElemT>::MpiT;
+
+    GetTotalD_Thrust(hii, dii, mult.h_comm());
+
+#ifdef SBD_DEBUG_DAVIDSON
+    std::cout << " diagonal term at mpi process (h,b,t) = ("
+                << mpi_rank_h << "," << mpi_rank_b << ","
+                << mpi_rank_t << "): ";
+    for (size_t id = 0; id < std::min(W.size(), static_cast<size_t>(6)); id++)
+    {
+        std::cout << " " << dii[id];
+    }
+    std::cout << std::endl;
+#endif
+
+    bool do_continue = true;
+
+    std::vector<double> onestep_times(num_block * max_iteration, 0.0);
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Workspace for BatchedInnerProduct_GEMV, BatchedAXPY_GEMV,
+    // and nccl_allreduce2.
+    size_t ws_size = std::max((size_t)nb, 2 * W.size());
+    thrust::device_vector<ElemT> workspace(ws_size);
+
+    cudaStream_t stream = 0;
+    auto policy_nosync = thrust::cuda::par_nosync.on(stream);
+    auto policy_sync = thrust::cuda::par.on(stream);
+    // auto policy_sync = thrust::device;
+#ifdef SBD_USE_THRUST_NOSYNC
+    auto policy = policy_nosync;
+#else
+    auto policy = policy_sync;
+#endif
+
+    // copyin W
+    thrust::device_vector<ElemT> W_dev(W.size());
+    thrust::copy_n(W.begin(), W.size(), W_dev.begin());
+
+    for (int it = 0; it < max_iteration; it++) {
+        SBD_NVTX_RANGE_COLOR("for (int it ...", __LINE__ + it);
+
+        C_tmp = W_dev;
+
+        for (int ib = 0; ib < nb; ib++) {
+            SBD_NVTX_RANGE_COLOR("for (int ib ...", __LINE__ + ib);
+            auto step_start = std::chrono::high_resolution_clock::now();
+
+            // Copy C_tmp back to C[ib]
+            CHECK_CUDA(cudaMemcpyAsync(C + (W.size() * ib),
+                                       thrust::raw_pointer_cast(C_tmp.data()),
+                                       sizeof(ElemT) * W.size(),
+                                       cudaMemcpyDeviceToDevice, stream));
+
+            // Zero(HC[ib]);
+            thrust::fill(policy_nosync, HC_tmp.begin(), HC_tmp.end(), 0);
+            CHECK_CUDA(cudaStreamSynchronize(stream));
+
+            {
+                SBD_NVTX_RANGE_COLOR("mult.run", __LINE__);
+                mult.run(hii, C_tmp, HC_tmp);
+            }
+
+            // Use GEMV to compute multiple inner products in a batched manner,
+            // reducing GPU kernel launches and improving memory access
+            // efficiency compared to individual dot product evaluations.
+            std::vector<ElemT> res(ib+1);
+            BatchedInnerProduct_GEMV(C, ib+1, HC_tmp, res, mult.b_comm(),
+                                     thrust::raw_pointer_cast(workspace.data()), stream);
+
+            // Copy HC_tmp back to HC[ib]
+            CHECK_CUDA(cudaMemcpyAsync(HC + (W.size() * ib),
+                                       thrust::raw_pointer_cast(HC_tmp.data()),
+                                       sizeof(ElemT) * W.size(),
+                                       cudaMemcpyDeviceToDevice, stream));
+
+            for (int jb = 0; jb <= ib; jb++) {
+                H[jb + nb * ib] = res[jb];
+                H[ib + nb * jb] = Conjugate(res[jb]);
+            }
+            for (int jb = 0; jb <= ib; jb++) {
+                for (int kb = 0; kb <= ib; kb++) {
+                    U[jb + nb * kb] = H[jb + nb * kb];
+                }
+            }
+
+#ifdef SBD_NO_LAPACK
+            hp_numeric::JacobiHeev(ib + 1, U, nb, E);
+#else
+            hp_numeric::MatHeev(jobz, uplo, ib + 1, U, nb, E);
+#endif
+
+            std::vector<ElemT> alpha_W(ib+1);
+            std::vector<ElemT> alpha_R(ib+1);
+            for (int kb = 0; kb <= ib; kb++) {
+                alpha_W[kb] = U[kb];
+                alpha_R[kb] = -U[kb];
+            }
+            // W_dev = C * alpha_W
+            BatchedAXPY_GEMV(C, ib + 1, alpha_W, W_dev, ElemT(0),
+                             thrust::raw_pointer_cast(workspace.data()), stream);
+            // R = HC * alpha_R
+            BatchedAXPY_GEMV(HC, ib + 1, alpha_R, R, ElemT(0),
+                             thrust::raw_pointer_cast(workspace.data()), stream);
+            {
+                SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+                // R += E[0] * W
+                thrust::transform(policy_nosync,
+                                  W_dev.begin(), W_dev.end(), R.begin(), R.begin(),
+                                  AXPY_kernel<ElemT>(E[0]));
+            }
+
+#ifdef SBD_USE_NCCL
+            if (mpi_size_a > 1) {
+#if 1
+                // Fuse two AllReduce operations by packing W_dev and R into
+                // a single buffer, reducing NCCL collective launch overhead
+                // (2 calls -> 1 call).
+                nccl_allreduce2(W_dev, R, ncclSum, mult.a_nccl_comm(),
+                                thrust::raw_pointer_cast(workspace.data()), stream);
+#else
+                nccl_allreduce(W_dev, ncclSum, mult.a_nccl_comm(), stream);
+                nccl_allreduce(R, ncclSum, mult.a_nccl_comm(), stream);
+#endif
+            }
+#else // #ifdef SBD_USE_NCCL
+            CHECK_CUDA(cudaStreamSynchronize(stream));
+            if (mpi_size_t > 1) {
+                MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
+                MpiAllreduce(R, MPI_SUM, mult.t_comm());
+            }
+            if (mpi_size_h > 1) {
+                MpiAllreduce(W_dev, MPI_SUM, mult.h_comm());
+                MpiAllreduce(R, MPI_SUM, mult.h_comm());
+            }
+#endif // #ifdef SBD_USE_NCCL
+
+            if (mpi_size_h * mpi_size_t > 1) {
+                ElemT volp(1.0 / (mpi_size_h * mpi_size_t));
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+                    // W[is] *= volp;
+                    // thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), thrust::constant_iterator<ElemT>(volp), W_dev.begin(), thrust::multiplies<ElemT>());
+                    thrust::transform(policy_nosync, W_dev.begin(), W_dev.end(), W_dev.begin(), AX_kernel<ElemT>(volp));
+                }
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
+                    // R[is] *= volp;
+                    // thrust::transform(thrust::device, R.begin(), R.end(), thrust::constant_iterator<ElemT>(volp), R.begin(), thrust::multiplies<ElemT>());
+                    thrust::transform(policy_nosync, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
+                }
+            }
+
+            RealT norm_W;
+            RealT norm_R;
+            // Normalize W_dev and R together to reduce MPI_Allreduce overhead
+            // by combining two reductions into a single collective call.
+            Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm(), stream);
+
+            // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
+
+#ifdef SBD_DEBUG_DAVIDSON
+            std::cout << " Davidson iteration " << it << "." << ib
+                        << " at mpi (h,b,t) = ("
+                        << mpi_rank_h << "," << mpi_rank_b << ","
+                        << mpi_rank_t << "): (tol=" << norm_R << "):";
+            for (int p = 0; p < std::min(ib + 1, 4); p++)
+            {
+                std::cout << " " << E[p];
+            }
+            std::cout << std::endl;
+#else
+            if (mpi_rank_h == 0) {
+                if (mpi_rank_t == 0) {
+                    if (mpi_rank_b == 0) {
+                        std::cout << " Davidson iteration " << it << "." << ib
+                                    << " (tol=" << norm_R << "):";
+                        for (int p = 0; p < std::min(ib + 1, 4); p++) {
+                            std::cout << " " << E[p];
+                        }
+                        std::cout << std::endl;
+                    }
+                }
+            }
+#endif
+            if (norm_R < eps) {
+                do_continue = false;
+                break;
+            }
+
+            if (ib < nb - 1) {
+                // Determine
+                // Initialize C[ib+1]
+                {
+                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
+                    auto ci = thrust::counting_iterator<size_t>(0);
+                    thrust::for_each_n(policy_nosync, ci, W.size(),
+                                       Determine_kernel(C_tmp, R, dii, eps_reg, E[0]));
+                }
+
+                // Gram-Schmidt orthogonalization
+#if 1
+#ifdef SBD_USE_NCCL
+                GramSchmidtOrthogonalize_GEMV(
+                    C, ib + 1, C_tmp, mult.b_nccl_comm(), mpi_size_b,
+                    thrust::raw_pointer_cast(workspace.data()), stream);
+#else
+                GramSchmidtOrthogonalize_GEMV(
+                    C, ib + 1, C_tmp, mult.b_comm(), mpi_size_b, 
+                    thrust::raw_pointer_cast(workspace.data()), stream);
+#endif
+#else
+                std::vector<ElemT> res(ib+1);
+                BatchedInnerProduct_GEMV(C, ib+1, C_tmp, res, mult.b_comm(),
+                                         thrust::raw_pointer_cast(workspace.data()), stream);
+                for (int kb = 0; kb < ib + 1; kb++) {
+                    res[kb] *= ElemT(-1.0);
+                }
+                BatchedAXPY_GEMV(C, ib+1, res, C_tmp, static_cast<ElemT>(1.0),
+                                 thrust::raw_pointer_cast(workspace.data()), stream);
+#endif
+                RealT norm_C;
+                Normalize(C_tmp, norm_C, mult.b_comm(), stream);
+            }
+
+            auto step_end = std::chrono::high_resolution_clock::now();
+            onestep_times[it * nb + ib] = std::chrono::duration<double>(step_end - step_start).count();
+            double ave_time_per_step = 0.0;
+            for (int ks = 0; ks <= it * nb + ib; ks++) {
+                ave_time_per_step += onestep_times[ks];
+            }
+            ave_time_per_step /= (it * nb + ib + 1);
+
+            auto current_time = std::chrono::high_resolution_clock::now();
+            double total_elapsed = std::chrono::duration<double>(current_time - start_time).count();
+            double predicted_next_end = total_elapsed + ave_time_per_step;
+            if (mpi_rank_h == 0) {
+                if (mpi_rank_t == 0) {
+                    MPI_Bcast(&predicted_next_end, 1, MPI_DOUBLE, 0, mult.b_comm());
+                }
+                MPI_Bcast(&predicted_next_end, 1, MPI_DOUBLE, 0, mult.t_comm());
+            }
+            MPI_Bcast(&predicted_next_end, 1, MPI_DOUBLE, 0, mult.h_comm());
+
+            if (predicted_next_end > max_time) {
+                do_continue = false;
+                break;
+            }
+
+        } // end for(int ib=0; ib < nb; ib++)
+        CHECK_CUDA(cudaStreamSynchronize(stream));
+
+        if (!do_continue) {
+            break;
+        }
+
+        // Restart with C[0] = W;
+        // C[0] = W_dev;
+    } // end for(int it=0; it < max_iteration; it++)
+
+    // copyout W
+    thrust::copy_n(W_dev.begin(), W.size(), W.begin());
+
+    free(H);
+    free(U);
+    free(E);
+
+    CHECK_CUDA(cudaFree(C));
+    CHECK_CUDA(cudaFree(HC));
+}
+
+#endif // #ifndef SBD_USE_CUBLAS
 
 }
 

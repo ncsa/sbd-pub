@@ -235,9 +235,9 @@ namespace sbd {
 
 #ifdef SBD_USE_NCCL
       // Initialize NCCL communicators.
-      // Only a_nccl_comm is initialized, as all collective operations are
-      // performed on a_comm. Other NCCL communicators (h_comm, b_comm, t_comm)
-      // are omitted to reduce initialization overhead and resource usage.
+      // Only b_nccl_comm and a_nccl_comm are initialized, as all collective
+      // operations are performed on a_comm. Other NCCL communicators are
+      // omitted to reduce initialization overhead and resource usage.
       ncclComm_t h_nccl_comm;
       ncclComm_t b_nccl_comm;
       ncclComm_t t_nccl_comm;
@@ -247,7 +247,7 @@ namespace sbd {
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, h_nccl_comm);
       }
-      if (false && mpi_size_b > 1) {
+      if (mpi_size_b > 1) {
           init_nccl_comm(&b_nccl_comm, b_comm);
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, b_nccl_comm);

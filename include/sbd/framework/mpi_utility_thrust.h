@@ -456,13 +456,20 @@ void init_nccl_comm(ncclComm_t *nccl_comm, MPI_Comm mpi_comm)
 }
 
 template <typename ElemT>
+void nccl_allreduce(ElemT* buff, size_t count, ncclRedOp_t nccl_op, ncclComm_t nccl_comm, cudaStream_t stream = 0)
+{
+    SBD_NVTX_RANGE_COLOR("ncclAllReduce", 0);
+    CHECK_NCCL(ncclAllReduce(buff, buff, count, NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
+    // CHECK_CUDA(cudaStreamSynchronize(stream));
+}
+
+template <typename ElemT>
 void nccl_allreduce(thrust::device_vector<ElemT> &A, ncclRedOp_t nccl_op, ncclComm_t nccl_comm, cudaStream_t stream = 0)
 {
     SBD_NVTX_RANGE_COLOR("nccl_allreduce", __LINE__);
     ElemT *buff = thrust::raw_pointer_cast(A.data());
     size_t count = A.size();
-    CHECK_NCCL(ncclAllReduce(buff, buff, count, NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    nccl_allreduce(buff, count, nccl_op, nccl_comm, stream);
 }
 
 template <typename ElemT>
@@ -500,10 +507,8 @@ void nccl_allreduce2(thrust::device_vector<ElemT>& A,
                                    cudaMemcpyDeviceToDevice, stream));
     }
 
-    // single allreduce on packed buffer (in-place)
-    CHECK_NCCL(
-        ncclAllReduce((const void*)packed_ptr, (void*)packed_ptr, nTotal,
-                      NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
+    // single allreduce on packed buffer
+    nccl_allreduce(packed_ptr, nTotal, nccl_op, nccl_comm, stream);
 
     // unpack
     if (nA > 0) {
@@ -514,7 +519,7 @@ void nccl_allreduce2(thrust::device_vector<ElemT>& A,
         CHECK_CUDA(cudaMemcpyAsync(B_ptr, packed_ptr + nA, sizeof(ElemT) * nB,
                                    cudaMemcpyDeviceToDevice, stream));
     }
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    // CHECK_CUDA(cudaStreamSynchronize(stream));
 }
 #endif // #ifdef SBD_USE_NCCL
 
