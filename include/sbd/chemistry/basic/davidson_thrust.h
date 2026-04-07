@@ -270,8 +270,8 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 
             RealT norm_W;
             RealT norm_R;
-            Normalize(W_dev, norm_W, mult.b_comm());
-            Normalize(R, norm_R, mult.b_comm());
+            Normalize(W_dev, norm_W, mult.b_comm(), mpi_size_b);
+            Normalize(R, norm_R, mult.b_comm(), mpi_size_b);
             // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 #ifdef SBD_DEBUG_DAVIDSON
@@ -326,7 +326,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #endif
 
                 RealT norm_C;
-                Normalize(C[ib + 1], norm_C, mult.b_comm());
+                Normalize(C[ib + 1], norm_C, mult.b_comm(), mpi_size_b);
             }
 
             auto step_end = std::chrono::high_resolution_clock::now();
@@ -435,7 +435,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     std::vector<double> onestep_times(num_block * max_iteration, 0.0);
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Workspace for BatchedInnerProduct_GEMV, BatchedAXPY_GEMV,
+    // Workspace for BatchedInnerProduct_GEMV, BatchedAXPY_GEMV, Normalize2,
     // and nccl_allreduce2.
     size_t ws_size = std::max((size_t)nb, 2 * W.size());
     thrust::device_vector<ElemT> workspace(ws_size);
@@ -552,6 +552,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             }
 #endif // #ifdef SBD_USE_NCCL
 
+#if 0
             if (mpi_size_h * mpi_size_t > 1) {
                 ElemT volp(1.0 / (mpi_size_h * mpi_size_t));
                 {
@@ -567,13 +568,20 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                     thrust::transform(policy_nosync, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
                 }
             }
-
+#endif
             RealT norm_W;
             RealT norm_R;
             // Normalize W_dev and R together to reduce MPI_Allreduce overhead
             // by combining two reductions into a single collective call.
-            Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm(), stream);
-
+            Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm(), mpi_size_b,
+                       thrust::raw_pointer_cast(workspace.data()), stream);
+#if 1
+            if (mpi_size_h * mpi_size_t > 1) {
+                RealT volp(1.0 / (mpi_size_h * mpi_size_t));
+                norm_W *= volp;
+                norm_R *= volp;
+            }
+#endif
             // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 #ifdef SBD_DEBUG_DAVIDSON
@@ -637,7 +645,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                                  thrust::raw_pointer_cast(workspace.data()), stream);
 #endif
                 RealT norm_C;
-                Normalize(C_tmp, norm_C, mult.b_comm(), stream);
+                Normalize(C_tmp, norm_C, mult.b_comm(), mpi_size_b, stream);
             }
 
             auto step_end = std::chrono::high_resolution_clock::now();

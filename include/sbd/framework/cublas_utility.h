@@ -241,9 +241,7 @@ inline ElemT Dot(const thrust::device_vector<ElemT>& x,
     auto& ctx = GetCublasContext();
     ctx.set_stream(stream);
     ctx.set_pointer_mode_host();
-
     ElemT result{};
-
     CheckCublas(
         CublasDot<ElemT>::call(
             ctx.get(),
@@ -254,6 +252,35 @@ inline ElemT Dot(const thrust::device_vector<ElemT>& x,
         "cuBLAS dot failed");
 
     return result;
+}
+
+template <typename ElemT>
+inline void Dot(const thrust::device_vector<ElemT>& x,
+                const thrust::device_vector<ElemT>& y,
+                ElemT* result_dev_ptr,
+                cudaStream_t stream = 0)
+{
+    if (x.size() != y.size()) {
+        throw std::runtime_error("sbd::Dot: size mismatch");
+    }
+    if (x.empty()) {
+        return;
+    }
+    if (x.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("sbd::Dot: vector size exceeds INT_MAX");
+    }
+
+    auto& ctx = GetCublasContext();
+    ctx.set_stream(stream);
+    ctx.set_pointer_mode_device();
+    CheckCublas(
+        CublasDot<ElemT>::call(
+            ctx.get(),
+            static_cast<int>(x.size()),
+            raw_ptr(x), 1,
+            raw_ptr(y), 1,
+            result_dev_ptr),
+        "cuBLAS dot failed");
 }
 
 } // namespace sbd

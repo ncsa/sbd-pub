@@ -63,11 +63,15 @@ template <typename ElemT, typename RealT>
 void Normalize(thrust::device_vector<ElemT>& X,
                RealT& res,
                MPI_Comm comm,
+               int comm_size = -1,
                cudaStream_t stream = 0)
 {
     SBD_NVTX_RANGE_COLOR("Normalize", __LINE__);
     res = 0.0;
     if (X.empty()) return;
+    if (comm_size < 0) {
+        MPI_Comm_size(comm, &comm_size);
+    }
 
     /*
     // If CUDA native kernel can not be used, use host code
@@ -79,11 +83,11 @@ void Normalize(thrust::device_vector<ElemT>& X,
 
 #ifndef SBD_USE_CUBLAS
     auto kernel = dot_product_kernel<RealT>(X, X);
-    RealT sum = precise_reduce_sum_with_function(kernel, X.size());
-    {
+    res = precise_reduce_sum_with_function(kernel, X.size());
+    if (comm_size > 1) {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
         MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
-        MPI_Allreduce(&sum, &res, 1, DataT, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, &res, 1, DataT, MPI_SUM, comm);
     }
     res = std::sqrt(res);
     if (res == RealT(0)) {
@@ -98,11 +102,11 @@ void Normalize(thrust::device_vector<ElemT>& X,
 #else
     static_assert(std::is_same<ElemT, RealT>::value,
                   "Normalize with cuBLAS currently requires ElemT == RealT");
-    RealT local_sum = sbd::Dot(X, X);
-    {
+    res = sbd::Dot(X, X);
+    if (comm_size > 1) {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
         MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
-        MPI_Allreduce(&local_sum, &res, 1, DataT, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, &res, 1, DataT, MPI_SUM, comm);
     }
     res = std::sqrt(res);
     if (res == RealT(0)) {
@@ -134,29 +138,43 @@ void Normalize2(thrust::device_vector<ElemT>& X0,
                 RealT& norm0,
                 RealT& norm1,
                 MPI_Comm comm,
+                int comm_size = -1,
+                ElemT* ws_ptr = nullptr,
                 cudaStream_t stream = 0)
 {
     SBD_NVTX_RANGE_COLOR("Normalize2", __LINE__);
     static_assert(std::is_same<ElemT, RealT>::value,
                   "Normalize2 currently requires ElemT == RealT");
+    if (comm_size < 0) {
+        MPI_Comm_size(comm, &comm_size);
+    }
 
-    norm0 = RealT(0);
-    norm1 = RealT(0);
-    RealT local[2]  = {RealT(0), RealT(0)};
-    RealT global[2] = {RealT(0), RealT(0)};
-    if (!X0.empty()) {
-        local[0] = sbd::Dot(X0, X0);
+    RealT norms[2]  = {RealT(0), RealT(0)};
+    if (ws_ptr == nullptr) {
+        if (!X0.empty()) {
+            norms[0] = sbd::Dot(X0, X0, stream);
+        }
+        if (!X1.empty()) {
+            norms[1] = sbd::Dot(X1, X1, stream);
+        }
+    } else {
+        if (!X0.empty()) {
+            sbd::Dot(X0, X0, ws_ptr, stream);
+        }
+        if (!X1.empty()) {
+            sbd::Dot(X1, X1, ws_ptr+1, stream);
+        }
+        CHECK_CUDA(cudaMemcpyAsync(norms, ws_ptr, sizeof(ElemT) * 2,
+                                   cudaMemcpyDeviceToHost, stream));
+        CHECK_CUDA(cudaStreamSynchronize(stream));
     }
-    if (!X1.empty()) {
-        local[1] = sbd::Dot(X1, X1);
-    }
-    {
+    if (comm_size > 1) {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
         MPI_Datatype DataT = GetMpiType<RealT>::MpiT;
-        MPI_Allreduce(local, global, 2, DataT, MPI_SUM, comm);
+        MPI_Allreduce(MPI_IN_PLACE, norms, 2, DataT, MPI_SUM, comm);
     }
-    norm0 = std::sqrt(global[0]);
-    norm1 = std::sqrt(global[1]);
+    norm0 = std::sqrt(norms[0]);
+    norm1 = std::sqrt(norms[1]);
     auto& ctx = sbd::GetCublasContext();
     ctx.set_pointer_mode_host();
     ctx.set_stream(stream);
