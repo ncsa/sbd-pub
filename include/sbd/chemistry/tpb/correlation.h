@@ -84,14 +84,6 @@ namespace sbd {
 		 -helper[0].adetShift,-helper[0].bdetShift,b_comm);
     }
 
-    size_t array_size = (2*norb + bit_length - 1 ) / bit_length;
-
-    size_t num_threads = 1;
-    num_threads = omp_get_max_threads();
-    
-    std::vector<std::vector<std::vector<ElemT>>> onebody_t(num_threads,onebody);
-    std::vector<std::vector<std::vector<ElemT>>> twobody_t(num_threads,twobody);
-
     size_t braAlphaStart = helper[0].braAlphaStart;
     size_t braBetaStart  = helper[0].braBetaStart;
     size_t braAlphaEnd   = helper[0].braAlphaEnd;
@@ -126,7 +118,7 @@ namespace sbd {
           size_t DetT[SBD_MAX_DETSIZE];
           size_t i = (ia - braAlphaStart) * braBetaSize +  ib - braBetaStart;
           if( ( i % mpi_size_h ) == mpi_rank_h ) {
-            DetFromAlphaBeta(&Adet[ia - braAlphaStart], &Bdet[ib - braBetaStart], bit_length, norb, DetT);
+            DetFromAlphaBeta(&Adet[(ia - braAlphaStart)*detSize], &Bdet[(ib - braBetaStart)*detSize], bit_length, norb, DetT);
             ZeroDiffCorrelation(DetT, W_ptr[i], bit_length, norb, oneBody, twoBody);
           }
         }
@@ -146,8 +138,6 @@ namespace sbd {
       size_t braAlphaEnd   = helper[task].braAlphaEnd;
       size_t braBetaStart  = helper[task].braBetaStart;
       size_t braBetaEnd    = helper[task].braBetaEnd;
-
-      int taskType = helper[task].taskType;
 
       size_t AdetSize = (braAlphaEnd - braAlphaStart)*detSize;
       size_t BdetSize = (braBetaEnd - braBetaStart)*detSize;
@@ -226,7 +216,7 @@ namespace sbd {
                 size_t braIdx = (ia - braAlphaStart)*braBetaSize + ib - braBetaStart;
                 if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
 
-                DetFromAlphaBeta(&Adet[ia - braAlphaStart], &Bdet[ib - braBetaStart], bit_length, norb, DetI);
+                DetFromAlphaBeta(&Adet[(ia - braAlphaStart)*detSize], &Bdet[(ib - braBetaStart)*detSize], bit_length, norb, DetI);
                 size_t ia_local = ia - braAlphaStart;
 		
 		// single alpha excitation
@@ -270,7 +260,7 @@ namespace sbd {
                 size_t braIdx = (ia - braAlphaStart)*braBetaSize + ib - braBetaStart;
                 if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
 
-                DetFromAlphaBeta(&Adet[ia - braAlphaStart], &Bdet[ib - braBetaStart], bit_length, norb, DetI);
+                DetFromAlphaBeta(&Adet[(ia - braAlphaStart)*detSize], &Bdet[(ib - braBetaStart)*detSize], bit_length, norb, DetI);
                 size_t ib_local = ib - braBetaStart;
 		
 		// single beta excitation
@@ -314,7 +304,7 @@ namespace sbd {
                 size_t braIdx = (ia - braAlphaStart)*braBetaSize + ib - braBetaStart;
                 if( (braIdx % mpi_size_h) != mpi_rank_h ) continue;
 
-                DetFromAlphaBeta(&Adet[ia - braAlphaStart], &Bdet[ib - braBetaStart], bit_length, norb, DetI);
+                DetFromAlphaBeta(&Adet[(ia - braAlphaStart)*detSize], &Bdet[(ib - braBetaStart)*detSize], bit_length, norb, DetI);
                 size_t ia_local = ia - braAlphaStart;
                 size_t ib_local = ib - braBetaStart;
 		
@@ -336,7 +326,7 @@ namespace sbd {
 	    } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	  } // if ( helper[task].taskType == 0)
 
-#pragma omp target exit data map(delete:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize])
+#pragma omp target exit data map(delete:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize], W_ptr[0:Wsize])
         // free data structures for alpha and beta bit-strings
         free(Adet);
         free(Bdet);

@@ -44,6 +44,7 @@ namespace sbd {
     }
   }
 
+#ifdef USE_OMP_OFFLOAD
 #pragma omp declare target
   template <typename ElemT>
   void ZeroDiffCorrelation(size_t * DetI,
@@ -88,6 +89,7 @@ namespace sbd {
     }
   }
 #pragma omp end declare target
+#endif
 
   /**
      Function for adding one-occupation different contribution
@@ -131,6 +133,7 @@ namespace sbd {
     }
   }
 
+#ifdef USE_OMP_OFFLOAD
 #pragma omp declare target
   template <typename ElemT>
   void OneDiffCorrelation(const size_t * DetI,
@@ -179,6 +182,7 @@ namespace sbd {
     }
   }
 #pragma omp end declare target
+#endif
 
   /**
      Function for adding two-occupation different contribution
@@ -224,6 +228,7 @@ namespace sbd {
 
   }
 
+#ifdef USE_OMP_OFFLOAD
 #pragma omp declare target
   template <typename ElemT>
   void TwoDiffCorrelation(const size_t * DetI,
@@ -272,6 +277,7 @@ namespace sbd {
 
   }
 #pragma omp end declare target
+#endif
 
   /**
      Function for adding the terms to the resulting correlation
