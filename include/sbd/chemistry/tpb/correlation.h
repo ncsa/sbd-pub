@@ -326,7 +326,7 @@ namespace sbd {
 	    } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	  } // if ( helper[task].taskType == 0)
 
-#pragma omp target exit data map(delete:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize], W_ptr[0:Wsize])
+#pragma omp target exit data map(delete:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize])
         // free data structures for alpha and beta bit-strings
         free(Adet);
         free(Bdet);
@@ -342,7 +342,7 @@ namespace sbd {
     } // end for(size_t task=0; task < helper.size(); task++)
 
 // transfer oneBody and twoBody arrays back to the CPU
-#pragma omp target exit data map(from:oneBody[0:2*norb2], twoBody[0:4*norb4])
+#pragma omp target exit data map(from:oneBody[0:2*norb2], twoBody[0:4*norb4]) map(delete:W_ptr[0:Wsize])
 
     for(int s=0; s < 2; s++) {
       // store back to std::vector
