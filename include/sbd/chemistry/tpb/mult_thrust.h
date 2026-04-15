@@ -19,8 +19,7 @@
 
 // Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
 #define SBD_USE_STRIDED_RANK_DISTRIBUTION
-#define SBD_USE_VECTORIZATION
-// #define SBD_USE_HASHTABLE  // (*) this is experimental
+// #define SBD_USE_VECTORIZATION
 
 namespace sbd
 {
@@ -381,9 +380,31 @@ public:
     __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
         braIdx = -1;
         eij = 0;
-        size_t j = i / helper.size_single_beta;
-        size_t k = i % helper.size_single_beta;
+#if 1
+        // Original mapping
+        //   i = k + (size_single_beta * j)
+        size_t j = i / helper.size_single_beta;  // 0 .. size_single_alpha-1
+        size_t k = i % helper.size_single_beta;  // 0 .. size_single_beta-1
+#endif
+#if 0
+        // Transposed mapping
+        //   i = j + (size_single_alpha * k)
+        size_t j = i % helper.size_single_alpha;  // 0 .. size_single_alpha-1
+        size_t k = i / helper.size_single_alpha;  // 0 .. size_single_beta-1
+#endif
+#if 0
+        // Blocked-k mapping
+        // split k dimension into small blocks, and iterate j inside each k-block.
+        constexpr size_t blk_size_k = 8;
+        size_t b_k = i / (helper.size_single_alpha * blk_size_k);
+        size_t ii = i - (b_k * (helper.size_single_alpha * blk_size_k));
+        size_t blk_size_k2 = std::min(blk_size_k, helper.size_single_beta - (b_k * blk_size_k));
+        size_t j = ii / blk_size_k2;
+        size_t k = ii - (j * blk_size_k2);
+        k += (b_k * blk_size_k);
+#endif
         if (j >= helper.size_single_alpha) return;
+        if (k >= helper.size_single_beta) return;
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
         size_t ja = helper.SinglesFromAlphaKetIndex[j];
         size_t ib = helper.SinglesFromBetaBraIndex[k];
@@ -476,6 +497,32 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i0)
     {
+#if 1
+        size_t i = (VecLen * i0);
+        int64_t braIdx;
+        ElemT eij;
+        loop_body(i, braIdx, eij);
+        for (size_t i1 = 1; i1 < VecLen; i1++) {
+            i = (VecLen * i0) + i1;
+            int64_t braIdx_new;
+            ElemT eij_new;
+            loop_body(i, braIdx_new, eij_new);
+            if (braIdx == braIdx_new) {
+                if (braIdx >= 0) {
+                    eij += eij_new;
+                }
+                continue;
+            }
+            if ((braIdx >= 0) && (eij != 0)) {
+                atomicAdd(this->Wb + braIdx, eij);
+            }
+            braIdx = braIdx_new;
+            eij = eij_new;
+        }
+        if ((braIdx >= 0) && (eij != 0)) {
+            atomicAdd(this->Wb + braIdx, eij);
+        }
+#else
         ElemT eij[VecLen];
         int64_t braIdx[VecLen];
         #pragma unroll
@@ -492,115 +539,7 @@ public:
             }
             atomicAdd(this->Wb + braIdx[i], eij[i]);
         }
-    }
-};
-
-
-// NOTE: Experimental implementation.
-// Extends MultAlphaBeta_Vec by using a hash-based scheme to aggregate atomic
-// updates in shared memory at the thread-block level, aiming to reduce global
-// atomic operations. However, no performance improvement was observed in
-// practice, so this remains an experimental approach.
-template <typename ElemT, int VecLen = 2, int HashLen = 256>
-class MultAlphaBeta_VecHash : public MultKernelBase<ElemT>
-{
-protected:
-    TaskHelpersThrust<ElemT> helper;
-public:
-    MultAlphaBeta_VecHash(const TaskHelpersThrust<ElemT>& h,
-                          const thrust::device_vector<ElemT>& v_wb,
-                          const thrust::device_vector<ElemT>& v_t,
-                          const MultTPBThrust<ElemT>& data
-        ) : MultKernelBase<ElemT>(v_wb, v_t, data)
-    {
-        helper = h;
-    }
-
-    __device__ inline void loop_body(size_t i, int32_t& braIdx, ElemT& eij) {
-        braIdx = -1;
-        eij = 0;
-        size_t j = i / helper.size_single_beta;
-        size_t k = i % helper.size_single_beta;
-        if (j >= helper.size_single_alpha) return;
-        size_t ia = helper.SinglesFromAlphaBraIndex[j];
-        size_t ja = helper.SinglesFromAlphaKetIndex[j];
-        size_t ib = helper.SinglesFromBetaBraIndex[k];
-        size_t jb = helper.SinglesFromBetaKetIndex[k];
-        braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
-                  ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
-        if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
-        size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
-        eij = this->TwoExcite(
-            DetI,
-            helper.SinglesAlphaCrAnSM[j],
-            helper.SinglesBetaCrAnSM[k],
-            helper.SinglesAlphaCrAnSM[j + helper.size_single_alpha],
-            helper.SinglesBetaCrAnSM[k + helper.size_single_beta]);
-        if (eij != 0) {
-            size_t ketIdx = (ja - helper.ketAlphaStart) * (helper.ketBetaEnd - helper.ketBetaStart)
-                           + jb - helper.ketBetaStart;
-            eij *= this->T[ketIdx];
-        }
-    }        
-
-    // kernel entry point
-    __device__ void operator()(size_t i0)
-    {
-        constexpr int32_t HASH_INIT_VALUE = -1;
-        __shared__ int32_t smem_braIdx[HashLen];
-        __shared__ ElemT smem_eij[HashLen];
-        const int tid = threadIdx.x;
-        for (int i = tid; i < HashLen; i += blockDim.x) {
-            smem_braIdx[i] = HASH_INIT_VALUE;
-            smem_eij[i] = 0;
-        }
-        __syncthreads();
-
-        ElemT eij[VecLen];
-        int32_t braIdx[VecLen];
-        #pragma unroll
-        for (size_t i1 = 0; i1 < VecLen; i1++) {
-            size_t i = (VecLen * i0) + i1;
-            loop_body(i, braIdx[i1], eij[i1]);
-            if ((braIdx[i1] < 0) || (eij[i1] == 0)) continue;
-            for (int h = 0; h < HashLen; h++) {
-                int idx = (braIdx[i1] + h) % HashLen;
-                if (smem_braIdx[idx] == braIdx[i1]) break;
-                if (smem_braIdx[idx] != HASH_INIT_VALUE) continue;
-                int32_t old = atomicCAS(smem_braIdx + idx, HASH_INIT_VALUE, braIdx[i1]);
-                if ((old == HASH_INIT_VALUE) || (old == braIdx[i1])) break;
-            }
-        }
-        __syncthreads();
-
-        for (int i = 0; i < VecLen; i++) {
-            if ((braIdx[i] < 0) || (eij[i] == 0)) continue;
-            if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
-                eij[i+1] += eij[i];
-                continue;
-            }
-
-            int idx = -1;
-            for (int h = 0; h < HashLen; h++) {
-                int probe = (braIdx[i] + h) % HashLen;
-                if (smem_braIdx[probe] != braIdx[i]) continue;
-                idx = probe;
-                break;
-            }
-            if (idx >= 0) {
-                atomicAdd(smem_eij + idx, eij[i]);
-            } else {
-                atomicAdd(this->Wb + braIdx[i], eij[i]);
-            }
-        }
-        __syncthreads();
-
-        for (int i = tid; i < HashLen; i += blockDim.x) {
-            if ((smem_braIdx[i] == HASH_INIT_VALUE) || (smem_eij[i] == 0)) continue;
-            atomicAdd(this->Wb + smem_braIdx[i], smem_eij[i]);
-        }
     }
 };
 
@@ -1393,6 +1332,7 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_SINGLE>
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #else
+                // constexpr int VecLenS = 1;
                 constexpr int VecLenS = 2;
                 size = (size + VecLenS - 1) / VecLenS;
                 MultUnified_Vec<ElemT, SB_MULT_ALPHA, SB_MULT_SINGLE, VecLenS>
@@ -1422,6 +1362,7 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_DOUBLE>
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #else
+                // constexpr int VecLenD = 1;
                 constexpr int VecLenD = 2;
                 size = (size + VecLenD - 1) / VecLenD;
                 MultUnified_Vec<ElemT, SB_MULT_ALPHA, SB_MULT_DOUBLE, VecLenD>
@@ -1451,6 +1392,7 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_SINGLE>
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #else
+                // constexpr int VecLenS = 1;
                 constexpr int VecLenS = 2;
                 size = (size + VecLenS - 1) / VecLenS;
                 MultUnified_Vec<ElemT, SB_MULT_BETA, SB_MULT_SINGLE, VecLenS>
@@ -1480,6 +1422,7 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_DOUBLE>
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #else
+                // constexpr int VecLenD = 1;
                 constexpr int VecLenD = 2;
                 size = (size + VecLenD - 1) / VecLenD;
                 MultUnified_Vec<ElemT, SB_MULT_BETA, SB_MULT_DOUBLE, VecLenD>
@@ -1509,33 +1452,18 @@ void MultTPBThrust<ElemT>::run(
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
 #else // #ifndef SBD_USE_VECTORIZATION
-#ifndef SBD_USE_HASHTABLE
+                // constexpr int VecLen = 1;
                 constexpr int VecLen = 2;
                 MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
                 size = (size + VecLen - 1) / VecLen;
-#else // #ifndef SBD_USE_HASHTABLE
-                constexpr int VecLen = 2;
-                constexpr int HashLen = 256;
-                MultAlphaBeta_VecHash<ElemT, VecLen, HashLen>
-                    kernel(helper[task], Wb, T[active_T], *this);
-                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                size = (size + mpi_size_h - 1) / mpi_size_h;
-                size = (size + VecLen - 1) / VecLen;
-                if (size % HashLen) {
-                    size += (HashLen - (size % HashLen));
-                }
-                if (size % 256) {
-                    size += (256 - (size % 256));
-                }
-#endif // #ifndef SBD_USE_HASHTABLE
 #endif // #ifndef SBD_USE_VECTORIZATION
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
-                        return mpi_rank_h + (mpi_size_h * t);
-                        // return t + (size * mpi_rank_h);
+                        // return mpi_rank_h + (mpi_size_h * t);
+                        return t + (size * mpi_rank_h);
                     });
 #endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
                 {

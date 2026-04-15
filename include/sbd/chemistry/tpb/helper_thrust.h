@@ -208,8 +208,25 @@ public:
             }
             for(size_t i=0; i < braAlphaSize; i++) {
                 thrust::copy_n(helper.SinglesFromAlphaSM[i], helper.SinglesFromAlphaLen[i], storage.begin() + count + offset_single_alpha[i]);
-                if (!store_offset)
+#if 0
+                // **** DEBUG ****
+                printf("[%s,%d] SinglesFromAlphaKetIndex: i=%llu, n=%llu, ", __FILE__, __LINE__,
+                       i, helper.SinglesFromAlphaLen[i]);
+                for(size_t j=0; j <helper.SinglesFromAlphaLen[i];j++) {
+                    printf(" %llu:%llu,", j, helper.SinglesFromAlphaSM[i][j]);
+                }
+                printf("\n");
+#endif
+            }
+            if (!store_offset) {
+                for(size_t i=0; i < braAlphaSize; i++) {
                     thrust::fill_n(storage.begin() + size_single_alpha + count + offset_single_alpha[i], helper.SinglesFromAlphaLen[i], i + helper.braAlphaStart);
+#if 0
+                    // **** DEBUG ****
+                    printf("[%s,%d] SinglesFromAlphaBraIndex: i=%llu, n=%llu, offset=%llu\n", __FILE__, __LINE__,
+                           i, helper.SinglesFromAlphaLen[i], offset_single_alpha[i] );
+#endif
+                }
             }
             if (!store_offset)
                 count += size_single_alpha;
@@ -242,8 +259,25 @@ public:
             }
             for(size_t i=0; i < braBetaSize; i++) {
                 thrust::copy_n(helper.SinglesFromBetaSM[i], helper.SinglesFromBetaLen[i], storage.begin() + count + offset_single_beta[i]);
-                if (!store_offset)
+#if 0
+                // **** DEBUG ****
+                printf("[%s,%d] SinglesFromBetaKetIndex: i=%llu, n=%llu, ", __FILE__, __LINE__,
+                       i, helper.SinglesFromBetaLen[i]);
+                for(size_t j=0; j <helper.SinglesFromBetaLen[i];j++) {
+                    printf(" %llu:%llu,", j, helper.SinglesFromBetaSM[i][j]);
+                }
+                printf("\n");
+#endif
+            }
+            if (!store_offset) {
+                for(size_t i=0; i < braBetaSize; i++) {
                     thrust::fill_n(storage.begin() + count + size_single_beta + offset_single_beta[i], helper.SinglesFromBetaLen[i], i + helper.braBetaStart);
+#if 0
+                    // **** DEBUG ****
+                    printf("[%s,%d] SinglesFromBetaBraIndex: i=%llu, n=%llu, offset=%llu\n", __FILE__, __LINE__,
+                           i, helper.SinglesFromBetaLen[i], offset_single_beta[i] );
+#endif
+                }
             }
             if (!store_offset)
                 count += size_single_beta;
@@ -284,6 +318,19 @@ public:
                     buf[size_single_alpha + offset_single_alpha[i] + j] = helper.SinglesAlphaCrAnSM[i][j * 2 + 1];
                 }
             }
+#if 0
+            // **** DEBUG ****
+            for(size_t i=0; i < braAlphaSize; i++) {
+                printf("[%s,%d] SinglesAlphaCrAnSM: i=%llu, n=%llu, ", __FILE__, __LINE__,
+                       i, helper.SinglesFromAlphaLen[i]);
+                for(size_t j=0; j <helper.SinglesFromAlphaLen[i];j++) {
+                    printf(" %llu:%llu-%llu,", j,
+                           helper.SinglesAlphaCrAnSM[i][j * 2],
+                           helper.SinglesAlphaCrAnSM[i][j * 2 + 1]);
+                }
+                printf("\n");
+            }
+#endif
             thrust::copy_n(buf.begin(), size_single_alpha * 2, cran_storage.begin() + count_cran);
             count_cran += size_single_alpha * 2;
 
@@ -314,6 +361,19 @@ public:
                     buf[size_single_beta + offset_single_beta[i] + j] = helper.SinglesBetaCrAnSM[i][j * 2 + 1];
                 }
             }
+#if 1
+            // **** DEBUG ****
+            for(size_t i=0; i < braBetaSize; i++) {
+                printf("[%s,%d] SinglesBetaCrAnSM: i=%llu, n=%llu, ", __FILE__, __LINE__,
+                       i, helper.SinglesFromBetaLen[i]);
+                for(size_t j=0; j <helper.SinglesFromBetaLen[i];j++) {
+                    printf(" %llu:%llu-%llu,", j,
+                           helper.SinglesBetaCrAnSM[i][j * 2],
+                           helper.SinglesBetaCrAnSM[i][j * 2 + 1]);
+                }
+                printf("\n");
+            }
+#endif
             thrust::copy_n(buf.begin(), size_single_beta * 2, cran_storage.begin() + count_cran);
             count_cran += size_single_beta * 2;
 
