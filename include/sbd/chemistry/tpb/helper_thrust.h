@@ -444,19 +444,21 @@ public:
         // After this function, permutation[k] gives the original index of the
         // k-th entry in block-grouped order.
         //
-        auto setup_permutation = [&](size_t* ket_index_ptr, size_t ket_index_size, size_t ket_index_maxval) {
+        auto setup_permutation = [&](size_t* ket_index_ptr, size_t ket_index_size) {
             assert(ket_index_ptr);
             permutation.assign(ket_index_size, ket_index_size);
             std::vector<size_t> ket_index_vector(permutation.size());
             thrust::copy_n(thrust::device_pointer_cast(ket_index_ptr),
                            permutation.size(), ket_index_vector.begin());
-            size_t n_blocks = (ket_index_maxval + block_size - 1) / block_size;
+            assert(!ket_index_vector.empty());
+            size_t ket_index_limit = *std::max_element(ket_index_vector.begin(), ket_index_vector.end()) + 1;
+            size_t n_blocks = (ket_index_limit + block_size - 1) / block_size;
             std::vector<size_t> histo(n_blocks, 0);
             std::vector<size_t> csum(n_blocks + 1, 0);
             std::vector<size_t> csum_org(n_blocks + 1);
             for (size_t i = 0; i < permutation.size(); i++) {
                 size_t ket_index = ket_index_vector[i];
-                assert(ket_index < ket_index_maxval);
+                assert(ket_index < ket_index_limit);
                 size_t block_id = ket_index / block_size;
                 assert(block_id < n_blocks);
                 histo[block_id] += 1;
@@ -468,7 +470,7 @@ public:
             std::copy(csum.begin(), csum.end(), csum_org.begin());
             for (size_t i = 0; i < permutation.size(); i++) {
                 size_t ket_index = ket_index_vector[i];
-                assert(ket_index < ket_index_maxval);
+                assert(ket_index < ket_index_limit);
                 size_t block_id = ket_index / block_size;
                 assert(block_id < n_blocks);
                 size_t pos = csum[block_id]++;
@@ -505,7 +507,7 @@ public:
         if (size_single_alpha > 0 && SinglesFromAlphaKetIndex) {
             printf("[%s,%d] Reordering index arrays (size_single_alpha=%zu)\n",
                    __FILE__, __LINE__, size_single_alpha);
-            setup_permutation(SinglesFromAlphaKetIndex, size_single_alpha, braAlphaSize);
+            setup_permutation(SinglesFromAlphaKetIndex, size_single_alpha);
             reorder_device_array(SinglesFromAlphaKetIndex);
             reorder_device_array(SinglesFromAlphaBraIndex);
             if (SinglesAlphaCrAnSM) {
@@ -518,7 +520,7 @@ public:
         if (size_single_beta > 0 && SinglesFromBetaKetIndex) {
             printf("[%s,%d] Reordering index arrays (size_single_beta=%zu)\n",
                    __FILE__, __LINE__, size_single_beta);
-            setup_permutation(SinglesFromBetaKetIndex, size_single_beta, braBetaSize);
+            setup_permutation(SinglesFromBetaKetIndex, size_single_beta);
             reorder_device_array(SinglesFromBetaKetIndex);
             reorder_device_array(SinglesFromBetaBraIndex);
             if (SinglesBetaCrAnSM) {
@@ -531,7 +533,7 @@ public:
         if (size_double_alpha > 0 && DoublesFromAlphaKetIndex) {
             printf("[%s,%d] Reordering index arrays (size_double_alpha=%zu)\n",
                    __FILE__, __LINE__, size_double_alpha);
-            setup_permutation(DoublesFromAlphaKetIndex, size_double_alpha, braAlphaSize);
+            setup_permutation(DoublesFromAlphaKetIndex, size_double_alpha);
             reorder_device_array(DoublesFromAlphaKetIndex);
             reorder_device_array(DoublesFromAlphaBraIndex);
             if (DoublesAlphaCrAnSM) {
@@ -546,7 +548,7 @@ public:
         if (size_double_beta > 0 && DoublesFromBetaKetIndex) {
             printf("[%s,%d] Reordering index arrays (size_double_beta=%zu)\n",
                    __FILE__, __LINE__, size_double_beta);
-            setup_permutation(DoublesFromBetaKetIndex, size_double_beta, braBetaSize);
+            setup_permutation(DoublesFromBetaKetIndex, size_double_beta);
             reorder_device_array(DoublesFromBetaKetIndex);
             reorder_device_array(DoublesFromBetaBraIndex);
             if (DoublesBetaCrAnSM) {
