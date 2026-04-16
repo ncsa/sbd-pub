@@ -17,8 +17,9 @@
 // per thread DetI, DetJ storage size (1GB max)
 #define MAX_DET_SIZE 134217728
 
-// Switch between braIdx-owner filtering (original) and i-strided MPI work distribution
-#define SBD_USE_STRIDED_RANK_DISTRIBUTION
+// Switch between braIdx-owner filtering (original) and MPI work distribution
+#define SBD_USE_RANK_DISTRIBUTION
+#define SBD_USE_BLOCK_RANK_DISTRIBUTION
 // #define SBD_USE_VECTORIZATION
 
 namespace sbd
@@ -126,6 +127,13 @@ void MultTPBThrust<ElemT>::Init(
     bool collapse)
 {
     SBD_NVTX_RANGE_COLOR("Init", __LINE__);
+#ifdef SBD_USE_RANK_DISTRIBUTION
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+    printf("[%s,%d] Block rank distribution enabled.\n", __FILE__, __LINE__);
+#else
+    printf("[%s,%d] Cyclic (strided) rank distribution enabled.\n", __FILE__, __LINE__);
+#endif
+#endif
     this->bit_length_ = bit_length_in;
     this->norbs_ = norbs_in;
     this->D_size_ = (2 * norbs_in + bit_length_in - 1) / bit_length_in;
@@ -380,29 +388,8 @@ public:
     __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
         braIdx = -1;
         eij = 0;
-#if 1
-        // Original mapping
-        //   i = k + (size_single_beta * j)
         size_t j = i / helper.size_single_beta;  // 0 .. size_single_alpha-1
         size_t k = i % helper.size_single_beta;  // 0 .. size_single_beta-1
-#endif
-#if 0
-        // Transposed mapping
-        //   i = j + (size_single_alpha * k)
-        size_t j = i % helper.size_single_alpha;  // 0 .. size_single_alpha-1
-        size_t k = i / helper.size_single_alpha;  // 0 .. size_single_beta-1
-#endif
-#if 0
-        // Blocked-k mapping
-        // split k dimension into small blocks, and iterate j inside each k-block.
-        constexpr size_t blk_size_k = 8;
-        size_t b_k = i / (helper.size_single_alpha * blk_size_k);
-        size_t ii = i - (b_k * (helper.size_single_alpha * blk_size_k));
-        size_t blk_size_k2 = std::min(blk_size_k, helper.size_single_beta - (b_k * blk_size_k));
-        size_t j = ii / blk_size_k2;
-        size_t k = ii - (j * blk_size_k2);
-        k += (b_k * blk_size_k);
-#endif
         if (j >= helper.size_single_alpha) return;
         if (k >= helper.size_single_beta) return;
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
@@ -411,7 +398,7 @@ public:
         size_t jb = helper.SinglesFromBetaKetIndex[k];
         braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
                   ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
@@ -477,7 +464,7 @@ public:
         size_t jb = helper.SinglesFromBetaKetIndex[k];
         braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) +
                   ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
@@ -571,7 +558,7 @@ public:
         size_t jb = ib;
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
 
@@ -614,7 +601,7 @@ public:
         size_t jb = ib;
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
 
@@ -659,7 +646,7 @@ public:
         size_t jb = helper.SinglesFromBetaKetIndex[k];
 
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
 
@@ -701,7 +688,7 @@ public:
         size_t ib = helper.DoublesFromBetaBraIndex[k];
         size_t jb = helper.DoublesFromBetaKetIndex[k];
         size_t braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart) + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
 
@@ -791,7 +778,7 @@ public:
 
         braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
                 + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
@@ -918,7 +905,7 @@ public:
 
         braIdx = (ia - helper.braAlphaStart) * (helper.braBetaEnd - helper.braBetaStart)
                 + ib - helper.braBetaStart;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
         if( (braIdx % this->mpi_size_h) != this->mpi_rank_h ) return;
 #endif
         size_t* DetI = this->det_I + ((ia - helper.braAlphaStart) * this->bdets_size + ib - helper.braBetaStart) * this->D_size;
@@ -1322,11 +1309,11 @@ void MultTPBThrust<ElemT>::run(
             if (helper[task].taskType == 2) {
                 // SingleAlpha
                 size = helper[task].size_single_alpha * braBetaSize;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
                 MultSingleAlpha single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto cis = thrust::counting_iterator<size_t>(0);
-#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_SINGLE>
@@ -1342,9 +1329,15 @@ void MultTPBThrust<ElemT>::run(
                 auto cis = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+                        // Contiguous block distribution
+                        return t + (size * mpi_rank_h);
+#else
+                        // Cyclic (strided) distribution
                         return mpi_rank_h + (mpi_size_h * t);
+#endif
                     });
-#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cis, size, single_kernel);
@@ -1352,11 +1345,11 @@ void MultTPBThrust<ElemT>::run(
 
                 // DoubleAlpha
                 size = helper[task].size_double_alpha * braBetaSize;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
                 MultDoubleAlpha double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto cid = thrust::counting_iterator<size_t>(0);
-#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_DOUBLE>
@@ -1372,9 +1365,15 @@ void MultTPBThrust<ElemT>::run(
                 auto cid = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+                        // Contiguous block distribution
+                        return t + (size * mpi_rank_h);
+#else
+                        // Cyclic (strided) distribution
                         return mpi_rank_h + (mpi_size_h * t);
+#endif
                     });
-#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cid, size, double_kernel);
@@ -1382,11 +1381,11 @@ void MultTPBThrust<ElemT>::run(
             } else if(helper[task].taskType == 1) {
                 // SingleBeta
                 size = helper[task].size_single_beta * braAlphaSize;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
                 MultSingleBeta single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto cis = thrust::counting_iterator<size_t>(0);
-#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_SINGLE>
@@ -1402,9 +1401,15 @@ void MultTPBThrust<ElemT>::run(
                 auto cis = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+                        // Contiguous block distribution
+                        return t + (size * mpi_rank_h);
+#else
+                        // Cyclic (strided) distribution
                         return mpi_rank_h + (mpi_size_h * t);
+#endif
                     });
-#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cis, size, single_kernel);
@@ -1412,11 +1417,11 @@ void MultTPBThrust<ElemT>::run(
 
                 // DoubleBeta
                 size = helper[task].size_double_beta * braAlphaSize;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
                 MultDoubleBeta double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto cid = thrust::counting_iterator<size_t>(0);
-#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_DOUBLE>
@@ -1432,9 +1437,15 @@ void MultTPBThrust<ElemT>::run(
                 auto cid = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+                        // Contiguous block distribution
+                        return t + (size * mpi_rank_h);
+#else
+                        // Cyclic (strided) distribution
                         return mpi_rank_h + (mpi_size_h * t);
+#endif
                     });
-#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, cid, size, double_kernel);
@@ -1442,11 +1453,11 @@ void MultTPBThrust<ElemT>::run(
             } else {
                 //
                 size = helper[task].size_single_alpha * helper[task].size_single_beta;
-#ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#ifndef SBD_USE_RANK_DISTRIBUTION
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto ci = thrust::counting_iterator<size_t>(0);
-#else // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#else // #ifndef SBD_USE_RANK_DISTRIBUTION
 #ifndef SBD_USE_VECTORIZATION
                 size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
@@ -1462,10 +1473,15 @@ void MultTPBThrust<ElemT>::run(
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
-                        // return mpi_rank_h + (mpi_size_h * t);
+#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+                        // Contiguous block distribution
                         return t + (size * mpi_rank_h);
+#else
+                        // Cyclic (strided) distribution
+                        return mpi_rank_h + (mpi_size_h * t);
+#endif
                     });
-#endif // #ifndef SBD_USE_STRIDED_RANK_DISTRIBUTION
+#endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
                     SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
                     thrust::for_each_n(thrust::device, ci, size, kernel);

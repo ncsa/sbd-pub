@@ -5,6 +5,8 @@
 #ifndef SBD_CHEMISTRY_TPB_HELPER_THRUST_H
 #define SBD_CHEMISTRY_TPB_HELPER_THRUST_H
 
+#include <cassert>
+
 namespace sbd {
 
 
@@ -199,12 +201,16 @@ public:
             }
         }
 
+        SinglesFromAlphaKetIndex = nullptr;
+        SinglesFromAlphaBraIndex = nullptr;
+        DoublesFromAlphaKetIndex = nullptr;
+        DoublesFromAlphaBraIndex = nullptr;
         if (taskType != 1) {
             if (store_offset) {
                 SinglesFromAlphaKetIndex = base_memory + count;
             } else {
-                SinglesFromAlphaBraIndex = base_memory + count + size_single_alpha;
                 SinglesFromAlphaKetIndex = base_memory + count;
+                SinglesFromAlphaBraIndex = base_memory + count + size_single_alpha;
             }
             for(size_t i=0; i < braAlphaSize; i++) {
                 thrust::copy_n(helper.SinglesFromAlphaSM[i], helper.SinglesFromAlphaLen[i], storage.begin() + count + offset_single_alpha[i]);
@@ -228,34 +234,41 @@ public:
 #endif
                 }
             }
-            if (!store_offset)
-                count += size_single_alpha;
             count += size_single_alpha;
+            if (!store_offset) {
+                count += size_single_alpha;
+            }
 
             if (taskType == 2) {
                 if (store_offset) {
                     DoublesFromAlphaKetIndex = base_memory + count;
                 } else {
-                    DoublesFromAlphaBraIndex = base_memory + count + size_double_alpha;
                     DoublesFromAlphaKetIndex = base_memory + count;
+                    DoublesFromAlphaBraIndex = base_memory + count + size_double_alpha;
                 }
                 for(size_t i=0; i < braAlphaSize; i++) {
                     thrust::copy_n(helper.DoublesFromAlphaSM[i], helper.DoublesFromAlphaLen[i], storage.begin() + count + offset_double_alpha[i]);
-                    if (!store_offset)
+                    if (!store_offset) {
                         thrust::fill_n(storage.begin() + count + size_double_alpha + offset_double_alpha[i], helper.DoublesFromAlphaLen[i], i + helper.braAlphaStart);
+                    }
                 }
-                if (!store_offset)
-                    count += size_double_alpha;
                 count += size_double_alpha;
+                if (!store_offset) {
+                    count += size_double_alpha;
+                }
             }
         }
 
+        SinglesFromBetaKetIndex = nullptr;
+        SinglesFromBetaBraIndex = nullptr;
+        DoublesFromBetaKetIndex = nullptr;
+        DoublesFromBetaBraIndex = nullptr;
         if (taskType != 2) {
             if (store_offset) {
                 SinglesFromBetaKetIndex = base_memory + count;
             } else {
-                SinglesFromBetaBraIndex = base_memory + count + size_single_beta;
                 SinglesFromBetaKetIndex = base_memory + count;
+                SinglesFromBetaBraIndex = base_memory + count + size_single_beta;
             }
             for(size_t i=0; i < braBetaSize; i++) {
                 thrust::copy_n(helper.SinglesFromBetaSM[i], helper.SinglesFromBetaLen[i], storage.begin() + count + offset_single_beta[i]);
@@ -279,25 +292,28 @@ public:
 #endif
                 }
             }
-            if (!store_offset)
-                count += size_single_beta;
             count += size_single_beta;
+            if (!store_offset) {
+                count += size_single_beta;
+            }
 
             if (taskType == 1) {
                 if (store_offset) {
                     DoublesFromBetaKetIndex = base_memory + count;
                 } else {
-                    DoublesFromBetaBraIndex = base_memory + count + size_double_beta;
                     DoublesFromBetaKetIndex = base_memory + count;
+                    DoublesFromBetaBraIndex = base_memory + count + size_double_beta;
                 }
                 for(size_t i=0; i < braBetaSize; i++) {
                     thrust::copy_n(helper.DoublesFromBetaSM[i], helper.DoublesFromBetaLen[i], storage.begin() + count + offset_double_beta[i]);
-                    if (!store_offset)
+                    if (!store_offset) {
                         thrust::fill_n(storage.begin() + count + size_double_beta + offset_double_beta[i], helper.DoublesFromBetaLen[i], i + helper.braBetaStart);
+                    }
                 }
-                if (!store_offset)
-                    count += size_double_beta;
                 count += size_double_beta;
+                if (!store_offset) {
+                    count += size_double_beta;
+                }
             }
         }
 
@@ -308,6 +324,8 @@ public:
         cran_storage.resize(size_cran);
         base_cran = (int*)thrust::raw_pointer_cast(cran_storage.data());
 
+        SinglesAlphaCrAnSM = nullptr;
+        DoublesAlphaCrAnSM = nullptr;
         if (taskType != 1) {
             SinglesAlphaCrAnSM = base_cran + count_cran;
             buf.resize(size_single_alpha * 2);
@@ -351,6 +369,8 @@ public:
             }
         }
 
+        SinglesBetaCrAnSM = nullptr;
+        DoublesBetaCrAnSM = nullptr;
         if (taskType != 2) {
             SinglesBetaCrAnSM = base_cran + count_cran;
             buf.resize(size_single_beta * 2);
@@ -361,7 +381,7 @@ public:
                     buf[size_single_beta + offset_single_beta[i] + j] = helper.SinglesBetaCrAnSM[i][j * 2 + 1];
                 }
             }
-#if 1
+#if 0
             // **** DEBUG ****
             for(size_t i=0; i < braBetaSize; i++) {
                 printf("[%s,%d] SinglesBetaCrAnSM: i=%llu, n=%llu, ", __FILE__, __LINE__,
@@ -393,6 +413,150 @@ public:
                 count_cran += size_double_beta * 4;
             }
         }
+
+#ifdef SBD_REORDER_INDEX_ARRAY
+        //
+        // Reorder excitation entries using a block-based permutation based on
+        // KetIndex.
+        //
+        // We do not fully sort by KetIndex, because that would make BraIndex
+        // effectively random, which is not desirable for performance.
+        //
+        // Instead, we group entries by KetIndex blocks
+        //     block_id = KetIndex / block_size
+        // so that entries in the same block are stored contiguously, while
+        // avoiding a full randomization of BraIndex ordering.
+        //
+        std::vector<size_t> permutation;
+        constexpr size_t block_size = 16;
+        printf("[%s,%d] Reordering index arrays (block_size=%zu)\n",
+               __FILE__, __LINE__, block_size);
+
+        // Build a stable permutation that groups entries by KetIndex block.
+        //
+        // Steps:
+        //   1. Copy KetIndex from device to host.
+        //   2. Build a histogram of the number of entries in each block.
+        //   3. Compute prefix sums to obtain per-block write offsets.
+        //   4. Scatter original indices into 'permutation' using the prefix
+        //      sum array as running write pointers.
+        //
+        // After this function, permutation[k] gives the original index of the
+        // k-th entry in block-grouped order.
+        //
+        auto setup_permutation = [&](size_t* ket_index_ptr, size_t ket_index_size, size_t ket_index_maxval) {
+            assert(ket_index_ptr);
+            permutation.assign(ket_index_size, ket_index_size);
+            std::vector<size_t> ket_index_vector(permutation.size());
+            thrust::copy_n(thrust::device_pointer_cast(ket_index_ptr),
+                           permutation.size(), ket_index_vector.begin());
+            size_t n_blocks = (ket_index_maxval + block_size - 1) / block_size;
+            std::vector<size_t> histo(n_blocks, 0);
+            std::vector<size_t> csum(n_blocks + 1, 0);
+            std::vector<size_t> csum_org(n_blocks + 1);
+            for (size_t i = 0; i < permutation.size(); i++) {
+                size_t ket_index = ket_index_vector[i];
+                assert(ket_index < ket_index_maxval);
+                size_t block_id = ket_index / block_size;
+                assert(block_id < n_blocks);
+                histo[block_id] += 1;
+            }
+            for (size_t i = 0; i < n_blocks; i++) {
+                csum[i+1] = csum[i] + histo[i];
+            }
+            assert(csum[n_blocks] == permutation.size());
+            std::copy(csum.begin(), csum.end(), csum_org.begin());
+            for (size_t i = 0; i < permutation.size(); i++) {
+                size_t ket_index = ket_index_vector[i];
+                assert(ket_index < ket_index_maxval);
+                size_t block_id = ket_index / block_size;
+                assert(block_id < n_blocks);
+                size_t pos = csum[block_id]++;
+                assert(csum_org[block_id] <= pos && pos < csum_org[block_id+1]);
+                permutation[pos] = i;
+            }
+            for (size_t i = 0; i < n_blocks; i++) {
+                assert(csum[i] == csum_org[i] + histo[i]);
+            }
+            for (size_t i = 0; i < permutation.size(); i++) {
+                assert(permutation[i] < permutation.size());
+            }
+        };
+
+        // Reorder a device array using the permutation built above.
+        //
+        // The array is copied once to host memory, permuted on host, and then
+        // copied back to device memory.
+        //
+        auto reorder_device_array = [&](auto* ptr) {
+            if (!ptr) return;
+            using T = std::remove_pointer_t<decltype(ptr)>;
+            auto dev_ptr = thrust::device_pointer_cast(ptr);
+            std::vector<T> original_vector(permutation.size());
+            std::vector<T> permuted_vector(permutation.size());
+            thrust::copy_n(dev_ptr, permutation.size(), original_vector.begin());
+            for (size_t i = 0; i < permutation.size(); i++) {
+                permuted_vector[i] = original_vector[permutation[i]];
+            }
+            thrust::copy_n(permuted_vector.begin(), permutation.size(), dev_ptr);
+        };
+
+        // Reorder alpha single-excitation arrays
+        if (size_single_alpha > 0 && SinglesFromAlphaKetIndex) {
+            printf("[%s,%d] Reordering index arrays (size_single_alpha=%zu)\n",
+                   __FILE__, __LINE__, size_single_alpha);
+            setup_permutation(SinglesFromAlphaKetIndex, size_single_alpha, braAlphaSize);
+            reorder_device_array(SinglesFromAlphaKetIndex);
+            reorder_device_array(SinglesFromAlphaBraIndex);
+            if (SinglesAlphaCrAnSM) {
+                reorder_device_array(SinglesAlphaCrAnSM);
+                reorder_device_array(SinglesAlphaCrAnSM + size_single_alpha);
+            }
+        }
+
+        // Reorder beta single-excitation arrays
+        if (size_single_beta > 0 && SinglesFromBetaKetIndex) {
+            printf("[%s,%d] Reordering index arrays (size_single_beta=%zu)\n",
+                   __FILE__, __LINE__, size_single_beta);
+            setup_permutation(SinglesFromBetaKetIndex, size_single_beta, braBetaSize);
+            reorder_device_array(SinglesFromBetaKetIndex);
+            reorder_device_array(SinglesFromBetaBraIndex);
+            if (SinglesBetaCrAnSM) {
+                reorder_device_array(SinglesBetaCrAnSM);
+                reorder_device_array(SinglesBetaCrAnSM + size_single_beta);
+            }
+        }
+
+        // Reorder alpha double-excitation arrays
+        if (size_double_alpha > 0 && DoublesFromAlphaKetIndex) {
+            printf("[%s,%d] Reordering index arrays (size_double_alpha=%zu)\n",
+                   __FILE__, __LINE__, size_double_alpha);
+            setup_permutation(DoublesFromAlphaKetIndex, size_double_alpha, braAlphaSize);
+            reorder_device_array(DoublesFromAlphaKetIndex);
+            reorder_device_array(DoublesFromAlphaBraIndex);
+            if (DoublesAlphaCrAnSM) {
+                reorder_device_array(DoublesAlphaCrAnSM);
+                reorder_device_array(DoublesAlphaCrAnSM + size_double_alpha);
+                reorder_device_array(DoublesAlphaCrAnSM + size_double_alpha * 2);
+                reorder_device_array(DoublesAlphaCrAnSM + size_double_alpha * 3);
+            }
+        }
+
+        // Reorder beta double-excitation arrays
+        if (size_double_beta > 0 && DoublesFromBetaKetIndex) {
+            printf("[%s,%d] Reordering index arrays (size_double_beta=%zu)\n",
+                   __FILE__, __LINE__, size_double_beta);
+            setup_permutation(DoublesFromBetaKetIndex, size_double_beta, braBetaSize);
+            reorder_device_array(DoublesFromBetaKetIndex);
+            reorder_device_array(DoublesFromBetaBraIndex);
+            if (DoublesBetaCrAnSM) {
+                reorder_device_array(DoublesBetaCrAnSM);
+                reorder_device_array(DoublesBetaCrAnSM + size_double_beta);
+                reorder_device_array(DoublesBetaCrAnSM + size_double_beta * 2);
+                reorder_device_array(DoublesBetaCrAnSM + size_double_beta * 3);
+            }
+        }
+#endif  // #ifdef SBD_REORDER_INDEX_ARRAY
     }
 };
 

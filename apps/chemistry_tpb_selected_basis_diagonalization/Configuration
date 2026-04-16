@@ -42,6 +42,7 @@ SBD_PATH=../..
 # **** NVHPC 25.7 ****
 CCCOM=mpic++
 CCFLAGS= -std=c++17 -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/usr/local/cuda/include -DSBD_THRUST
+# CCFLAGS+= -DNDEBUG
 # CCFLAGS+= -acc=gpu -gpu=maxregcount:64,ptxinfo
 CCFLAGS+= -DSBD_USE_NVTX
 CCFLAGS+= -DSBD_THRUST_SAFE_MPI_ALLREDUCE
@@ -51,3 +52,4 @@ SYSLIB+= -lnccl
 CCFLAGS+= -DSBD_USE_CUBLAS
 SYSLIB+= -lcublas
 CCFLAGS+= -DSBD_USE_THRUST_NOSYNC
+CCFLAGS+= -DSBD_REORDER_INDEX_ARRAY
