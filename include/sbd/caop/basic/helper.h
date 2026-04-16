@@ -34,6 +34,7 @@ namespace sbd {
     int b_comm_color = mpi_rank_a / b_comm_size;
     MPI_Comm_split(a_comm,t_comm_color,mpi_rank,&t_comm);
     MPI_Comm_split(a_comm,b_comm_color,mpi_rank,&b_comm);
+    MPI_Comm_free(&a_comm);
     
   }
   

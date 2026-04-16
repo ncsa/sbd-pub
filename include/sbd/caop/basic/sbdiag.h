@@ -306,7 +306,10 @@ namespace sbd {
       if( !savename.empty() ) {
 	SaveWavefunction(savename,basis,h_comm,b_comm,t_comm,W);
       }
-    }
+			MPI_Comm_free(&h_comm);
+			MPI_Comm_free(&t_comm);
+			MPI_Comm_free(&b_comm);
+		}
 
     /**
        Main function to perform the diagonalization for selected basis on creation/annihilation operator model
@@ -409,7 +412,10 @@ namespace sbd {
       }
       diag(comm,sbd_data,hamiltonian,basis,loadname,savename,
 	   energy,co_basis);
-    }
+		 MPI_Comm_free(&h_comm); // my fix
+		 MPI_Comm_free(&t_comm); // my fix
+		 MPI_Comm_free(&b_comm); // my fix
+		}
   }
 }
 
