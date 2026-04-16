@@ -20,7 +20,7 @@
 // Switch between braIdx-owner filtering (original) and MPI work distribution
 #define SBD_USE_RANK_DISTRIBUTION
 #define SBD_USE_BLOCK_RANK_DISTRIBUTION
-// #define SBD_USE_VECTORIZATION
+#define SBD_USE_VECTORIZATION
 
 namespace sbd
 {
@@ -132,6 +132,9 @@ void MultTPBThrust<ElemT>::Init(
     printf("[%s,%d] Block rank distribution enabled.\n", __FILE__, __LINE__);
 #else
     printf("[%s,%d] Cyclic (strided) rank distribution enabled.\n", __FILE__, __LINE__);
+#endif
+#ifdef SBD_USE_VECTORIZATION
+    printf("[%s,%d] Vectorization enabled.\n", __FILE__, __LINE__);
 #endif
 #endif
     this->bit_length_ = bit_length_in;
@@ -484,7 +487,6 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i0)
     {
-#if 1
         size_t i = (VecLen * i0);
         int64_t braIdx;
         ElemT eij;
@@ -509,24 +511,6 @@ public:
         if ((braIdx >= 0) && (eij != 0)) {
             atomicAdd(this->Wb + braIdx, eij);
         }
-#else
-        ElemT eij[VecLen];
-        int64_t braIdx[VecLen];
-        #pragma unroll
-        for (size_t i1 = 0; i1 < VecLen; i1++) {
-            size_t i = (VecLen * i0) + i1;
-            loop_body(i, braIdx[i1], eij[i1]);
-        }
-        #pragma unroll
-        for (size_t i = 0; i < VecLen; i++) {
-            if ((braIdx[i] < 0) || (eij[i] == 0)) continue;
-            if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
-                eij[i+1] += eij[i];
-                continue;
-            }
-            atomicAdd(this->Wb + braIdx[i], eij[i]);
-        }
-#endif
     }
 };
 
@@ -952,21 +936,29 @@ public:
     // kernel entry point
     __device__ void operator()(size_t i0)
     {
-        ElemT eij[VecLen];
-        int64_t braIdx[VecLen];
-        #pragma unroll
-        for (size_t i1 = 0; i1 < VecLen; i1++) {
-            size_t i = (VecLen * i0) + i1;
-            loop_body(i, braIdx[i1], eij[i1]);
-        }
-        #pragma unroll
-        for (size_t i = 0; i < VecLen; i++) {
-            if ((braIdx[i] < 0) || (eij[i] == 0)) continue;
-            if ((i+1 < VecLen) && (braIdx[i+1] == braIdx[i])) {
-                eij[i+1] += eij[i];
+        size_t i = (VecLen * i0);
+        int64_t braIdx;
+        ElemT eij;
+        loop_body(i, braIdx, eij);
+        for (size_t i1 = 1; i1 < VecLen; i1++) {
+            i = (VecLen * i0) + i1;
+            int64_t braIdx_new;
+            ElemT eij_new;
+            loop_body(i, braIdx_new, eij_new);
+            if (braIdx == braIdx_new) {
+                if (braIdx >= 0) {
+                    eij += eij_new;
+                }
                 continue;
             }
-            atomicAdd(this->Wb + braIdx[i], eij[i]);
+            if ((braIdx >= 0) && (eij != 0)) {
+                atomicAdd(this->Wb + braIdx, eij);
+            }
+            braIdx = braIdx_new;
+            eij = eij_new;
+        }
+        if ((braIdx >= 0) && (eij != 0)) {
+            atomicAdd(this->Wb + braIdx, eij);
         }
     }
 };
@@ -1319,7 +1311,6 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_SINGLE>
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #else
-                // constexpr int VecLenS = 1;
                 constexpr int VecLenS = 2;
                 size = (size + VecLenS - 1) / VecLenS;
                 MultUnified_Vec<ElemT, SB_MULT_ALPHA, SB_MULT_SINGLE, VecLenS>
@@ -1355,7 +1346,6 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_ALPHA, SB_MULT_DOUBLE>
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #else
-                // constexpr int VecLenD = 1;
                 constexpr int VecLenD = 2;
                 size = (size + VecLenD - 1) / VecLenD;
                 MultUnified_Vec<ElemT, SB_MULT_ALPHA, SB_MULT_DOUBLE, VecLenD>
@@ -1391,7 +1381,6 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_SINGLE>
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #else
-                // constexpr int VecLenS = 1;
                 constexpr int VecLenS = 2;
                 size = (size + VecLenS - 1) / VecLenS;
                 MultUnified_Vec<ElemT, SB_MULT_BETA, SB_MULT_SINGLE, VecLenS>
@@ -1427,7 +1416,6 @@ void MultTPBThrust<ElemT>::run(
                 MultUnified<ElemT, SB_MULT_BETA, SB_MULT_DOUBLE>
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #else
-                // constexpr int VecLenD = 1;
                 constexpr int VecLenD = 2;
                 size = (size + VecLenD - 1) / VecLenD;
                 MultUnified_Vec<ElemT, SB_MULT_BETA, SB_MULT_DOUBLE, VecLenD>
@@ -1458,18 +1446,15 @@ void MultTPBThrust<ElemT>::run(
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto ci = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
-#ifndef SBD_USE_VECTORIZATION
-                size = (size + mpi_size_h - 1 - mpi_rank_h) / mpi_size_h;
-                MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
-                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-#else // #ifndef SBD_USE_VECTORIZATION
-                // constexpr int VecLen = 1;
-                constexpr int VecLen = 2;
-                MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
-                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 size = (size + mpi_size_h - 1) / mpi_size_h;
+#ifndef SBD_USE_VECTORIZATION
+                MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
+#else
+                constexpr int VecLen = 2;
                 size = (size + VecLen - 1) / VecLen;
-#endif // #ifndef SBD_USE_VECTORIZATION
+                MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
+#endif
+                kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
                 auto ci = thrust::make_transform_iterator(
                     thrust::counting_iterator<size_t>(0),
                     [=] __host__ __device__ (size_t t) {
