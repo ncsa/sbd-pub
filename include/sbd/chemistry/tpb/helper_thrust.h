@@ -429,9 +429,18 @@ public:
         //
         std::vector<size_t> permutation;
         constexpr size_t block_size = 16;
+        // constexpr size_t block_size = 32;
         printf("[%s,%d] Reordering index arrays (block_size=%zu)\n",
                __FILE__, __LINE__, block_size);
+        // NOTE:
+        // block_size is chosen to roughly match a 128-byte cache region.
+        // For size_t-based index arrays (8 bytes), block_size = 16 corresponds
+        // to 128 bytes. For int-based Cr/An arrays (4 bytes), block_size = 32
+        // would correspond to 128 bytes instead.
+        // The optimal value depends on which arrays dominate memory access
+        // in the target kernel, and may require empirical tuning.
 
+        //
         // Build a stable permutation that groups entries by KetIndex block.
         //
         // Steps:

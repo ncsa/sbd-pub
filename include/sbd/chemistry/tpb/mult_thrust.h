@@ -20,7 +20,7 @@
 // Switch between braIdx-owner filtering (original) and MPI work distribution
 #define SBD_USE_RANK_DISTRIBUTION
 #define SBD_USE_BLOCK_RANK_DISTRIBUTION
-#define SBD_USE_VECTORIZATION
+// #define SBD_USE_VECTORIZATION
 
 namespace sbd
 {
@@ -127,16 +127,27 @@ void MultTPBThrust<ElemT>::Init(
     bool collapse)
 {
     SBD_NVTX_RANGE_COLOR("Init", __LINE__);
+
 #ifdef SBD_USE_RANK_DISTRIBUTION
 #ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-    printf("[%s,%d] Block rank distribution enabled.\n", __FILE__, __LINE__);
+    printf("[%s,%d] Block rank distribution enabled\n", __FILE__, __LINE__);
 #else
-    printf("[%s,%d] Cyclic (strided) rank distribution enabled.\n", __FILE__, __LINE__);
+    printf("[%s,%d] Cyclic (strided) rank distribution enabled\n", __FILE__, __LINE__);
 #endif
 #ifdef SBD_USE_VECTORIZATION
-    printf("[%s,%d] Vectorization enabled.\n", __FILE__, __LINE__);
+    printf("[%s,%d] Vectorization enabled\n", __FILE__, __LINE__);
 #endif
 #endif
+
+#ifdef SBD_USE_32BIT_PARITY
+    printf("[%s,%d] 32-bit version of parity used\n", __FILE__, __LINE__);
+    if (bit_length_in > 32) {
+        printf("[ERROR] bit_length is too large for 32-bit version (bit_length = %llu)\n",
+               bit_length_in);
+        exit(-1);
+    }
+#endif
+
     this->bit_length_ = bit_length_in;
     this->norbs_ = norbs_in;
     this->D_size_ = (2 * norbs_in + bit_length_in - 1) / bit_length_in;
