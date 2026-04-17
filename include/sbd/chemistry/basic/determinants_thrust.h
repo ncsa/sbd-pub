@@ -15,14 +15,14 @@ protected:
     ElemT I0;
     oneInt_Thrust<ElemT> I1;
     twoInt_Thrust<ElemT> I2;
-    size_t bit_length;
+    uint32_t bit_length;
     size_t norbs;
     size_t D_size;      // the vector length of a full (i.e., alpha + beta) determinant
     size_t D_half_size; // the vector length of a half (i.e., alpha or beta) determinant
 public:
     DeterminantKernels() {}
 
-    DeterminantKernels(const size_t bit_length_in, const size_t norbs_in,
+    DeterminantKernels(const uint32_t bit_length_in, const size_t norbs_in,
                         const ElemT zero_in,
                         const oneInt_Thrust<ElemT> one_in,
                         const twoInt_Thrust<ElemT> two_in
@@ -59,13 +59,18 @@ public:
 
     inline __device__ __host__ void parity(const size_t* dets, const int start, const int end, double& sgn)
     {
-        const size_t blockStart = start / bit_length;
-        const size_t bitStart = start % bit_length;
+        const int blockStart = start / bit_length;
+        const int bitStart = start - (blockStart * bit_length);
 
-        const size_t blockEnd = end / bit_length;
-        const size_t bitEnd = end % bit_length;
+        const int blockEnd = end / bit_length;
+        const int bitEnd = end - (blockEnd * bit_length);
 
-        size_t nonZeroBits = 0; // counter for nonzero bits
+        int nonZeroBits = 0; // counter for nonzero bits
+
+        // Preserve the original parity convention, where the bit at 'start'
+        // contributes through an extra sign rule in addition to the range count.
+        // We fold that contribution into nonZeroBits here to avoid an extra branch.
+        nonZeroBits = (dets[blockStart] >> bitStart) & 1;
 
         // 1. Count bits in the start block
         if (blockStart == blockEnd) {
@@ -79,7 +84,7 @@ public:
             // 2. Handle the partial bits in the start block
             if (bitStart != 0) {
                 size_t mask = ~((size_t(1) << bitStart) - 1); // count after bitStart
-                nonZeroBits += __popcll(dets[i] & mask);
+                nonZeroBits += __popcll(dets[blockStart] & mask);
                 i++;
             }
 
@@ -96,12 +101,12 @@ public:
         }
 
         // parity estimation
-        sgn *= (-2. * (nonZeroBits % 2) + 1.);
+        sgn *= (-2. * (nonZeroBits & 1) + 1.);
 
-        // flip sign if start == 1
-        if ((dets[blockStart] >> bitStart) & 1) {
-            sgn *= -1.;
-        }
+        // // flip sign if start == 1
+        // if ((dets[blockStart] >> bitStart) & 1) {
+        //     sgn *= -1.;
+        // }
     }
 
 #ifdef SBD_USE_32BIT_PARITY
@@ -122,10 +127,10 @@ public:
     inline __device__ __host__ void parity(const uint32_t* dets, const int start, const int end, double& sgn)
     {
         const int blockStart = start / bit_length;
-        const int bitStart = start % bit_length;
+        const int bitStart = start - (blockStart * bit_length);
 
         const int blockEnd = end / bit_length;
-        const int bitEnd = end % bit_length;
+        const int bitEnd = end - (blockEnd * bit_length);
 
         int nonZeroBits = 0; // counter for nonzero bits
 
@@ -163,7 +168,7 @@ public:
         }
 
         // parity estimation
-        sgn *= (-2. * (nonZeroBits % 2) + 1.);
+        sgn *= (-2. * (nonZeroBits & 1) + 1.);
 
         // // flip sign if start == 1
         // if ((dets[blockStart*2] >> bitStart) & 1) {
@@ -174,8 +179,8 @@ public:
 
     inline __device__ __host__ bool getocc(const size_t* det, int x)
     {
-        size_t index = x / bit_length;
-        size_t bit_pos = x % bit_length;
+        int index = x / bit_length;
+        int bit_pos = x % bit_length;
         return (det[index] >> bit_pos) & 1;
     }
 

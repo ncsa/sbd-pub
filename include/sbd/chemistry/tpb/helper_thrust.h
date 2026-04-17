@@ -428,8 +428,8 @@ public:
         // avoiding a full randomization of BraIndex ordering.
         //
         std::vector<size_t> permutation;
-        constexpr size_t block_size = 16;
-        // constexpr size_t block_size = 32;
+        // constexpr size_t block_size = 16;
+        constexpr size_t block_size = 32;
         printf("[%s,%d] Reordering index arrays (block_size=%zu)\n",
                __FILE__, __LINE__, block_size);
         // NOTE:

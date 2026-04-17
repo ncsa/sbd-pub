@@ -64,7 +64,7 @@ public:
     void Init(
         const std::vector<std::vector<size_t>> &adets_in,
         const std::vector<std::vector<size_t>> &bdets_in,
-        const size_t bit_length_in,
+        const uint32_t bit_length_in,
         const size_t norbs_in,
         const size_t adet_comm_size_in,
         const size_t bdet_comm_size_in,
@@ -104,7 +104,7 @@ template <typename ElemT>
 void MultTPBThrust<ElemT>::Init(
     const std::vector<std::vector<size_t>> &adets_in,
     const std::vector<std::vector<size_t>> &bdets_in,
-    const size_t bit_length_in,
+    const uint32_t bit_length_in,
     const size_t norbs_in,
     const size_t adet_comm_size_in,
     const size_t bdet_comm_size_in,
@@ -140,10 +140,10 @@ void MultTPBThrust<ElemT>::Init(
 #endif
 
 #ifdef SBD_USE_32BIT_PARITY
-    printf("[%s,%d] 32-bit version of parity used\n", __FILE__, __LINE__);
+    printf("[%s,%d] 32-bit version of parity used (bit_length = %u)\n",
+           __FILE__, __LINE__, bit_length_in);
     if (bit_length_in > 32) {
-        printf("[ERROR] bit_length is too large for 32-bit version (bit_length = %llu)\n",
-               bit_length_in);
+        printf("[ERROR] bit_length is too large for 32-bit version\n");
         exit(-1);
     }
 #endif
