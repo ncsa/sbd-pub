@@ -57,7 +57,8 @@ public:
         }
     }
 
-    inline __device__ __host__ void parity(const size_t* dets, const int start, const int end, double& sgn)
+    template <typename SgnT = double>
+    inline __device__ __host__ void parity(const size_t* dets, const int start, const int end, SgnT& sgn)
     {
         const int blockStart = start / bit_length;
         const int bitStart = start - (blockStart * bit_length);
@@ -101,7 +102,7 @@ public:
         }
 
         // parity estimation
-        sgn *= (-2. * (nonZeroBits & 1) + 1.);
+        sgn *= (SgnT(-2.) * (nonZeroBits & 1) + SgnT(1.));
 
         // // flip sign if start == 1
         // if ((dets[blockStart] >> bitStart) & 1) {
@@ -124,7 +125,8 @@ public:
     // Constraint:
     //   bit_length <= 32
     //
-    inline __device__ __host__ void parity(const uint32_t* dets, const int start, const int end, double& sgn)
+    template <typename SgnT = double>
+    inline __device__ __host__ void parity(const uint32_t* dets, const int start, const int end, SgnT& sgn)
     {
         const int blockStart = start / bit_length;
         const int bitStart = start - (blockStart * bit_length);
@@ -168,7 +170,7 @@ public:
         }
 
         // parity estimation
-        sgn *= (-2. * (nonZeroBits & 1) + 1.);
+        sgn *= (SgnT(-2.) * (nonZeroBits & 1) + SgnT(1.));
 
         // // flip sign if start == 1
         // if ((dets[blockStart*2] >> bitStart) & 1) {
@@ -206,7 +208,7 @@ public:
 
     inline __device__ __host__ ElemT OneExcite(const size_t* det, int i, int a)
     {
-        double sgn = 1.0;
+        float sgn = 1.0;
 #ifdef SBD_USE_32BIT_PARITY
         parity((const uint32_t*)det, std::min(i, a), std::max(i, a), sgn);
 #else
@@ -229,7 +231,7 @@ public:
 
     inline __device__ __host__ ElemT TwoExcite(const size_t* det, int i, int j, int a, int b)
     {
-        double sgn = 1.0;
+        float sgn = 1.0;
         int I = std::min(i, j);
         int J = std::max(i, j);
         int A = std::min(a, b);
