@@ -180,15 +180,15 @@ namespace sbd {
 
 #ifdef USE_OMP_OFFLOAD
     size_t Tmax = T.size();
-    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, b_comm);
 
     // define Wb, T, and R pointers
     ElemT * Wb_ptr = Wb.data();
     size_t  Wb_size = Wb.size();
 
-    ElemT * T_ptr = T.data();
     size_t  T_size = T.size();
     T.resize(Tmax);
+    ElemT * T_ptr = T.data();
 
     R.resize(Tmax);
     ElemT * R_ptr = R.data();
@@ -581,10 +581,7 @@ namespace sbd {
 #pragma omp target teams distribute parallel for
         for (size_t i = 0; i < T_size; i++) R_ptr[i] = T_ptr[i];
         R_size = T_size;
-#pragma omp target data use_device_ptr(R_ptr, T_ptr)
-        {
         Mpi2dSlide(R_ptr, R_size, T_ptr, T_size, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
-        }
 #else
 	R.resize(T.size());
 	std::memcpy(R.data(),T.data(),T.size()*sizeof(ElemT));

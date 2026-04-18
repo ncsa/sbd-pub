@@ -53,12 +53,11 @@ namespace sbd {
       braBetaEnd    = helper[0].braBetaEnd;
     }
     size_t braSize = braAlphaSize*braBetaSize;
-    size_t num_threads = 1;
+    size_t num_threads = omp_get_max_threads();
     hii.resize(braSize,ElemT(0.0));
 
 #pragma omp parallel
     {
-      num_threads = omp_get_num_threads();
       auto det = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
       
 #pragma omp for
@@ -320,13 +319,12 @@ namespace sbd {
     size_t braBetaSize = braBetaEnd-braBetaStart;
     size_t braSize = braAlphaSize*braBetaSize;
     
-    size_t num_threads = 1;
+    size_t num_threads = omp_get_max_threads();
     
     hii.resize(braSize,ElemT(0.0));
 
 #pragma omp parallel
     {
-      num_threads = omp_get_num_threads();
       auto det = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
       
 #pragma omp for

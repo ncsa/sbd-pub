@@ -85,7 +85,7 @@ namespace sbd {
     }
 
     size_t Tmax = T.size();
-    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, b_comm);
 
     size_t braAlphaStart = helper[0].braAlphaStart;
     size_t braBetaStart  = helper[0].braBetaStart;
@@ -113,9 +113,9 @@ namespace sbd {
     const ElemT * W_ptr = W.data();
     size_t Wsize = W.size();
 
-    ElemT * T_ptr = T.data();
     size_t Tsize = T.size();
     T.resize(Tmax);
+    ElemT * T_ptr = T.data();
 
     R.resize(Tmax);
     ElemT * R_ptr = R.data();
@@ -346,10 +346,7 @@ namespace sbd {
     #pragma omp target teams distribute parallel for
         for (size_t i = 0; i < Tsize; i++) R_ptr[i] = T_ptr[i];
         Rsize = Tsize;
-    #pragma omp target data use_device_ptr(R_ptr, T_ptr)
-        {
         Mpi2dSlide(R_ptr, Rsize, T_ptr, Tsize, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
-        }
       }
 	
     } // end for(size_t task=0; task < helper.size(); task++)
