@@ -560,6 +560,7 @@ namespace sbd {
       int new_id = id + mpi_color * mpi_size_half;
       MPI_Comm_split(comm,mpi_color,mpi_key,&new_comm);
       mpi_sort_bitarray(config,config_begin,config_end,index_begin,index_end,total_bit_length,bit_length,new_comm,new_id);
+      MPI_Comm_free(&new_comm);
 
 #ifdef SBD_DEBUG_BIT
       // for(int rank=0; rank < mpi_size; rank++) {
