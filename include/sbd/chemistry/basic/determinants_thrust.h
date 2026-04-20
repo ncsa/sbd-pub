@@ -141,32 +141,30 @@ public:
         // We fold that contribution into nonZeroBits here to avoid an extra branch.
         nonZeroBits = (dets[blockStart*2] >> bitStart) & 1;
 
-        // 1. Count bits in the start block
-        if (blockStart == blockEnd) {
-            // the case where start and end is same block
-            // uint32_t mask = ((uint32_t(1) << bitEnd) - 1) ^ ((uint32_t(1) << bitStart) - 1);
-            uint32_t mask = ((uint32_t(1) << (bitEnd - bitStart)) - 1) << bitStart;
-            nonZeroBits += __popc(dets[blockStart*2] & mask);
+        const bool same_block = (blockStart == blockEnd);
+        const uint32_t mask_start = (uint32_t(1) << bitStart) - 1;
+        const uint32_t mask_end = (uint32_t(1) << bitEnd) - 1;
+        uint32_t mask = ~mask_start;
+        int i = blockStart;
+
+        // 1. Count bits in the start block.
+        // If start and end are in the same block, restrict the mask further
+        // so that only bits in [bitStart, bitEnd) are counted here.
+        if (same_block) {
+            mask &= mask_end;
         }
-        else {
-            int i = blockStart;
-            // 2. Handle the partial bits in the start block
-            if (bitStart != 0) {
-                uint32_t mask = ~((uint32_t(1) << bitStart) - 1); // count after bitStart
-                nonZeroBits += __popc(dets[blockStart*2] & mask);
-                i++;
-            }
+        nonZeroBits += __popc(dets[i*2] & mask);
+        i++;
 
-            // 3. Handle full blocks in between
-            for (; i < blockEnd; i++) {
-                nonZeroBits += __popc(dets[i*2]);
-            }
+        // 2. Count bits in the full blocks in between.
+        while (i < blockEnd) {
+            nonZeroBits += __popc(dets[i*2]);
+            i++;
+        }
 
-            // 4. Handle the partial bits in the end block
-            if (bitEnd != 0) {
-                uint32_t mask = (uint32_t(1) << bitEnd) - 1; // count before bitEnd
-                nonZeroBits += __popc(dets[blockEnd*2] & mask);
-            }
+        // 3. Count bits in the end block when it differs from the start block.
+        if (!same_block) {
+            nonZeroBits += __popc(dets[i*2] & mask_end);
         }
 
         // parity estimation

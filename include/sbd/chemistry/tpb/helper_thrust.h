@@ -416,16 +416,26 @@ public:
 
 #ifdef SBD_REORDER_INDEX_ARRAY
         //
-        // Reorder excitation entries using a block-based permutation based on
-        // KetIndex.
+        // Reorder excitation entries using a block-based permutation
+        // derived from KetIndex.
         //
-        // We do not fully sort by KetIndex, because that would make BraIndex
-        // effectively random, which is not desirable for performance.
+        // Motivation:
+        //   - Accesses based on BraIndex are already relatively local,
+        //     since SinglesFrom{Alpha,Beta}BraIndex are sorted.
+        //   - In contrast, accesses derived from KetIndex (e.g., T[ketIdx])
+        //     tend to be random and can hurt memory performance.
         //
-        // Instead, we group entries by KetIndex blocks
+        // A full sort by KetIndex is not used, because it would destroy
+        // the locality of BraIndex and lead to more scattered accesses
+        // for DetI / Wb updates.
+        //
+        // Instead, we apply a block-based grouping:
+        //
         //     block_id = KetIndex / block_size
-        // so that entries in the same block are stored contiguously, while
-        // avoiding a full randomization of BraIndex ordering.
+        //
+        // Entries in the same block are placed contiguously, improving
+        // locality of KetIndex-derived accesses while preserving some
+        // of the original ordering (and thus BraIndex locality).
         //
         std::vector<size_t> permutation;
         // constexpr size_t block_size = 16;
@@ -433,12 +443,22 @@ public:
         printf("[%s,%d] Reordering index arrays (block_size=%zu)\n",
                __FILE__, __LINE__, block_size);
         // NOTE:
-        // block_size is chosen to roughly match a 128-byte cache region.
-        // For size_t-based index arrays (8 bytes), block_size = 16 corresponds
-        // to 128 bytes. For int-based Cr/An arrays (4 bytes), block_size = 32
-        // would correspond to 128 bytes instead.
-        // The optimal value depends on which arrays dominate memory access
-        // in the target kernel, and may require empirical tuning.
+        // block_size controls the trade-off between improving locality
+        // of KetIndex-based accesses and preserving BraIndex locality.
+        //
+        // - Smaller block_size:
+        //     preserves more of the original ordering (better for BraIndex),
+        //     but gives limited improvement for KetIndex locality.
+        //
+        // - Larger block_size:
+        //     improves grouping of nearby ket indices (better for T[ketIdx]),
+        //     but increases the risk of disrupting BraIndex locality.
+        //
+        // Cr/An arrays are accessed in a streaming manner and are not
+        // significantly affected by this permutation.
+        //
+        // The optimal value is workload- and architecture-dependent,
+        // and should be determined empirically.
 
         //
         // Build a stable permutation that groups entries by KetIndex block.

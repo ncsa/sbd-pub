@@ -405,7 +405,6 @@ public:
         size_t j = i / helper.size_single_beta;  // 0 .. size_single_alpha-1
         size_t k = i % helper.size_single_beta;  // 0 .. size_single_beta-1
         if (j >= helper.size_single_alpha) return;
-        if (k >= helper.size_single_beta) return;
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
         size_t ja = helper.SinglesFromAlphaKetIndex[j];
         size_t ib = helper.SinglesFromBetaBraIndex[k];
@@ -428,7 +427,7 @@ public:
             eij *= this->T[ketIdx];
         }
     }        
-    
+
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
@@ -469,8 +468,8 @@ public:
     __device__ inline void loop_body(size_t i, int64_t& braIdx, ElemT& eij) {
         braIdx = -1;
         eij = 0;
-        size_t j = i / helper.size_single_beta;
-        size_t k = i % helper.size_single_beta;
+        size_t j = i / helper.size_single_beta;  // 0 .. size_single_alpha-1
+        size_t k = i % helper.size_single_beta;  // 0 .. size_single_beta-1
         if (j >= helper.size_single_alpha) return;
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
         size_t ja = helper.SinglesFromAlphaKetIndex[j];
