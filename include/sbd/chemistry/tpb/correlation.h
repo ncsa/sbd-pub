@@ -49,7 +49,7 @@ namespace sbd {
     for (int i = 0; i < 2*norb2; i++)  oneBody[i] = 0.0;
     for (int i = 0; i < 4*norb4; i++)  twoBody[i] = 0.0;
 
-#pragma omp target enter data map(to:oneBody[0:2*norb2], twoBody[0:4*norb4])
+#pragma omp target enter data map(to: oneBody[0:2*norb2], twoBody[0:4*norb4])
 
     int mpi_rank_h = 0;
     int mpi_size_h = 1;
@@ -84,6 +84,9 @@ namespace sbd {
 		 -helper[0].adetShift,-helper[0].bdetShift,b_comm);
     }
 
+    size_t Tmax = T.size();
+    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, b_comm);
+
     size_t braAlphaStart = helper[0].braAlphaStart;
     size_t braBetaStart  = helper[0].braBetaStart;
     size_t braAlphaEnd   = helper[0].braAlphaEnd;
@@ -106,13 +109,22 @@ namespace sbd {
       for (size_t d = 0; d < detSize; d++) Bdet[d + (ib - braBetaStart)*detSize] = ptr[d];
     }
 
+    // use data pointers instead of std::vector objects
     const ElemT * W_ptr = W.data();
     size_t Wsize = W.size();
 
-#pragma omp target enter data map(to:W_ptr[0:Wsize])
+    size_t Tsize = T.size();
+    T.resize(Tmax);
+    ElemT * T_ptr = T.data();
+
+    R.resize(Tmax);
+    ElemT * R_ptr = R.data();
+    size_t Rsize = Tsize;
+
+#pragma omp target enter data map(to: W_ptr[0:Wsize], T_ptr[0:Tmax]) map(alloc:R_ptr[0:Tmax])
 
     if( mpi_rank_t == 0 ) {
-#pragma omp target teams distribute parallel for collapse(2) map(to:Adet[0:AdetSize], Bdet[0:BdetSize])
+#pragma omp target teams distribute parallel for collapse(2) map(to: Adet[0:AdetSize], Bdet[0:BdetSize])
       for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
         for(size_t ib = braBetaStart; ib < braBetaEnd; ib++) {
           size_t DetT[SBD_MAX_DETSIZE];
@@ -193,10 +205,7 @@ namespace sbd {
       size_t singles_beta_cran_total = helper[task].SinglesBetaCrAn_flat.size();
       size_t doubles_beta_cran_total = helper[task].DoublesBetaCrAn_flat.size();
 
-      ElemT * T_ptr = T.data();
-      size_t Tsize = T.size();
-
-#pragma omp target enter data map(to:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize])
+#pragma omp target enter data map(to: Adet[0:AdetSize], Bdet[0:BdetSize])
       
 	if( helper[task].taskType == 2 ) { // beta range are same
 	    
@@ -326,7 +335,7 @@ namespace sbd {
 	    } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	  } // if ( helper[task].taskType == 0)
 
-#pragma omp target exit data map(delete:Adet[0:AdetSize], Bdet[0:BdetSize], T_ptr[0:Tsize])
+#pragma omp target exit data map(delete: Adet[0:AdetSize], Bdet[0:BdetSize])
         // free data structures for alpha and beta bit-strings
         free(Adet);
         free(Bdet);
@@ -334,9 +343,10 @@ namespace sbd {
       if( helper[task].taskType == 0 && task != helper.size()-1 ) {
 	int adetslide = helper[task].adetShift-helper[task+1].adetShift;
 	int bdetslide = helper[task].bdetShift-helper[task+1].bdetShift;
-	R.resize(T.size());
-	std::memcpy(R.data(),T.data(),T.size()*sizeof(ElemT));
-	Mpi2dSlide(R,T,adet_comm_size,bdet_comm_size,adetslide,bdetslide,b_comm);
+    #pragma omp target teams distribute parallel for
+        for (size_t i = 0; i < Tsize; i++) R_ptr[i] = T_ptr[i];
+        Rsize = Tsize;
+        Mpi2dSlide(R_ptr, Rsize, T_ptr, Tsize, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
       }
 	
     } // end for(size_t task=0; task < helper.size(); task++)
@@ -344,7 +354,7 @@ namespace sbd {
 #pragma omp target exit data map(delete:W_ptr[0:Wsize])
 
 // transfer oneBody and twoBody arrays back to the CPU
-#pragma omp target exit data map(from:oneBody[0:2*norb2], twoBody[0:4*norb4])
+#pragma omp target exit data map(from: oneBody[0:2*norb2], twoBody[0:4*norb4]) map(delete: W_ptr[0:Wsize], T_ptr[0:Tmax], R_ptr[0:Tmax])
 
     for(int s=0; s < 2; s++) {
       // store back to std::vector

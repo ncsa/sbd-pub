@@ -178,6 +178,25 @@ namespace sbd {
 	      << mpi_rank_h << "," << mpi_rank_b << "," << mpi_rank_t << ")" << std::endl;
 #endif
 
+#ifdef USE_OMP_OFFLOAD
+    size_t Tmax = T.size();
+    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, b_comm);
+
+    // define Wb, T, and R pointers
+    ElemT * Wb_ptr = Wb.data();
+    size_t  Wb_size = Wb.size();
+
+    size_t  T_size = T.size();
+    T.resize(Tmax);
+    ElemT * T_ptr = T.data();
+
+    R.resize(Tmax);
+    ElemT * R_ptr = R.data();
+    size_t  R_size = T_size;
+
+#pragma omp target enter data map(to: T_ptr[0:Tmax], Wb_ptr[0:Wb_size]) map(alloc: R_ptr[0:Tmax])
+#endif
+
     double time_slid = 0.0;
     for(size_t task=0; task < helper.size(); task++) {
 
@@ -280,13 +299,7 @@ namespace sbd {
         for (size_t d = 0; d < detSize; d++) Bdets[d + (ib - ibBeg)*detSize] = ptr[d];
       }
 
-      // Wb and T pointers
-      ElemT *Wb_ptr = Wb.data();
-      const ElemT *T_ptr = T.data();
-      size_t Wb_size = Wb.size();
-      size_t T_size = T.size();
-
-      #pragma omp target enter data map(to: T_ptr[0 : T_size], Wb_ptr[0 : Wb_size], Adets[0:AdetSize], Bdets[0:BdetSize])
+      #pragma omp target enter data map(to: Adets[0:AdetSize], Bdets[0:BdetSize])
 						
       if( helper[task].taskType == 2 ) {
 	#pragma omp target teams distribute parallel for collapse(2)            \
@@ -418,7 +431,7 @@ namespace sbd {
 	} // end for ia
       } // end taskType == 0
 
-      #pragma omp target exit data map(from: T_ptr[0: T_size], Wb_ptr[0 : Wb_size]) map(delete: Adets[0:AdetSize], Bdets[0:BdetSize])
+      #pragma omp target exit data map(delete: Adets[0:AdetSize], Bdets[0:BdetSize])
       // free the size_t arrays for alpha and beta bit-strings
       free(Adets);
       free(Bdets);
@@ -563,10 +576,17 @@ namespace sbd {
 #endif
 	int adetslide = helper[task].adetShift-helper[task+1].adetShift;
 	int bdetslide = helper[task].bdetShift-helper[task+1].bdetShift;
+	auto time_slid_start = std::chrono::high_resolution_clock::now();
+#ifdef USE_OMP_OFFLOAD
+#pragma omp target teams distribute parallel for
+        for (size_t i = 0; i < T_size; i++) R_ptr[i] = T_ptr[i];
+        R_size = T_size;
+        Mpi2dSlide(R_ptr, R_size, T_ptr, T_size, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
+#else
 	R.resize(T.size());
 	std::memcpy(R.data(),T.data(),T.size()*sizeof(ElemT));
-	auto time_slid_start = std::chrono::high_resolution_clock::now();
 	Mpi2dSlide(R,T,adet_comm_size,bdet_comm_size,adetslide,bdetslide,b_comm);
+#endif
 	auto time_slid_end = std::chrono::high_resolution_clock::now();
 	auto time_slid_count = std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end-time_slid_start).count();
 	time_slid += 1.0e-6 * time_slid_count;
@@ -574,6 +594,10 @@ namespace sbd {
 
     } // end for(size_t task=0; task < helper.size(); task++)
     auto time_mult_end = std::chrono::high_resolution_clock::now();
+
+#ifdef USE_OMP_OFFLOAD
+#pragma omp target exit data map(from: Wb_ptr[0:Wb_size]) map(delete: T_ptr[0:Tmax], R_ptr[0:Tmax])
+#endif
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
     MpiAllreduce(Wb,MPI_SUM,t_comm);
