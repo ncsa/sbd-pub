@@ -12,52 +12,9 @@
 #include "sbd/framework/nvtx.h"
 
 #ifdef SBD_USE_NCCL
-#include <nccl.h>
-#include <type_traits>
-
-template <typename T>
-struct NcclDataType;
-
-template <>
-struct NcclDataType<float> {
-    static constexpr ncclDataType_t value = ncclFloat;
-};
-
-template <>
-struct NcclDataType<double> {
-    static constexpr ncclDataType_t value = ncclDouble;
-};
-
-template <>
-struct NcclDataType<int> {
-    static constexpr ncclDataType_t value = ncclInt;
-};
-
-template <>
-struct NcclDataType<int64_t> {
-    static constexpr ncclDataType_t value = ncclInt64;
-};
-
-#define CHECK_NCCL(cmd) \
-    do {                                                        \
-        ncclResult_t r = cmd;                                   \
-        if (r != ncclSuccess) {                                 \
-            fprintf(stderr, "NCCL error %s at %s:%d\n",         \
-                    ncclGetErrorString(r), __FILE__, __LINE__); \
-            std::exit(EXIT_FAILURE);                            \
-        }                                                       \
-    } while (0)
-
-#define CHECK_CUDA(cmd) \
-    do {                                                        \
-        cudaError_t e = cmd;                                    \
-        if (e != cudaSuccess) {                                 \
-            fprintf(stderr, "CUDA error %s at %s:%d\n",         \
-                    cudaGetErrorString(e), __FILE__, __LINE__); \
-            std::exit(EXIT_FAILURE);                            \
-        }                                                       \
-    } while (0)
-#endif // #ifdef SBD_USE_NCCL
+#include "sbd/framework/cuda_utility.h"
+#include "sbd/framework/nccl_utility.h"
+#endif
 
 namespace sbd
 {
@@ -418,13 +375,11 @@ public:
         bool recv = false;
         if (send_size > 0) {
             MPI_Status st;
-
             SBD_NVTX_RANGE_COLOR("MPI_Wait", 0);
             MPI_Wait(&req_send, &st);
         }
         if (recv_size > 0) {
             MPI_Status st;
-
             SBD_NVTX_RANGE_COLOR("MPI_Wait", 0);
             MPI_Wait(&req_recv, &st);
             recv = true;
@@ -439,89 +394,6 @@ public:
         return recv;
     }
 };
-
-#ifdef SBD_USE_NCCL
-void init_nccl_comm(ncclComm_t *nccl_comm, MPI_Comm mpi_comm)
-{
-    SBD_NVTX_RANGE_COLOR("init_nccl_comm", __LINE__);
-    ncclUniqueId id;
-    CHECK_NCCL(ncclGetUniqueId(&id));
-    {
-        SBD_NVTX_RANGE_COLOR("MPI_Bcast", 0);
-        MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, mpi_comm);
-    }
-    int mpi_size; MPI_Comm_size(mpi_comm, &mpi_size);
-    int mpi_rank; MPI_Comm_rank(mpi_comm, &mpi_rank);
-    CHECK_NCCL(ncclCommInitRank(nccl_comm, mpi_size, id, mpi_rank));
-}
-
-template <typename ElemT>
-void nccl_allreduce(ElemT* buff, size_t count, ncclRedOp_t nccl_op, ncclComm_t nccl_comm, cudaStream_t stream = 0)
-{
-    SBD_NVTX_RANGE_COLOR("ncclAllReduce", 0);
-    CHECK_NCCL(ncclAllReduce(buff, buff, count, NcclDataType<ElemT>::value, nccl_op, nccl_comm, stream));
-    // CHECK_CUDA(cudaStreamSynchronize(stream));
-}
-
-template <typename ElemT>
-void nccl_allreduce(thrust::device_vector<ElemT> &A, ncclRedOp_t nccl_op, ncclComm_t nccl_comm, cudaStream_t stream = 0)
-{
-    SBD_NVTX_RANGE_COLOR("nccl_allreduce", __LINE__);
-    ElemT *buff = thrust::raw_pointer_cast(A.data());
-    size_t count = A.size();
-    nccl_allreduce(buff, count, nccl_op, nccl_comm, stream);
-}
-
-template <typename ElemT>
-void nccl_allreduce2(thrust::device_vector<ElemT>& A,
-                     thrust::device_vector<ElemT>& B,
-                     ncclRedOp_t nccl_op,
-                     ncclComm_t nccl_comm,
-                     void* ws_ptr = nullptr,
-                     cudaStream_t stream = 0)
-{
-    SBD_NVTX_RANGE_COLOR("nccl_allreduce2", __LINE__);
-    const size_t nA = A.size();
-    const size_t nB = B.size();
-    const size_t nTotal = nA + nB;
-    if (nTotal == 0) return;
-
-    thrust::device_vector<ElemT> ws_local;
-    ElemT* packed_ptr = nullptr;
-    if (ws_ptr == nullptr) {
-        ws_local.resize(nTotal);
-        packed_ptr = thrust::raw_pointer_cast(ws_local.data());
-    } else {
-        packed_ptr = static_cast<ElemT*>(ws_ptr);
-    }
-    ElemT* A_ptr = nA ? thrust::raw_pointer_cast(A.data()) : nullptr;
-    ElemT* B_ptr = nB ? thrust::raw_pointer_cast(B.data()) : nullptr;
-
-    // pack
-    if (nA > 0) {
-        CHECK_CUDA(cudaMemcpyAsync(packed_ptr, A_ptr, sizeof(ElemT) * nA,
-                                   cudaMemcpyDeviceToDevice, stream));
-    }
-    if (nB > 0) {
-        CHECK_CUDA(cudaMemcpyAsync(packed_ptr + nA, B_ptr, sizeof(ElemT) * nB,
-                                   cudaMemcpyDeviceToDevice, stream));
-    }
-
-    // single allreduce on packed buffer
-    nccl_allreduce(packed_ptr, nTotal, nccl_op, nccl_comm, stream);
-
-    // unpack
-    if (nA > 0) {
-        CHECK_CUDA(cudaMemcpyAsync(A_ptr, packed_ptr, sizeof(ElemT) * nA,
-                            cudaMemcpyDeviceToDevice, stream));
-    }
-    if (nB > 0) {
-        CHECK_CUDA(cudaMemcpyAsync(B_ptr, packed_ptr + nA, sizeof(ElemT) * nB,
-                                   cudaMemcpyDeviceToDevice, stream));
-    }
-    // CHECK_CUDA(cudaStreamSynchronize(stream));
-}
-#endif // #ifdef SBD_USE_NCCL
 
 }
 

@@ -1,16 +1,21 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef SBD_FRAMEWORK_CUBLAS_UTILITY_H
 #define SBD_FRAMEWORK_CUBLAS_UTILITY_H
 
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <stdexcept>
-#include <string>
 #include <type_traits>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
-#include <cuComplex.h>
 
 #include <thrust/device_vector.h>
-#include <thrust/complex.h>
 
 namespace sbd {
 
@@ -35,13 +40,18 @@ inline const char* CublasStatusToString(cublasStatus_t status)
     }
 }
 
-inline void CheckCublas(cublasStatus_t status, const char* msg)
-{
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error(
-            std::string(msg) + " (" + CublasStatusToString(status) + ")");
-    }
-}
+#ifndef SBD_CHECK_CUBLAS
+#define SBD_CHECK_CUBLAS(cmd)                                             \
+    do {                                                                  \
+        cublasStatus_t s = (cmd);                                         \
+        if (s != CUBLAS_STATUS_SUCCESS) {                                 \
+            std::fprintf(stderr,                                          \
+                "cuBLAS error %s at %s:%d\n",                             \
+                ::sbd::CublasStatusToString(s), __FILE__, __LINE__);      \
+            std::exit(EXIT_FAILURE);                                      \
+        }                                                                 \
+    } while (0)
+#endif
 
 class CublasContext
 {
@@ -51,10 +61,9 @@ private:
 public:
     CublasContext() : handle_(nullptr)
     {
-        CheckCublas(cublasCreate(&handle_), "cublasCreate failed");
-        CheckCublas(
-            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST),
-            "cublasSetPointerMode(HOST) failed");
+        SBD_CHECK_CUBLAS(cublasCreate(&handle_));
+        SBD_CHECK_CUBLAS(
+            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST));
     }
 
     ~CublasContext()
@@ -91,23 +100,19 @@ public:
 
     void set_pointer_mode_host() const
     {
-        CheckCublas(
-            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST),
-            "cublasSetPointerMode(HOST) failed");
+        SBD_CHECK_CUBLAS(
+            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST));
     }
 
     void set_pointer_mode_device() const
     {
-        CheckCublas(
-            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_DEVICE),
-            "cublasSetPointerMode(DEVICE) failed");
+        SBD_CHECK_CUBLAS(
+            cublasSetPointerMode(handle_, CUBLAS_POINTER_MODE_DEVICE));
     }
 
     void set_stream(cudaStream_t stream) const
     {
-        CheckCublas(
-            cublasSetStream(handle_, stream),
-            "cublasSetStream failed");
+        SBD_CHECK_CUBLAS(cublasSetStream(handle_, stream));
     }
 };
 
@@ -122,14 +127,9 @@ inline cublasHandle_t GetCublasHandle()
     return GetCublasContext().get();
 }
 
-/* -------------------------------------------------------------------------- */
-/* Dot wrappers                                                                */
-/* -------------------------------------------------------------------------- */
-
 template <typename ElemT>
 struct CublasDot;
 
-/* real */
 template <>
 struct CublasDot<float>
 {
@@ -160,53 +160,6 @@ struct CublasDot<double>
     }
 };
 
-/*
- * complex:
- */
-template <>
-struct CublasDot<thrust::complex<float>>
-{
-    static cublasStatus_t call(cublasHandle_t handle,
-                               int n,
-                               const thrust::complex<float>* x,
-                               int incx,
-                               const thrust::complex<float>* y,
-                               int incy,
-                               thrust::complex<float>* result)
-    {
-        return cublasCdotu(
-            handle,
-            n,
-            reinterpret_cast<const cuComplex*>(x), incx,
-            reinterpret_cast<const cuComplex*>(y), incy,
-            reinterpret_cast<cuComplex*>(result));
-    }
-};
-
-template <>
-struct CublasDot<thrust::complex<double>>
-{
-    static cublasStatus_t call(cublasHandle_t handle,
-                               int n,
-                               const thrust::complex<double>* x,
-                               int incx,
-                               const thrust::complex<double>* y,
-                               int incy,
-                               thrust::complex<double>* result)
-    {
-        return cublasZdotu(
-            handle,
-            n,
-            reinterpret_cast<const cuDoubleComplex*>(x), incx,
-            reinterpret_cast<const cuDoubleComplex*>(y), incy,
-            reinterpret_cast<cuDoubleComplex*>(result));
-    }
-};
-
-/* -------------------------------------------------------------------------- */
-/* Device vector helpers                                                       */
-/* -------------------------------------------------------------------------- */
-
 template <typename T>
 inline const T* raw_ptr(const thrust::device_vector<T>& v)
 {
@@ -218,10 +171,6 @@ inline T* raw_ptr(thrust::device_vector<T>& v)
 {
     return thrust::raw_pointer_cast(v.data());
 }
-
-/* -------------------------------------------------------------------------- */
-/* High-level dot API                                                          */
-/* -------------------------------------------------------------------------- */
 
 template <typename ElemT>
 inline ElemT Dot(const thrust::device_vector<ElemT>& x,
@@ -242,14 +191,13 @@ inline ElemT Dot(const thrust::device_vector<ElemT>& x,
     ctx.set_stream(stream);
     ctx.set_pointer_mode_host();
     ElemT result{};
-    CheckCublas(
+    SBD_CHECK_CUBLAS(
         CublasDot<ElemT>::call(
             ctx.get(),
             static_cast<int>(x.size()),
             raw_ptr(x), 1,
             raw_ptr(y), 1,
-            &result),
-        "cuBLAS dot failed");
+            &result));
 
     return result;
 }
@@ -273,14 +221,13 @@ inline void Dot(const thrust::device_vector<ElemT>& x,
     auto& ctx = GetCublasContext();
     ctx.set_stream(stream);
     ctx.set_pointer_mode_device();
-    CheckCublas(
+    SBD_CHECK_CUBLAS(
         CublasDot<ElemT>::call(
             ctx.get(),
             static_cast<int>(x.size()),
             raw_ptr(x), 1,
             raw_ptr(y), 1,
-            result_dev_ptr),
-        "cuBLAS dot failed");
+            result_dev_ptr));
 }
 
 } // namespace sbd

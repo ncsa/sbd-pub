@@ -262,7 +262,8 @@ namespace sbd {
           thrust::device_vector<double> A(W.size(), 0.0);
           nccl_allreduce(A, ncclSum, a_nccl_comm);
       }
-      fprintf(stderr, "# NCCL communicators have been created.\n");
+      printf("[%s,%d] NCCL communicators have been created.n",
+             __FILE__, __LINE__);
 #endif
 
 #ifdef SBD_THRUST

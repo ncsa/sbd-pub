@@ -10,6 +10,7 @@
 #endif
 
 #include "sbd/framework/nvtx.h"
+#include "sbd/framework/cuda_utility.h"
 
 #include "sbd/framework/jacobi.h"
 #ifdef __CUDACC__
@@ -385,8 +386,8 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
     RealT eps_reg = 1.0e-12;
     ElemT *C, *HC;
-    CHECK_CUDA(cudaMalloc(&C, sizeof(ElemT)*num_block*W.size()));
-    CHECK_CUDA(cudaMalloc(&HC, sizeof(ElemT)*num_block*W.size()));
+    SBD_CHECK_CUDA(cudaMalloc(&C, sizeof(ElemT)*num_block*W.size()));
+    SBD_CHECK_CUDA(cudaMalloc(&HC, sizeof(ElemT)*num_block*W.size()));
     thrust::device_vector<ElemT> C_tmp(W.size());
     thrust::device_vector<ElemT> HC_tmp(W.size());
     thrust::device_vector<ElemT> R(W.size());
@@ -464,14 +465,14 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             auto step_start = std::chrono::high_resolution_clock::now();
 
             // Copy C_tmp back to C[ib]
-            CHECK_CUDA(cudaMemcpyAsync(C + (W.size() * ib),
-                                       thrust::raw_pointer_cast(C_tmp.data()),
-                                       sizeof(ElemT) * W.size(),
-                                       cudaMemcpyDeviceToDevice, stream));
+            SBD_CHECK_CUDA(cudaMemcpyAsync(C + (W.size() * ib),
+                                           thrust::raw_pointer_cast(C_tmp.data()),
+                                           sizeof(ElemT) * W.size(),
+                                           cudaMemcpyDeviceToDevice, stream));
 
             // Zero(HC[ib]);
             thrust::fill(policy_nosync, HC_tmp.begin(), HC_tmp.end(), 0);
-            CHECK_CUDA(cudaStreamSynchronize(stream));
+            SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
 
             {
                 SBD_NVTX_RANGE_COLOR("mult.run", __LINE__);
@@ -486,10 +487,10 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                                      thrust::raw_pointer_cast(workspace.data()), stream);
 
             // Copy HC_tmp back to HC[ib]
-            CHECK_CUDA(cudaMemcpyAsync(HC + (W.size() * ib),
-                                       thrust::raw_pointer_cast(HC_tmp.data()),
-                                       sizeof(ElemT) * W.size(),
-                                       cudaMemcpyDeviceToDevice, stream));
+            SBD_CHECK_CUDA(cudaMemcpyAsync(HC + (W.size() * ib),
+                                           thrust::raw_pointer_cast(HC_tmp.data()),
+                                           sizeof(ElemT) * W.size(),
+                                           cudaMemcpyDeviceToDevice, stream));
 
             for (int jb = 0; jb <= ib; jb++) {
                 H[jb + nb * ib] = res[jb];
@@ -541,7 +542,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 #endif
             }
 #else // #ifdef SBD_USE_NCCL
-            CHECK_CUDA(cudaStreamSynchronize(stream));
+            SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
             if (mpi_size_t > 1) {
                 MpiAllreduce(W_dev, MPI_SUM, mult.t_comm());
                 MpiAllreduce(R, MPI_SUM, mult.t_comm());
@@ -673,7 +674,7 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             }
 
         } // end for(int ib=0; ib < nb; ib++)
-        CHECK_CUDA(cudaStreamSynchronize(stream));
+        SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
 
         if (!do_continue) {
             break;
@@ -690,8 +691,8 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
     free(U);
     free(E);
 
-    CHECK_CUDA(cudaFree(C));
-    CHECK_CUDA(cudaFree(HC));
+    SBD_CHECK_CUDA(cudaFree(C));
+    SBD_CHECK_CUDA(cudaFree(HC));
 }
 
 #endif // #ifndef SBD_USE_CUBLAS

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef SBD_FRAMEWORK_NVTX_H_
 #define SBD_FRAMEWORK_NVTX_H_
 

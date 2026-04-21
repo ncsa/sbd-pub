@@ -39,18 +39,22 @@ SBD_PATH=../..
 # CCFLAGS= -std=c++17 -Kfast,openmp -DSBD_TRADMODE
 # SYSLIB= -SSL2
 
-# **** NVHPC 25.7 ****
+# **** NVHPC ****
 CCCOM=mpic++
 CCFLAGS= -std=c++17 -mp -cuda -fast -Minfo=accel --diag_suppress declared_but_not_referenced,set_but_not_used -fmax-errors=0 -I/usr/local/cuda/include -DSBD_THRUST
+SYSLIB= -llapack -lblas
 # CCFLAGS+= -DNDEBUG
 # CCFLAGS+= -acc=gpu -gpu=maxregcount:64,ptxinfo
-CCFLAGS+= -DSBD_USE_NVTX
 CCFLAGS+= -DSBD_THRUST_SAFE_MPI_ALLREDUCE
-SYSLIB= -llapack -lblas
-CCFLAGS+= -DSBD_USE_NCCL
+CCFLAGS+= -DSBD_USE_NVTX                     # Enable NVTX annotations for profiling (Nsight Systems)
+CCFLAGS+= -DSBD_USE_THRUST_NOSYNC            # Disable implicit sync in thrust execution to improve concurrency and performance
+CCFLAGS+= -DSBD_USE_NCCL                     # Enable NCCL-based GPU collective communication
 SYSLIB+= -lnccl
-CCFLAGS+= -DSBD_USE_CUBLAS
+CCFLAGS+= -DSBD_USE_CUBLAS                   # Enable cuBLAS for GPU-accelerated linear algebra operations
 SYSLIB+= -lcublas
-CCFLAGS+= -DSBD_USE_THRUST_NOSYNC
-CCFLAGS+= -DSBD_REORDER_INDEX_ARRAY
-CCFLAGS+= -DSBD_USE_32BIT_PARITY
+CCFLAGS+= -DSBD_USE_RANK_DISTRIBUTION        # Enable configurable MPI rank distribution strategy
+CCFLAGS+= -DSBD_USE_BLOCK_RANK_DISTRIBUTION  # With SBD_USE_RANK_DISTRIBUTION: use block (contiguous) assignment
+                                             # Otherwise: default is cyclic (strided) distribution
+# CCFLAGS+= -DSBD_USE_VECTORIZATION            # Enable vectorized execution (e.g., multi-element per thread)
+CCFLAGS+= -DSBD_REORDER_INDEX_ARRAY          # Apply block-based index reordering to improve data locality
+CCFLAGS+= -DSBD_USE_32BIT_PARITY             # Use 32-bit popcount-based parity to reduce cost and register pressure

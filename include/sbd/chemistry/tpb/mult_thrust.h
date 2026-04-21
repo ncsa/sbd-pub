@@ -17,11 +17,6 @@
 // per thread DetI, DetJ storage size (1GB max)
 #define MAX_DET_SIZE 134217728
 
-// Switch between braIdx-owner filtering (original) and MPI work distribution
-#define SBD_USE_RANK_DISTRIBUTION
-#define SBD_USE_BLOCK_RANK_DISTRIBUTION
-// #define SBD_USE_VECTORIZATION
-
 namespace sbd
 {
 
@@ -143,7 +138,7 @@ void MultTPBThrust<ElemT>::Init(
     printf("[%s,%d] 32-bit version of parity used (bit_length = %u)\n",
            __FILE__, __LINE__, bit_length_in);
     if (bit_length_in > 32) {
-        printf("[ERROR] bit_length is too large for 32-bit version\n");
+        fprintf(stderr, "[ERROR] bit_length is too large for 32-bit version\n");
         exit(-1);
     }
 #endif

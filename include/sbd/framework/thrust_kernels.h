@@ -6,6 +6,7 @@
 #define SBD_FRAMEWORK_THRUST_KERNELS_H
 
 #include "sbd/framework/nvtx.h"
+#include "sbd/framework/cuda_utility.h"
 
 #ifdef SBD_USE_CUBLAS
 #include "sbd/framework/cublas_utility.h"
@@ -119,14 +120,12 @@ void Normalize(thrust::device_vector<ElemT>& X,
     const int n = static_cast<int>(X.size());
     ElemT* x_ptr = thrust::raw_pointer_cast(X.data());
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
-            cublasSscal(ctx.get(), n, &factor, x_ptr, 1),
-            "cublasSscal failed");
+        SBD_CHECK_CUBLAS(
+            cublasSscal(ctx.get(), n, &factor, x_ptr, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
-            cublasDscal(ctx.get(), n, &factor, x_ptr, 1),
-            "cublasDscal failed");
+        SBD_CHECK_CUBLAS(
+            cublasDscal(ctx.get(), n, &factor, x_ptr, 1));
     }
 #endif
 }
@@ -164,9 +163,9 @@ void Normalize2(thrust::device_vector<ElemT>& X0,
         if (!X1.empty()) {
             sbd::Dot(X1, X1, ws_ptr+1, stream);
         }
-        CHECK_CUDA(cudaMemcpyAsync(norms, ws_ptr, sizeof(ElemT) * 2,
-                                   cudaMemcpyDeviceToHost, stream));
-        CHECK_CUDA(cudaStreamSynchronize(stream));
+        SBD_CHECK_CUDA(cudaMemcpyAsync(norms, ws_ptr, sizeof(ElemT) * 2,
+                                       cudaMemcpyDeviceToHost, stream));
+        SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
     }
     if (comm_size > 1) {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
@@ -183,14 +182,12 @@ void Normalize2(thrust::device_vector<ElemT>& X0,
         const int n0 = static_cast<int>(X0.size());
         ElemT* x0_ptr = thrust::raw_pointer_cast(X0.data());
         if constexpr (std::is_same<ElemT, float>::value) {
-            sbd::CheckCublas(
-                cublasSscal(ctx.get(), n0, &factor0, x0_ptr, 1),
-                "cublasSscal failed for X0");
+            SBD_CHECK_CUBLAS(
+                cublasSscal(ctx.get(), n0, &factor0, x0_ptr, 1));
         }
         else if constexpr (std::is_same<ElemT, double>::value) {
-            sbd::CheckCublas(
-                cublasDscal(ctx.get(), n0, &factor0, x0_ptr, 1),
-                "cublasDscal failed for X0");
+            SBD_CHECK_CUBLAS(
+                cublasDscal(ctx.get(), n0, &factor0, x0_ptr, 1));
         }
         else {
             static_assert(!sizeof(ElemT), "Unsupported type for Normalize2");
@@ -202,14 +199,12 @@ void Normalize2(thrust::device_vector<ElemT>& X0,
         ElemT* x1_ptr = thrust::raw_pointer_cast(X1.data());
 
         if constexpr (std::is_same<ElemT, float>::value) {
-            sbd::CheckCublas(
-                cublasSscal(ctx.get(), n1, &factor1, x1_ptr, 1),
-                "cublasSscal failed for X1");
+            SBD_CHECK_CUBLAS(
+                cublasSscal(ctx.get(), n1, &factor1, x1_ptr, 1));
         }
         else if constexpr (std::is_same<ElemT, double>::value) {
-            sbd::CheckCublas(
-                cublasDscal(ctx.get(), n1, &factor1, x1_ptr, 1),
-                "cublasDscal failed for X1");
+            SBD_CHECK_CUBLAS(
+                cublasDscal(ctx.get(), n1, &factor1, x1_ptr, 1));
         }
     }
 }
@@ -310,16 +305,14 @@ void BatchedInnerProduct_GEMV(ElemT* X_flat_ptr,
     const ElemT* x = thrust::raw_pointer_cast(Y.data());
     ElemT* y       = Z_dev_ptr;
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_T, N, num_X,
-                        &alpha, A, N, x, 1, &beta, y, 1),
-            "cublasSgemv failed");
+                        &alpha, A, N, x, 1, &beta, y, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(),CUBLAS_OP_T, N, num_X,
-                        &alpha, A, N, x, 1, &beta, y, 1),
-            "cublasDgemv failed");
+                        &alpha, A, N, x, 1, &beta, y, 1));
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for GEMV");
@@ -382,16 +375,14 @@ void BatchedInnerProduct_GEMV(std::vector<thrust::device_vector<ElemT>>& X,
     const ElemT* x = thrust::raw_pointer_cast(Y.data());
     ElemT* y       = Z_dev_ptr;
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_T, N, num_X,
-                        &alpha, A, N, x, 1, &beta, y, 1),
-            "cublasSgemv failed");
+                        &alpha, A, N, x, 1, &beta, y, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(),CUBLAS_OP_T, N, num_X,
-                        &alpha, A, N, x, 1, &beta, y, 1),
-            "cublasDgemv failed");
+                        &alpha, A, N, x, 1, &beta, y, 1));
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for GEMV");
@@ -431,18 +422,16 @@ void BatchedAXPY_GEMV_impl(const ElemT* X_flat_ptr,
     const ElemT* A = X_flat_ptr;
     ElemT* y = thrust::raw_pointer_cast(Y.data());
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &one, A, n, alpha_dev_ptr, 1,
-                        &beta, y, 1),
-            "cublasSgemv failed");
+                        &beta, y, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &one, A, n, alpha_dev_ptr, 1,
-                        &beta, y, 1),
-            "cublasDgemv failed");
+                        &beta, y, 1));
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for BatchedAXPY_GEMV");
@@ -472,9 +461,9 @@ void BatchedAXPY_GEMV_impl(const std::vector<thrust::device_vector<ElemT>>& X,
     }
     for (size_t i = 0; i < num_X; i++) {
         assert(X[i].size() == N);
-        CHECK_CUDA(cudaMemcpyAsync(
-                       X_flat_ptr + (N * i), thrust::raw_pointer_cast(X[i].data()),
-                       sizeof(ElemT) * N, cudaMemcpyDeviceToDevice, stream));
+        SBD_CHECK_CUDA(cudaMemcpyAsync(
+                           X_flat_ptr + (N * i), thrust::raw_pointer_cast(X[i].data()),
+                           sizeof(ElemT) * N, cudaMemcpyDeviceToDevice, stream));
     }
     BatchedAXPY_GEMV_impl(X_flat_ptr, num_X, alpha_dev_ptr, Y, beta, stream);
 }
@@ -517,8 +506,8 @@ void BatchedAXPY_GEMV(const std::vector<thrust::device_vector<ElemT>>& X,
     } else {
         alpha_dev_ptr = ws_ptr + (Y.size() * num_X);
     }
-    CHECK_CUDA(cudaMemcpyAsync(alpha_dev_ptr, alpha_host.data(),
-                               sizeof(ElemT) * num_X, cudaMemcpyHostToDevice, stream));
+    SBD_CHECK_CUDA(cudaMemcpyAsync(alpha_dev_ptr, alpha_host.data(),
+                                   sizeof(ElemT) * num_X, cudaMemcpyHostToDevice, stream));
     BatchedAXPY_GEMV_impl(X, num_X, alpha_dev_ptr, Y, beta, ws_ptr, stream);
 }
 
@@ -541,8 +530,8 @@ void BatchedAXPY_GEMV(const ElemT* X_flat_ptr,
     } else {
         alpha_dev_ptr = ws_ptr;
     }
-    CHECK_CUDA(cudaMemcpyAsync(alpha_dev_ptr, alpha_host.data(),
-                               sizeof(ElemT) * num_X, cudaMemcpyHostToDevice, stream));
+    SBD_CHECK_CUDA(cudaMemcpyAsync(alpha_dev_ptr, alpha_host.data(),
+                                   sizeof(ElemT) * num_X, cudaMemcpyHostToDevice, stream));
     BatchedAXPY_GEMV_impl(X_flat_ptr, num_X, alpha_dev_ptr, Y, beta, stream);
 }
 
@@ -586,18 +575,16 @@ void GramSchmidtOrthogonalize_GEMV(const ElemT* X_flat_ptr,
 
     // 1. local overlaps: res_dev = A^T * Y
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_T, n, m,
                         &one, A, n, y_in, 1,
-                        &zero, res_dev_ptr, 1),
-            "cublasSgemv (A^T * Y) failed");
+                        &zero, res_dev_ptr, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(), CUBLAS_OP_T, n, m,
                         &one, A, n, y_in, 1,
-                        &zero, res_dev_ptr, 1),
-            "cublasDgemv (A^T * Y) failed");
+                        &zero, res_dev_ptr, 1));
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for GramSchmidtOrthogonalize_GEMV");
@@ -605,10 +592,10 @@ void GramSchmidtOrthogonalize_GEMV(const ElemT* X_flat_ptr,
 
     // 2. copy overlaps to host and allreduce
     std::vector<ElemT> res_host(num_X);
-    CHECK_CUDA(cudaMemcpyAsync(
-                   res_host.data(), res_dev_ptr, sizeof(ElemT) * num_X,
-                   cudaMemcpyDeviceToHost, stream));
-    CHECK_CUDA(cudaStreamSynchronize(stream));
+    SBD_CHECK_CUDA(cudaMemcpyAsync(
+                       res_host.data(), res_dev_ptr, sizeof(ElemT) * num_X,
+                       cudaMemcpyDeviceToHost, stream));
+    SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
 
     if (comm_size > 1) {
         SBD_NVTX_RANGE_COLOR("MPI_Allreduce", 0);
@@ -617,24 +604,22 @@ void GramSchmidtOrthogonalize_GEMV(const ElemT* X_flat_ptr,
     }
 
     // 3. copy back to device
-    CHECK_CUDA(cudaMemcpyAsync(
-                   res_dev_ptr, res_host.data(), sizeof(ElemT) * num_X,
-                   cudaMemcpyHostToDevice, stream));
+    SBD_CHECK_CUDA(cudaMemcpyAsync(
+                       res_dev_ptr, res_host.data(), sizeof(ElemT) * num_X,
+                       cudaMemcpyHostToDevice, stream));
 
     // 4. Y = Y + A * res
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &minus_one, A, n, res_dev_ptr, 1,
-                        &one, y_out, 1),
-            "cublasSgemv (Y + A * res) failed");
+                        &one, y_out, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &minus_one, A, n, res_dev_ptr, 1,
-                        &one, y_out, 1),
-            "cublasDgemv (Y + A * res) failed");
+                        &one, y_out, 1));
     }
 }
 
@@ -679,18 +664,16 @@ void GramSchmidtOrthogonalize_GEMV(const ElemT* X_flat_ptr,
 
     // 1. local overlaps: res_dev = A^T * Y
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_T, n, m,
                         &one, A, n, y_in, 1,
-                        &zero, res_dev_ptr, 1),
-            "cublasSgemv (A^T * Y) failed");
+                        &zero, res_dev_ptr, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(), CUBLAS_OP_T, n, m,
                         &one, A, n, y_in, 1,
-                        &zero, res_dev_ptr, 1),
-            "cublasDgemv (A^T * Y) failed");
+                        &zero, res_dev_ptr, 1));
     }
     else {
         static_assert(!sizeof(ElemT), "Unsupported type for GramSchmidtOrthogonalize_GEMV");
@@ -703,18 +686,16 @@ void GramSchmidtOrthogonalize_GEMV(const ElemT* X_flat_ptr,
 
     // 3. Y = Y + A * res
     if constexpr (std::is_same<ElemT, float>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasSgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &minus_one, A, n, res_dev_ptr, 1,
-                        &one, y_out, 1),
-            "cublasSgemv (Y + A * res) failed");
+                        &one, y_out, 1));
     }
     else if constexpr (std::is_same<ElemT, double>::value) {
-        sbd::CheckCublas(
+        SBD_CHECK_CUBLAS(
             cublasDgemv(ctx.get(), CUBLAS_OP_N, n, m,
                         &minus_one, A, n, res_dev_ptr, 1,
-                        &one, y_out, 1),
-            "cublasDgemv (Y + A * res) failed");
+                        &one, y_out, 1));
     }
 }
 #endif  // #ifdef SBD_USE_NCCL
