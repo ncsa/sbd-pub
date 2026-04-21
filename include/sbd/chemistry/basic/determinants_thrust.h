@@ -128,32 +128,31 @@ public:
     template <typename SgnT = double>
     inline __device__ __host__ void parity(const uint32_t* dets, const int start, const int end, SgnT& sgn)
     {
-        const int blockStart = start / bit_length;
-        const int bitStart = start - (blockStart * bit_length);
-
+        int start1 = start;
+        // Shift start by +1 when start < end to convert [start, end) into (start, end).
+        // The original implementation applied a special sign rule for the 'start' bit;
+        // this transformation eliminates that special case while preserving the
+        // original parity behavior.
+        if (start < end) {
+            start1 += 1;
+        }
+        const int blockStart = start1 / bit_length;
+        const int bitStart = start1 - (blockStart * bit_length);
         const int blockEnd = end / bit_length;
         const int bitEnd = end - (blockEnd * bit_length);
-
-        int nonZeroBits = 0; // counter for nonzero bits
-
-        // Preserve the original parity convention, where the bit at 'start'
-        // contributes through an extra sign rule in addition to the range count.
-        // We fold that contribution into nonZeroBits here to avoid an extra branch.
-        nonZeroBits = (dets[blockStart*2] >> bitStart) & 1;
-
         const bool same_block = (blockStart == blockEnd);
         const uint32_t mask_start = (uint32_t(1) << bitStart) - 1;
         const uint32_t mask_end = (uint32_t(1) << bitEnd) - 1;
-        uint32_t mask = ~mask_start;
         int i = blockStart;
 
         // 1. Count bits in the start block.
         // If start and end are in the same block, restrict the mask further
         // so that only bits in [bitStart, bitEnd) are counted here.
+        uint32_t mask = ~mask_start;
         if (same_block) {
             mask &= mask_end;
         }
-        nonZeroBits += __popc(dets[i*2] & mask);
+        int nonZeroBits = __popc(dets[i*2] & mask);
         i++;
 
         // 2. Count bits in the full blocks in between.
@@ -169,11 +168,6 @@ public:
 
         // parity estimation
         sgn *= (SgnT(-2.) * (nonZeroBits & 1) + SgnT(1.));
-
-        // // flip sign if start == 1
-        // if ((dets[blockStart*2] >> bitStart) & 1) {
-        //     sgn *= -1.;
-        // }
     }
 #endif
 
