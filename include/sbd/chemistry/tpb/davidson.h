@@ -289,10 +289,10 @@ x = 0    1    2    3
 	}
 
 	// #ifdef SBD_FUAGKUPATCH
-	MpiAllreduce(W,MPI_SUM,t_comm);
-	MpiAllreduce(W,MPI_SUM,h_comm);
-	MpiAllreduce(R,MPI_SUM,t_comm);
-	MpiAllreduce(R,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(W,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(W,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(R,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(R,MPI_SUM,h_comm);
         ElemT volp(1.0/(mpi_size_h*mpi_size_t));
 #pragma	omp parallel for
         for(size_t is=0; is < W.size(); is++) {
@@ -541,10 +541,10 @@ x = 0    1    2    3
 	}
 
 	// #ifdef SBD_FUAGKUPATCH
-	MpiAllreduce(W,MPI_SUM,t_comm);
-	MpiAllreduce(W,MPI_SUM,h_comm);
-	MpiAllreduce(R,MPI_SUM,t_comm);
-	MpiAllreduce(R,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(W,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(W,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(R,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(R,MPI_SUM,h_comm);
         ElemT volp(1.0/(mpi_size_h*mpi_size_t));
 #pragma	omp parallel for
         for(size_t is=0; is < W.size(); is++) {
@@ -804,10 +804,10 @@ x = 0    1    2    3
 	   Patch for stability on Fugaku
 	 */
 	// #ifdef SBD_FUAGKUPATCH
-	MpiAllreduce(W,MPI_SUM,t_comm);
-	MpiAllreduce(W,MPI_SUM,h_comm);
-	MpiAllreduce(R,MPI_SUM,t_comm);
-	MpiAllreduce(R,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(W,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(W,MPI_SUM,h_comm);
+	if (mpi_size_t > 1) MpiAllreduce(R,MPI_SUM,t_comm);
+	if (mpi_size_h > 1) MpiAllreduce(R,MPI_SUM,h_comm);
         ElemT volp(1.0/(mpi_size_h*mpi_size_t));
 #pragma	omp parallel for
         for(size_t is=0; is < W.size(); is++) {
