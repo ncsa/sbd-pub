@@ -214,7 +214,7 @@ public:
             }
             for(size_t i=0; i < braAlphaSize; i++) {
                 thrust::copy_n(helper.SinglesFromAlphaSM[i], helper.SinglesFromAlphaLen[i], storage.begin() + count + offset_single_alpha[i]);
-#if 0
+#ifdef SBD_DEBUG
                 // **** DEBUG ****
                 printf("[%s,%d] SinglesFromAlphaKetIndex: i=%llu, n=%llu, ", __FILE__, __LINE__,
                        i, helper.SinglesFromAlphaLen[i]);
@@ -227,7 +227,7 @@ public:
             if (!store_offset) {
                 for(size_t i=0; i < braAlphaSize; i++) {
                     thrust::fill_n(storage.begin() + size_single_alpha + count + offset_single_alpha[i], helper.SinglesFromAlphaLen[i], i + helper.braAlphaStart);
-#if 0
+#ifdef SBD_DEBUG
                     // **** DEBUG ****
                     printf("[%s,%d] SinglesFromAlphaBraIndex: i=%llu, n=%llu, offset=%llu\n", __FILE__, __LINE__,
                            i, helper.SinglesFromAlphaLen[i], offset_single_alpha[i] );
@@ -272,7 +272,7 @@ public:
             }
             for(size_t i=0; i < braBetaSize; i++) {
                 thrust::copy_n(helper.SinglesFromBetaSM[i], helper.SinglesFromBetaLen[i], storage.begin() + count + offset_single_beta[i]);
-#if 0
+#ifdef SBD_DEBUG
                 // **** DEBUG ****
                 printf("[%s,%d] SinglesFromBetaKetIndex: i=%llu, n=%llu, ", __FILE__, __LINE__,
                        i, helper.SinglesFromBetaLen[i]);
@@ -285,7 +285,7 @@ public:
             if (!store_offset) {
                 for(size_t i=0; i < braBetaSize; i++) {
                     thrust::fill_n(storage.begin() + count + size_single_beta + offset_single_beta[i], helper.SinglesFromBetaLen[i], i + helper.braBetaStart);
-#if 0
+#ifdef SBD_DEBUG
                     // **** DEBUG ****
                     printf("[%s,%d] SinglesFromBetaBraIndex: i=%llu, n=%llu, offset=%llu\n", __FILE__, __LINE__,
                            i, helper.SinglesFromBetaLen[i], offset_single_beta[i] );
@@ -336,7 +336,7 @@ public:
                     buf[size_single_alpha + offset_single_alpha[i] + j] = helper.SinglesAlphaCrAnSM[i][j * 2 + 1];
                 }
             }
-#if 0
+#ifdef SBD_DEBUG
             // **** DEBUG ****
             for(size_t i=0; i < braAlphaSize; i++) {
                 printf("[%s,%d] SinglesAlphaCrAnSM: i=%llu, n=%llu, ", __FILE__, __LINE__,
@@ -381,7 +381,7 @@ public:
                     buf[size_single_beta + offset_single_beta[i] + j] = helper.SinglesBetaCrAnSM[i][j * 2 + 1];
                 }
             }
-#if 0
+#ifdef SBD_DEBUG
             // **** DEBUG ****
             for(size_t i=0; i < braBetaSize; i++) {
                 printf("[%s,%d] SinglesBetaCrAnSM: i=%llu, n=%llu, ", __FILE__, __LINE__,

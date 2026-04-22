@@ -322,6 +322,7 @@ namespace sbd {
 
 #ifdef SBD_THRUST
 	if( method == 0 ) {
+            SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
             sbd::Davidson(hii, W, device_mult,
                           max_it,max_nb,eps,max_time);
 	} else {

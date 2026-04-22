@@ -530,16 +530,11 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
 
 #ifdef SBD_USE_NCCL
             if (mpi_size_a > 1) {
-#if 1
                 // Fuse two AllReduce operations by packing W_dev and R into
                 // a single buffer, reducing NCCL collective launch overhead
                 // (2 calls -> 1 call).
                 nccl_allreduce2(W_dev, R, ncclSum, mult.a_nccl_comm(),
                                 thrust::raw_pointer_cast(workspace.data()), stream);
-#else
-                nccl_allreduce(W_dev, ncclSum, mult.a_nccl_comm(), stream);
-                nccl_allreduce(R, ncclSum, mult.a_nccl_comm(), stream);
-#endif
             }
 #else // #ifdef SBD_USE_NCCL
             SBD_CHECK_CUDA(cudaStreamSynchronize(stream));
@@ -553,36 +548,19 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
             }
 #endif // #ifdef SBD_USE_NCCL
 
-#if 0
-            if (mpi_size_h * mpi_size_t > 1) {
-                ElemT volp(1.0 / (mpi_size_h * mpi_size_t));
-                {
-                    SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                    // W[is] *= volp;
-                    // thrust::transform(thrust::device, W_dev.begin(), W_dev.end(), thrust::constant_iterator<ElemT>(volp), W_dev.begin(), thrust::multiplies<ElemT>());
-                    thrust::transform(policy_nosync, W_dev.begin(), W_dev.end(), W_dev.begin(), AX_kernel<ElemT>(volp));
-                }
-                {
-                    SBD_NVTX_RANGE_COLOR("thrust::transform", __LINE__);
-                    // R[is] *= volp;
-                    // thrust::transform(thrust::device, R.begin(), R.end(), thrust::constant_iterator<ElemT>(volp), R.begin(), thrust::multiplies<ElemT>());
-                    thrust::transform(policy_nosync, R.begin(), R.end(), R.begin(), AX_kernel<ElemT>(volp));
-                }
-            }
-#endif
             RealT norm_W;
             RealT norm_R;
-            // Normalize W_dev and R together to reduce MPI_Allreduce overhead
-            // by combining two reductions into a single collective call.
+            // The explicit scaling of W_dev and R used in the original code is omitted here.
+            // Both vectors are normalized immediately afterwards by Normalize2(), so scaling
+            // the vectors themselves is redundant. To preserve norm values consistent with
+            // the original behavior, norm_W and norm_R are scaled after Normalize2().
             Normalize2(W_dev, R, norm_W, norm_R, mult.b_comm(), mpi_size_b,
                        thrust::raw_pointer_cast(workspace.data()), stream);
-#if 1
             if (mpi_size_h * mpi_size_t > 1) {
                 RealT volp(1.0 / (mpi_size_h * mpi_size_t));
                 norm_W *= volp;
                 norm_R *= volp;
             }
-#endif
             // std::cout << "  norm_W = " << norm_W << " , norm_R = " << norm_R << std::endl;
 
 #ifdef SBD_DEBUG_DAVIDSON
@@ -625,7 +603,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 }
 
                 // Gram-Schmidt orthogonalization
-#if 1
 #ifdef SBD_USE_NCCL
                 GramSchmidtOrthogonalize_GEMV(
                     C, ib + 1, C_tmp, mult.b_nccl_comm(), mpi_size_b,
@@ -634,16 +611,6 @@ void Davidson(const thrust::device_vector<ElemT> &hii,
                 GramSchmidtOrthogonalize_GEMV(
                     C, ib + 1, C_tmp, mult.b_comm(), mpi_size_b, 
                     thrust::raw_pointer_cast(workspace.data()), stream);
-#endif
-#else
-                std::vector<ElemT> res(ib+1);
-                BatchedInnerProduct_GEMV(C, ib+1, C_tmp, res, mult.b_comm(),
-                                         thrust::raw_pointer_cast(workspace.data()), stream);
-                for (int kb = 0; kb < ib + 1; kb++) {
-                    res[kb] *= ElemT(-1.0);
-                }
-                BatchedAXPY_GEMV(C, ib+1, res, C_tmp, static_cast<ElemT>(1.0),
-                                 thrust::raw_pointer_cast(workspace.data()), stream);
 #endif
                 RealT norm_C;
                 Normalize(C_tmp, norm_C, mult.b_comm(), mpi_size_b, stream);
