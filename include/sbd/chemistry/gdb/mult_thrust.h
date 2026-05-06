@@ -407,47 +407,62 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
-		using WarpReduce = cub::WarpReduce<ElemT, SUBWARP>;
-		typename WarpReduce::TempStorage temp_storage;   // local; shuffle-only at p2 sizes
+		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduceSum::TempStorage temp_sum;   // local; shuffle-only at p2 sizes
 		ElemT thread_sum = ElemT(0);
 
 		// alpha-beta two-particle excitations
-		// Inner k-loop is strided by SUBWARP starting at lane; each lane keeps
-		// its own start_idx running lower-bound across its strided subset
-		// (start_idx grows monotonically with k since SinglesFromBdetSM is sorted,
-		// so the per-lane start_idx is correct as a lower bound for that lane's
-		// next k). At SUBWARP=1 this is identical to the original sequential loop.
+		// Inner k-loop is strided by SUBWARP. Explicit iteration count so ALL
+		// SUBWARP lanes reach the per-iteration shuffle-broadcast (lanes whose
+		// k is out of range just skip the body but still participate in the
+		// shuffle, required for warp-shuffle correctness on Volta+). After
+		// each non-final iteration we broadcast the LAST lane's start_idx to
+		// all SUBWARP lanes via __shfl_sync. Last lane's k is the highest in
+		// the iteration block, so its lower_bound has reached the furthest
+		// position. Lane L's next k > all lanes' current k (sorted
+		// SinglesFromBdetSM), so the last lane's start_idx is a valid (and
+		// usually tightest) lower bound for every lane's next adet_lower_bound.
+		// At SUBWARP=1: stride 1, lane 0, n_iters = k_hi - k_lo, no broadcast
+		// needed (last-iter check filters it out for the only iter), so the
+		// body collapses to the original sequential loop.
 		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 			size_t jast = exidx.SinglesFromAdetSM[ja];
 			size_t start_idx = 0;
 			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
-			for (size_t k = exidx.SinglesFromBdetOffset[ibst] + lane;
-			            k < exidx.SinglesFromBdetOffset[ibst + 1];
-			            k += SUBWARP) {
-				size_t jbst = exidx.SinglesFromBdetSM[k];
-				if (start_idx >= end_idx)
-					break;
-				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);
-				if (idxb >= 0) {
-					if (jbst != tidxmap.AdetToBdetSM[idxb])
-						continue;
-					start_idx = idxb - tidxmap.AdetToDetOffset[jast];
-					if (start_idx < end_idx) {
-						size_t jdet = tidxmap.AdetToDetSM[idxb];
-						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+
+			size_t k_lo = exidx.SinglesFromBdetOffset[ibst];
+			size_t k_hi = exidx.SinglesFromBdetOffset[ibst + 1];
+			size_t n_iters = (k_hi > k_lo) ? ((k_hi - k_lo + SUBWARP - 1) / SUBWARP) : 0;
+
+			for (size_t iter = 0; iter < n_iters; iter++) {
+				size_t k = k_lo + iter * SUBWARP + lane;
+				if (k < k_hi && start_idx < end_idx) {
+					size_t jbst = exidx.SinglesFromBdetSM[k];
+					int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);
+					if (idxb >= 0 && jbst == tidxmap.AdetToBdetSM[idxb]) {
+						size_t local_idx = idxb - tidxmap.AdetToDetOffset[jast];
+						if (local_idx < end_idx) {
+							start_idx = local_idx;
+							size_t jdet = tidxmap.AdetToDetSM[idxb];
+							ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 												exidx.SinglesAdetCrAnSM[ja],
 												exidx.SinglesBdetCrAnSM[k],
 												exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
 												exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
-						// size_t odiff;
-						// ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
-						thread_sum += eij * this->twk[jdet];
+							thread_sum += eij * this->twk[jdet];
+						}
 					}
+				}
+				// Per-iteration sync: broadcast last lane's start_idx (= the
+				// tightest natural lower bound after this iter's strided block)
+				// to all SUBWARP lanes. Skip on the last iter.
+				if (iter + 1 < n_iters) {
+					start_idx = __shfl_sync(0xffffffff, start_idx, SUBWARP - 1, SUBWARP);
 				}
 			}
 		}
 
-		ElemT total = WarpReduce(temp_storage).Sum(thread_sum);
+		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
 		if (lane == 0) this->wb[idet] += total;
 	}
 };
