@@ -12,9 +12,9 @@
 // SBD_GDB_SUBWARP_SIZE selects the threading granularity:
 //   1            → stride=1, behaves like the original code path
 //                  (cub::WarpReduce<T,1> is identity; no cross-lane comm)
-//   8 / 16 / 32  → strided inner-k loop + cub::WarpReduce reduction
-// Single code path for all sizes — no #ifdef'd duplicate body. Each lane
-// keeps its own start_idx running optimisation across its strided subset.
+//   8 / 16 / 32  → strided inner-k loop + cub::WarpReduce reduction +
+//                  per-iteration shuffle of last-lane start_idx
+// Single code path for all sizes — no #ifdef'd duplicate body.
 #ifndef SBD_GDB_SUBWARP_SIZE
   #define SBD_GDB_SUBWARP_SIZE 1
 #endif
@@ -24,6 +24,11 @@ static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
               SBD_GDB_SUBWARP_SIZE == 32,
               "SBD_GDB_SUBWARP_SIZE must be 1, 8, 16, or 32");
 #include <cub/warp/warp_reduce.cuh>
+// Note: Jim's reference form was
+//   start_idx = cuda::device::warp::shuffle_idx(start_idx, SUBWARP-1, SUBWARP);
+// `cuda::device::warp::shuffle_idx` is a CCCL/libcu++ wrapper not present in
+// NVHPC SDK 25.5 (no <cuda/warp> header). The functionally-equivalent CUDA
+// built-in `__shfl_sync(0xffffffff, value, srcLane, width)` is used below.
 
 namespace sbd
 {
@@ -412,53 +417,49 @@ public:
 		ElemT thread_sum = ElemT(0);
 
 		// alpha-beta two-particle excitations
-		// Inner k-loop is strided by SUBWARP. Explicit iteration count so ALL
-		// SUBWARP lanes reach the per-iteration shuffle-broadcast (lanes whose
-		// k is out of range just skip the body but still participate in the
-		// shuffle, required for warp-shuffle correctness on Volta+). After
-		// each non-final iteration we broadcast the LAST lane's start_idx to
-		// all SUBWARP lanes via __shfl_sync. Last lane's k is the highest in
-		// the iteration block, so its lower_bound has reached the furthest
-		// position. Lane L's next k > all lanes' current k (sorted
-		// SinglesFromBdetSM), so the last lane's start_idx is a valid (and
-		// usually tightest) lower bound for every lane's next adet_lower_bound.
-		// At SUBWARP=1: stride 1, lane 0, n_iters = k_hi - k_lo, no broadcast
-		// needed (last-iter check filters it out for the only iter), so the
-		// body collapses to the original sequential loop.
+		// Inner k-loop is strided by SUBWARP starting at lane. Each lane keeps
+		// its own running start_idx; at end of each iteration we broadcast the
+		// last lane's start_idx to all SUBWARP lanes (it has the tightest
+		// lower_bound this iteration since SinglesFromBdetSM is sorted and
+		// last-lane's k is the highest in the strided block). The condition
+		// `k + SUBWARP - lane < k_hi` ensures all SUBWARP lanes are at the
+		// shuffle call site (it's equivalent to `block_start + SUBWARP < k_hi`,
+		// which implies `block_start + (SUBWARP-1) < k_hi`, so lane SUBWARP-1
+		// of the current block is also in range). At SUBWARP=1 stride is 1,
+		// lane is 0, the shuffle width=1 srcLane=0 is identity, so the body
+		// collapses to the original sequential loop.
 		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 			size_t jast = exidx.SinglesFromAdetSM[ja];
 			size_t start_idx = 0;
 			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
-
-			size_t k_lo = exidx.SinglesFromBdetOffset[ibst];
-			size_t k_hi = exidx.SinglesFromBdetOffset[ibst + 1];
-			size_t n_iters = (k_hi > k_lo) ? ((k_hi - k_lo + SUBWARP - 1) / SUBWARP) : 0;
-
-			for (size_t iter = 0; iter < n_iters; iter++) {
-				size_t k = k_lo + iter * SUBWARP + lane;
-				if (k < k_hi && start_idx < end_idx) {
-					size_t jbst = exidx.SinglesFromBdetSM[k];
-					int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);
-					if (idxb >= 0 && jbst == tidxmap.AdetToBdetSM[idxb]) {
-						size_t local_idx = idxb - tidxmap.AdetToDetOffset[jast];
-						if (local_idx < end_idx) {
-							start_idx = local_idx;
-							size_t jdet = tidxmap.AdetToDetSM[idxb];
-							ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
-												exidx.SinglesAdetCrAnSM[ja],
-												exidx.SinglesBdetCrAnSM[k],
-												exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
-												exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
-							thread_sum += eij * this->twk[jdet];
-						}
+			for (size_t k = exidx.SinglesFromBdetOffset[ibst] + lane;
+			            k < exidx.SinglesFromBdetOffset[ibst + 1];
+			            k += SUBWARP) {
+				size_t jbst = exidx.SinglesFromBdetSM[k];
+				if (start_idx >= end_idx)
+					break;
+				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);
+				if (idxb >= 0) {
+					if (jbst != tidxmap.AdetToBdetSM[idxb])
+						continue;
+					start_idx = idxb - tidxmap.AdetToDetOffset[jast];
+					if (start_idx < end_idx) {
+						size_t jdet = tidxmap.AdetToDetSM[idxb];
+						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+											exidx.SinglesAdetCrAnSM[ja],
+											exidx.SinglesBdetCrAnSM[k],
+											exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
+											exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
+						thread_sum += eij * this->twk[jdet];
 					}
 				}
-				// Per-iteration sync: broadcast last lane's start_idx (= the
-				// tightest natural lower bound after this iter's strided block)
-				// to all SUBWARP lanes. Skip on the last iter.
-				if (iter + 1 < n_iters) {
+				// Share last-lane's start_idx if the next strided block is
+				// still in range. This guard implies block_start + SUBWARP <
+				// k_hi → block_start + (SUBWARP-1) < k_hi too, so all SUBWARP
+				// lanes of the current block are still in this iteration and
+				// reach the shuffle (no warp divergence).
+				if (k + SUBWARP - lane < exidx.SinglesFromBdetOffset[ibst + 1])
 					start_idx = __shfl_sync(0xffffffff, start_idx, SUBWARP - 1, SUBWARP);
-				}
 			}
 		}
 
