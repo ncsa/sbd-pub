@@ -8,6 +8,23 @@
 
 #include "sbd/framework/mpi_utility_thrust.h"
 
+// SUBWARP threading for MultAlphaBetaKernel (track gh-A).
+// SBD_GDB_SUBWARP_SIZE selects the threading granularity:
+//   1            → stride=1, behaves like the original code path
+//                  (cub::WarpReduce<T,1> is identity; no cross-lane comm)
+//   8 / 16 / 32  → strided inner-k loop + cub::WarpReduce reduction
+// Single code path for all sizes — no #ifdef'd duplicate body. Each lane
+// keeps its own start_idx running optimisation across its strided subset.
+#ifndef SBD_GDB_SUBWARP_SIZE
+  #define SBD_GDB_SUBWARP_SIZE 1
+#endif
+static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
+              SBD_GDB_SUBWARP_SIZE == 8  ||
+              SBD_GDB_SUBWARP_SIZE == 16 ||
+              SBD_GDB_SUBWARP_SIZE == 32,
+              "SBD_GDB_SUBWARP_SIZE must be 1, 8, 16, or 32");
+#include <cub/warp/warp_reduce.cuh>
+
 namespace sbd
 {
 namespace gdb
@@ -377,8 +394,12 @@ public:
 		: MultKernelBase<ElemT>(v_wb, v_t, data), idxmap(idxmap_in), tidxmap(tidxmap_in), exidx(exidx_in) {}
 
     // kernel entry point
-    __device__ __host__ void operator()(size_t i)
+    __device__ __host__ void operator()(size_t arg_i)
     {
+		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		size_t i    = arg_i / SUBWARP;                     // SUBWARP=1 → i = arg_i
+		int    lane = static_cast<int>(arg_i % SUBWARP);   // SUBWARP=1 → lane = 0
+
 		size_t ibst = idxmap.AdetToBdetSM[i];
 		size_t idet = idxmap.AdetToDetSM[i];
 		size_t ia = idxmap.AdetIndex[i];
@@ -386,12 +407,23 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
+		using WarpReduce = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduce::TempStorage temp_storage;   // local; shuffle-only at p2 sizes
+		ElemT thread_sum = ElemT(0);
+
 		// alpha-beta two-particle excitations
+		// Inner k-loop is strided by SUBWARP starting at lane; each lane keeps
+		// its own start_idx running lower-bound across its strided subset
+		// (start_idx grows monotonically with k since SinglesFromBdetSM is sorted,
+		// so the per-lane start_idx is correct as a lower bound for that lane's
+		// next k). At SUBWARP=1 this is identical to the original sequential loop.
 		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 			size_t jast = exidx.SinglesFromAdetSM[ja];
 			size_t start_idx = 0;
 			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
-			for (size_t k = exidx.SinglesFromBdetOffset[ibst]; k < exidx.SinglesFromBdetOffset[ibst + 1]; k++) {
+			for (size_t k = exidx.SinglesFromBdetOffset[ibst] + lane;
+			            k < exidx.SinglesFromBdetOffset[ibst + 1];
+			            k += SUBWARP) {
 				size_t jbst = exidx.SinglesFromBdetSM[k];
 				if (start_idx >= end_idx)
 					break;
@@ -409,11 +441,14 @@ public:
 												exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
 						// size_t odiff;
 						// ElemT eij = Hij(det[idet],tdet[jdet],bit_length,norb,I0,I1,I2,odiff);
-						this->wb[idet] += eij * this->twk[jdet];
+						thread_sum += eij * this->twk[jdet];
 					}
 				}
 			}
 		}
+
+		ElemT total = WarpReduce(temp_storage).Sum(thread_sum);
+		if (lane == 0) this->wb[idet] += total;
 	}
 };
 
@@ -529,7 +564,8 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
 
 		auto ci_ab = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_ab, idxmap.size_adet, kernel_alpha_beta);
+		thrust::for_each_n(thrust::device, ci_ab,
+		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_alpha_beta);
 	} // end task for loop
 
 	if (mpi_size_t > 1)
