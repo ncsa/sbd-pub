@@ -30,6 +30,35 @@ namespace sbd
 namespace gdb
 {
 
+#ifndef SBD_MULT_BLOCK_SIZE
+  #define SBD_MULT_BLOCK_SIZE 32
+#endif
+static_assert(SBD_MULT_BLOCK_SIZE == 32  ||
+              SBD_MULT_BLOCK_SIZE == 64  ||
+              SBD_MULT_BLOCK_SIZE == 128 ||
+              SBD_MULT_BLOCK_SIZE == 256,
+              "SBD_MULT_BLOCK_SIZE must be 32, 64, 128, or 256");
+
+// Custom blocksize-tunable launcher for the GDB Mult kernels. Replaces
+// thrust::for_each_n at the run()-level call sites. Smaller blocks free
+// SM block slots warp-by-warp; CUB's default (128-thread blocks under
+// __launch_bounds__(128, 16)) holds a slot until all 4 peer warps finish.
+template <int BlockSize, typename Functor>
+__global__ __launch_bounds__(BlockSize, 2048/BlockSize)
+void mult_for_each_n_kernel(size_t n, Functor functor)
+{
+    size_t i = static_cast<size_t>(blockIdx.x) * BlockSize + threadIdx.x;
+    if (i < n) functor(i);
+}
+
+template <int BlockSize, typename Functor>
+inline void launch_mult_for_each_n(size_t n, Functor functor)
+{
+    if (n == 0) return;
+    const size_t grid = (n + BlockSize - 1) / BlockSize;
+    mult_for_each_n_kernel<BlockSize><<<grid, BlockSize>>>(n, functor);
+}
+
 template <typename ElemT>
 class MultGDBThrust : public sbd::MultBase<ElemT> {
 protected:
@@ -583,42 +612,32 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		// single alpha excitations
 		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-
-		auto ci_sa = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_sa,
-		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_single_alpha);
+		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
+		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_single_alpha);
 
 		// double alpha excitations
 		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-
-		auto ci_da = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_da,
-		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_double_alpha);
+		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
+		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_double_alpha);
 
 		// single beta excitations
 		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-
-		auto ci_sb = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_sb,
-		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_single_beta);
+		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
+		    SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_single_beta);
 
 		// double beta excitations
 		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-
-		auto ci_db = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_db,
-		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_double_beta);
+		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
+		    SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_double_beta);
 
 		// alpha-beta excitations
 		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-
-		auto ci_ab = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_ab,
-		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_alpha_beta);
+		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
+		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_alpha_beta);
 	} // end task for loop
 
 	if (mpi_size_t > 1)
