@@ -473,9 +473,10 @@ public:
 		// outer-ja loop combines them. At SUBWARP=1 stride is 1, lane is 0,
 		// WarpReduce<T,1> is identity — body matches the original loop
 		// modulo dropping the start_idx amortization.
+		// adet_lower_bound returns -1 on miss, otherwise i < AdetToDetOffset[jast+1];
+		// so (idxb - AdetToDetOffset[jast]) is in-range whenever idxb >= 0.
 		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 			size_t jast = exidx.SinglesFromAdetSM[ja];
-			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
 			for (size_t k = exidx.SinglesFromBdetOffset[ibst] + lane;
 			            k < exidx.SinglesFromBdetOffset[ibst + 1];
 			            k += SUBWARP) {
@@ -484,16 +485,13 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					size_t local_idx = idxb - tidxmap.AdetToDetOffset[jast];
-					if (local_idx < end_idx) {
-						size_t jdet = tidxmap.AdetToDetSM[idxb];
-						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
-											exidx.SinglesAdetCrAnSM[ja],
-											exidx.SinglesBdetCrAnSM[k],
-											exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
-											exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
-						thread_sum += eij * this->twk[jdet];
-					}
+					size_t jdet = tidxmap.AdetToDetSM[idxb];
+					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+										exidx.SinglesAdetCrAnSM[ja],
+										exidx.SinglesBdetCrAnSM[k],
+										exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
+										exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
+					thread_sum += eij * this->twk[jdet];
 				}
 			}
 		}
