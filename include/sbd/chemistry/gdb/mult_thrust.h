@@ -38,6 +38,8 @@ static_assert(SBD_MULT_BLOCK_SIZE == 32  ||
               SBD_MULT_BLOCK_SIZE == 128 ||
               SBD_MULT_BLOCK_SIZE == 256,
               "SBD_MULT_BLOCK_SIZE must be 32, 64, 128, or 256");
+static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_SUBWARP_SIZE == 0,
+              "SBD_MULT_BLOCK_SIZE must be a multiple of SBD_GDB_SUBWARP_SIZE.");
 
 // Custom blocksize-tunable launcher for the GDB Mult kernels. Replaces
 // thrust::for_each_n at the run()-level call sites. Smaller blocks free
@@ -477,9 +479,16 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
-		size_t i    = arg_i / SUBWARP;                     // SUBWARP=1 → i = arg_i
-		int    lane = static_cast<int>(arg_i % SUBWARP);   // SUBWARP=1 → lane = 0
+		constexpr int SUBWARP   = SBD_GDB_SUBWARP_SIZE;
+		constexpr int BLOCK     = SBD_MULT_BLOCK_SIZE;
+		constexpr int GROUPS    = BLOCK / SUBWARP;        // SUBWARP groups per block
+		constexpr int BUF_PG    = 2 * SUBWARP;            // slots per group
+		constexpr int BUF_TOTAL = 2 * BLOCK;              // = GROUPS * BUF_PG
+
+		size_t i     = arg_i / SUBWARP;                   // SUBWARP=1 → i = arg_i
+		int    lane  = static_cast<int>(arg_i % SUBWARP); // 0..SUBWARP-1 within group
+		int    group = static_cast<int>(i % GROUPS);      // 0..GROUPS-1 within block
+		int    buf_base = group * BUF_PG;
 
 		size_t ibst = idxmap.AdetToBdetSM[i];
 		size_t idet = idxmap.AdetToDetSM[i];
@@ -492,38 +501,120 @@ public:
 		typename WarpReduceSum::TempStorage temp_sum;   // local; shuffle-only at p2 sizes
 		ElemT thread_sum = ElemT(0);
 
-		// alpha-beta two-particle excitations
-		// Inner k-loop is strided by SUBWARP starting at lane. We do NOT pass
-		// a running start_idx to adet_lower_bound: per-lane start_idx values
-		// make the binary search hit different elements per lane (warp-
-		// divergent), and the `continue` skips below would break any
-		// intra-loop reduction we'd want for sharing the bound. Each lane
-		// accumulates locally; cub::WarpReduce::Sum at the end of the
-		// outer-ja loop combines them. At SUBWARP=1 stride is 1, lane is 0,
-		// WarpReduce<T,1> is identity — body matches the original loop
-		// modulo dropping the start_idx amortization.
+		// SUBWARP-parallel (idxb, ja, k) accumulation buffer. Per-block
+		// shared, sliced by SUBWARP group. Each group's SUBWARP lanes ballot
+		// for valid candidates per probe round, append at distinct ranks
+		// (no atomicAdd), then dispatch TwoExcite once the group's slice
+		// holds ≥ SUBWARP entries.
+		__shared__ int64_t s_idxb [BUF_TOTAL];
+		__shared__ size_t  s_ja   [BUF_TOTAL];
+		__shared__ size_t  s_k    [BUF_TOTAL];
+		__shared__ int     s_count[GROUPS];
+		if (lane == 0) s_count[group] = 0;
+
+		// Per-SUBWARP ballot mask — covers this group's lanes within the
+		// containing CUDA warp. With multiple groups per warp (SUBWARP < 32),
+		// each group masks the warp-wide ballot to its own bit-range.
+		const int      lane_in_warp  = static_cast<int>(threadIdx.x) % 32;
+		const int      group_in_warp = lane_in_warp / SUBWARP;
+		const unsigned subwarp_lanes = (SUBWARP == 32) ? 0xFFFFFFFFu
+		                                               : ((1u << SUBWARP) - 1u);
+		const unsigned subwarp_mask  = subwarp_lanes << (group_in_warp * SUBWARP);
+		__syncwarp(subwarp_mask);
+
+		// Outer ja loop. Inner k loop runs k_iters times *uniformly* across
+		// all SUBWARP lanes of the group (k_lane = k_lo + it*SUBWARP + lane,
+		// guarded by `in_range = k_lane < k_hi`). This keeps __ballot_sync
+		// and __syncwarp(subwarp_mask) calls reachable by every lane on
+		// every iteration — fixing the divergent-loop-exit bug in v1.
 		// adet_lower_bound returns -1 on miss, otherwise i < AdetToDetOffset[jast+1];
 		// so (idxb - AdetToDetOffset[jast]) is in-range whenever idxb >= 0.
 		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
-			size_t jast = exidx.SinglesFromAdetSM[ja];
-			for (size_t k = exidx.SinglesFromBdetOffset[ibst] + lane;
-			            k < exidx.SinglesFromBdetOffset[ibst + 1];
-			            k += SUBWARP) {
-				size_t jbst = exidx.SinglesFromBdetSM[k];
-				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, /*start_idx=*/0);
-				if (idxb >= 0) {
-					if (jbst != tidxmap.AdetToBdetSM[idxb])
-						continue;
-					size_t jdet = tidxmap.AdetToDetSM[idxb];
+			size_t jast    = exidx.SinglesFromAdetSM[ja];
+			size_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
+			size_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
+			size_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
+
+			for (size_t it = 0; it < k_iters; it++) {
+				size_t  k        = k_lo + it * SUBWARP + lane;
+				bool    in_range = (k < k_hi);
+				int64_t idxb     = -1;
+				size_t  jbst     = 0;
+				bool    valid    = false;
+				if (in_range) {
+					jbst  = exidx.SinglesFromBdetSM[k];
+					idxb  = tidxmap.adet_lower_bound(jast, jbst, /*start_idx=*/0);
+					valid = (idxb >= 0 && jbst == tidxmap.AdetToBdetSM[idxb]);
+				}
+
+				// Per-group ballot (only this group's SUBWARP lanes
+				// participate; sibling groups in the same warp may be at
+				// different ja iterations). Per-lane rank within the group
+				// is __popc of group-local bits below this lane. Replaces
+				// atomicAdd for slot allocation.
+				unsigned warp_ballot    = __ballot_sync(subwarp_mask, valid);
+				unsigned subwarp_ballot = (warp_ballot & subwarp_mask) >> (group_in_warp * SUBWARP);
+				int      rank           = __popc(subwarp_ballot & ((1u << lane) - 1u));
+				int      added          = __popc(subwarp_ballot);
+
+				if (valid) {
+					int slot = buf_base + s_count[group] + rank;
+					s_idxb[slot] = idxb;
+					s_ja  [slot] = ja;
+					s_k   [slot] = k;
+				}
+				if (lane == 0) s_count[group] += added;
+				__syncwarp(subwarp_mask);
+
+				if (s_count[group] >= SUBWARP) {
+					// Dispatch SUBWARP TwoExcite() calls in parallel.
+					int     my_slot = buf_base + lane;
+					int64_t my_idxb = s_idxb[my_slot];
+					size_t  my_ja   = s_ja  [my_slot];
+					size_t  my_k    = s_k   [my_slot];
+					size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
 					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
-										exidx.SinglesAdetCrAnSM[ja],
-										exidx.SinglesBdetCrAnSM[k],
-										exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
-										exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
+					                    exidx.SinglesAdetCrAnSM[my_ja],
+					                    exidx.SinglesBdetCrAnSM[my_k],
+					                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
+					                    exidx.SinglesBdetCrAnSM[my_k + exidx.size_single_bdet]);
 					thread_sum += eij * this->twk[jdet];
+					__syncwarp(subwarp_mask);
+
+					// Compact this group's slice in parallel. Source range
+					// [buf_base+SUBWARP, buf_base+2*SUBWARP) was not touched
+					// by dispatch and is disjoint from the destination
+					// [buf_base, buf_base+SUBWARP) — direct lane-parallel copy
+					// is safe without an intermediate sync. Slots above the
+					// new s_count are garbage but invisible (next probe round
+					// overwrites starting at s_count). Only lane 0 mutates
+					// s_count (decrement-not-assign), so no read-write race
+					// with other lanes that have already pulled their copies.
+					s_idxb[buf_base + lane] = s_idxb[buf_base + SUBWARP + lane];
+					s_ja  [buf_base + lane] = s_ja  [buf_base + SUBWARP + lane];
+					s_k   [buf_base + lane] = s_k   [buf_base + SUBWARP + lane];
+					if (lane == 0) s_count[group] -= SUBWARP;
+					__syncwarp(subwarp_mask);
 				}
 			}
 		}
+
+		// Drain remaining (count < SUBWARP). All lanes evaluate the predicate
+		// uniformly; only those with `lane < s_count[group]` enter the body.
+		if (lane < s_count[group]) {
+			int     my_slot = buf_base + lane;
+			int64_t my_idxb = s_idxb[my_slot];
+			size_t  my_ja   = s_ja  [my_slot];
+			size_t  my_k    = s_k   [my_slot];
+			size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
+			ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+			                    exidx.SinglesAdetCrAnSM[my_ja],
+			                    exidx.SinglesBdetCrAnSM[my_k],
+			                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
+			                    exidx.SinglesBdetCrAnSM[my_k + exidx.size_single_bdet]);
+			thread_sum += eij * this->twk[jdet];
+		}
+		__syncwarp(subwarp_mask);
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
 		if (lane == 0) this->wb[idet] += total;
