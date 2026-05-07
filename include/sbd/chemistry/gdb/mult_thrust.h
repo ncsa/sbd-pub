@@ -200,8 +200,12 @@ public:
 		: MultKernelBase<ElemT>(v_wb, v_t, data), idxmap(idxmap_in), tidxmap(tidxmap_in), exidx(exidx_in) {}
 
     // kernel entry point
-    __device__ __host__ void operator()(size_t i)
+    __device__ __host__ void operator()(size_t arg_i)
     {
+		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		size_t i    = arg_i / SUBWARP;
+		int    lane = static_cast<int>(arg_i % SUBWARP);
+
 		size_t ibst = idxmap.AdetToBdetSM[i];
 		size_t idet = idxmap.AdetToDetSM[i];
 		size_t ia = idxmap.AdetIndex[i];
@@ -209,10 +213,16 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
+		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduceSum::TempStorage temp_sum;
+		ElemT thread_sum = ElemT(0);
+
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
 			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
-			// single alpha excitations
-			for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
+			// single alpha excitations — strided across SUBWARP lanes
+			for (size_t ja = exidx.SinglesFromAdetOffset[ia] + lane;
+			            ja < exidx.SinglesFromAdetOffset[ia + 1];
+			            ja += SUBWARP) {
 				size_t jast = exidx.SinglesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
@@ -222,10 +232,13 @@ public:
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
 											exidx.SinglesAdetCrAnSM[ja],
 											exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet]);
-					this->wb[idet] += eij * this->twk[jdet];
+					thread_sum += eij * this->twk[jdet];
 				}
 			}
 		} // if there is same beta string
+
+		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
+		if (lane == 0) this->wb[idet] += total;
 	}
 };
 
@@ -246,8 +259,12 @@ public:
 		: MultKernelBase<ElemT>(v_wb, v_t, data), idxmap(idxmap_in), tidxmap(tidxmap_in), exidx(exidx_in) {}
 
     // kernel entry point
-    __device__ __host__ void operator()(size_t i)
+    __device__ __host__ void operator()(size_t arg_i)
     {
+		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		size_t i    = arg_i / SUBWARP;
+		int    lane = static_cast<int>(arg_i % SUBWARP);
+
 		size_t ibst = idxmap.AdetToBdetSM[i];
 		size_t idet = idxmap.AdetToDetSM[i];
 		size_t ia = idxmap.AdetIndex[i];
@@ -255,10 +272,16 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
+		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduceSum::TempStorage temp_sum;
+		ElemT thread_sum = ElemT(0);
+
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
 			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
-			// double alpha excitations
-			for (size_t ja = exidx.DoublesFromAdetOffset[ia]; ja < exidx.DoublesFromAdetOffset[ia + 1]; ja++) {
+			// double alpha excitations — strided across SUBWARP lanes
+			for (size_t ja = exidx.DoublesFromAdetOffset[ia] + lane;
+			            ja < exidx.DoublesFromAdetOffset[ia + 1];
+			            ja += SUBWARP) {
 				size_t jast = exidx.DoublesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
@@ -271,10 +294,13 @@ public:
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet * 2],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet * 3]);
 					// size_t od;
-					this->wb[idet] += eij * this->twk[jdet];
+					thread_sum += eij * this->twk[jdet];
 				}
 			}
 		} // if there is same beta string
+
+		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
+		if (lane == 0) this->wb[idet] += total;
 	}
 };
 
@@ -298,8 +324,12 @@ public:
 		: MultKernelBase<ElemT>(v_wb, v_t, data), idxmap(idxmap_in), tidxmap(tidxmap_in), exidx(exidx_in) {}
 
     // kernel entry point
-    __device__ __host__ void operator()(size_t i)
+    __device__ __host__ void operator()(size_t arg_i)
     {
+		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		size_t i    = arg_i / SUBWARP;
+		int    lane = static_cast<int>(arg_i % SUBWARP);
+
 		size_t iast = idxmap.BdetToAdetSM[i];
 		size_t idet = idxmap.BdetToDetSM[i];
 		size_t ib = idxmap.BdetIndex[i];
@@ -307,10 +337,16 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
+		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduceSum::TempStorage temp_sum;
+		ElemT thread_sum = ElemT(0);
+
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
 			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
-			// single alpha excitations
-			for (size_t jb = exidx.SinglesFromBdetOffset[ib]; jb < exidx.SinglesFromBdetOffset[ib + 1]; jb++) {
+			// single beta excitations — strided across SUBWARP lanes
+			for (size_t jb = exidx.SinglesFromBdetOffset[ib] + lane;
+			            jb < exidx.SinglesFromBdetOffset[ib + 1];
+			            jb += SUBWARP) {
 				size_t jbst = exidx.SinglesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
@@ -320,10 +356,13 @@ public:
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
 											exidx.SinglesBdetCrAnSM[jb],
 											exidx.SinglesBdetCrAnSM[jb + exidx.size_single_bdet]);
-					this->wb[idet] += eij * this->twk[jdet];
+					thread_sum += eij * this->twk[jdet];
 				}
 			}
 		} // if there is same beta string
+
+		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
+		if (lane == 0) this->wb[idet] += total;
 	}
 };
 
@@ -344,8 +383,12 @@ public:
 		: MultKernelBase<ElemT>(v_wb, v_t, data), idxmap(idxmap_in), tidxmap(tidxmap_in), exidx(exidx_in) {}
 
     // kernel entry point
-    __device__ __host__ void operator()(size_t i)
+    __device__ __host__ void operator()(size_t arg_i)
     {
+		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		size_t i    = arg_i / SUBWARP;
+		int    lane = static_cast<int>(arg_i % SUBWARP);
+
 		size_t iast = idxmap.BdetToAdetSM[i];
 		size_t idet = idxmap.BdetToDetSM[i];
 		size_t ib = idxmap.BdetIndex[i];
@@ -353,10 +396,16 @@ public:
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
+		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
+		typename WarpReduceSum::TempStorage temp_sum;
+		ElemT thread_sum = ElemT(0);
+
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
 			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
-			// double alpha excitations
-			for (size_t jb = exidx.DoublesFromBdetOffset[ib]; jb < exidx.DoublesFromBdetOffset[ib + 1]; jb++) {
+			// double beta excitations — strided across SUBWARP lanes
+			for (size_t jb = exidx.DoublesFromBdetOffset[ib] + lane;
+			            jb < exidx.DoublesFromBdetOffset[ib + 1];
+			            jb += SUBWARP) {
 				size_t jbst = exidx.DoublesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
@@ -369,10 +418,13 @@ public:
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet * 2],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet * 3]);
 					// size_t od;
-					this->wb[idet] += eij * this->twk[jdet];
+					thread_sum += eij * this->twk[jdet];
 				}
 			}
 		} // if there is same beta string
+
+		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
+		if (lane == 0) this->wb[idet] += total;
 	}
 };
 
@@ -535,28 +587,32 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
 
 		auto ci_sa = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_sa, idxmap.size_adet, kernel_single_alpha);
+		thrust::for_each_n(thrust::device, ci_sa,
+		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_single_alpha);
 
 		// double alpha excitations
 		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
 
 		auto ci_da = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_da, idxmap.size_adet, kernel_double_alpha);
+		thrust::for_each_n(thrust::device, ci_da,
+		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_double_alpha);
 
 		// single beta excitations
 		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
 
 		auto ci_sb = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_sb, idxmap.size_bdet, kernel_single_beta);
+		thrust::for_each_n(thrust::device, ci_sb,
+		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_single_beta);
 
 		// double beta excitations
 		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
 
 		auto ci_db = thrust::counting_iterator<size_t>(0);
-		thrust::for_each_n(thrust::device, ci_db, idxmap.size_bdet, kernel_double_beta);
+		thrust::for_each_n(thrust::device, ci_db,
+		                   SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_double_beta);
 
 		// alpha-beta excitations
 		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
