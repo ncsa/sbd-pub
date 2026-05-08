@@ -42,11 +42,19 @@ static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_SUBWARP_SIZE == 0,
               "SBD_MULT_BLOCK_SIZE must be a multiple of SBD_GDB_SUBWARP_SIZE.");
 
 // Custom blocksize-tunable launcher for the GDB Mult kernels. Replaces
-// thrust::for_each_n at the run()-level call sites. Smaller blocks free
-// SM block slots warp-by-warp; CUB's default (128-thread blocks under
-// __launch_bounds__(128, 16)) holds a slot until all 4 peer warps finish.
+// thrust::for_each_n at the run()-level call sites with a fixed-block
+// launch so the v2 SUBWARP-parallel kernel's shared-memory sizing
+// (`BUF_TOTAL = 2 * SBD_MULT_BLOCK_SIZE`) matches the actual block size.
+//
+// Note: the original d977b38 version added `__launch_bounds__(BlockSize,
+// 2048/BlockSize)` to constrain max-threads-per-SM to 2048 and let
+// smaller blocks free SM slots warp-by-warp. On the v2+B+drain kernel
+// (shared mem + ballot + TwoExcite), the annotation appears to force
+// register spilling — actual register pressure exceeds what fits in
+// 2048 threads/SM × 32 regs/thread × H100's 65536 regs/SM. Annotation
+// dropped to let the compiler pick its own register/occupancy tradeoff.
 template <int BlockSize, typename Functor>
-__global__ __launch_bounds__(BlockSize, 2048/BlockSize)
+__global__
 void mult_for_each_n_kernel(size_t n, Functor functor)
 {
     size_t i = static_cast<size_t>(blockIdx.x) * BlockSize + threadIdx.x;
