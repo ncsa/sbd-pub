@@ -566,30 +566,42 @@ public:
 				if (lane == 0) s_count[group] += added;
 				__syncwarp(subwarp_mask);
 
-				if (s_count[group] >= SUBWARP) {
-					// Dispatch SUBWARP TwoExcite() calls in parallel.
-					int     my_slot = buf_base + lane;
-					int64_t my_idxb = s_idxb[my_slot];
-					size_t  my_ja   = s_ja  [my_slot];
-					size_t  my_k    = s_k   [my_slot];
-					size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
-					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
-					                    exidx.SinglesAdetCrAnSM[my_ja],
-					                    exidx.SinglesBdetCrAnSM[my_k],
-					                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
-					                    exidx.SinglesBdetCrAnSM[my_k + exidx.size_single_bdet]);
-					thread_sum += eij * this->twk[jdet];
+				// Per Jim's drain-fold suggestion: extend the dispatch trigger
+				// to also fire on the very last (it, ja) so the post-loop drain
+				// block can be eliminated. Loop the dispatch on is_last_inner so
+				// the case where post-append count > SUBWARP on the last (it, ja)
+				// is also drained — Jim's literal proposal would lose
+				// (count - SUBWARP) candidates in that case (one round of
+				// SUBWARP-wide dispatch + compact, then kernel exits with the
+				// shifted leftovers still unprocessed). The while form runs at
+				// most twice on the last iter and once otherwise.
+				bool is_last_inner = (it == k_iters - 1) &&
+				                     (ja == exidx.SinglesFromAdetOffset[ia + 1] - 1);
+				while (s_count[group] >= SUBWARP || (is_last_inner && s_count[group] > 0)) {
+					// Dispatch up to SUBWARP TwoExcite() calls in parallel. Lane
+					// guard: count may be < SUBWARP on the is_last_inner drain pass.
+					if (lane < s_count[group]) {
+						int     my_slot = buf_base + lane;
+						int64_t my_idxb = s_idxb[my_slot];
+						size_t  my_ja   = s_ja  [my_slot];
+						size_t  my_k    = s_k   [my_slot];
+						size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
+						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+						                    exidx.SinglesAdetCrAnSM[my_ja],
+						                    exidx.SinglesBdetCrAnSM[my_k],
+						                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
+						                    exidx.SinglesBdetCrAnSM[my_k + exidx.size_single_bdet]);
+						thread_sum += eij * this->twk[jdet];
+					}
 					__syncwarp(subwarp_mask);
 
-					// Compact this group's slice in parallel. Source range
-					// [buf_base+SUBWARP, buf_base+2*SUBWARP) was not touched
-					// by dispatch and is disjoint from the destination
-					// [buf_base, buf_base+SUBWARP) — direct lane-parallel copy
-					// is safe without an intermediate sync. Slots above the
-					// new s_count are garbage but invisible (next probe round
-					// overwrites starting at s_count). Only lane 0 mutates
-					// s_count (decrement-not-assign), so no read-write race
-					// with other lanes that have already pulled their copies.
+					// Compact this group's slice. Source [buf_base+SUBWARP,
+					// buf_base+2*SUBWARP) and destination [buf_base, buf_base+SUBWARP)
+					// are disjoint; direct lane-parallel copy is safe without an
+					// intermediate sync. Slots above the new s_count are garbage
+					// but invisible — either next probe round overwrites starting
+					// at s_count, or kernel exits (is_last_inner drain case). Only
+					// lane 0 mutates s_count (decrement-not-assign).
 					s_idxb[buf_base + lane] = s_idxb[buf_base + SUBWARP + lane];
 					s_ja  [buf_base + lane] = s_ja  [buf_base + SUBWARP + lane];
 					s_k   [buf_base + lane] = s_k   [buf_base + SUBWARP + lane];
@@ -599,22 +611,6 @@ public:
 			}
 		}
 
-		// Drain remaining (count < SUBWARP). All lanes evaluate the predicate
-		// uniformly; only those with `lane < s_count[group]` enter the body.
-		if (lane < s_count[group]) {
-			int     my_slot = buf_base + lane;
-			int64_t my_idxb = s_idxb[my_slot];
-			size_t  my_ja   = s_ja  [my_slot];
-			size_t  my_k    = s_k   [my_slot];
-			size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
-			ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
-			                    exidx.SinglesAdetCrAnSM[my_ja],
-			                    exidx.SinglesBdetCrAnSM[my_k],
-			                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
-			                    exidx.SinglesBdetCrAnSM[my_k + exidx.size_single_bdet]);
-			thread_sum += eij * this->twk[jdet];
-		}
-		__syncwarp(subwarp_mask);
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
 		if (lane == 0) this->wb[idet] += total;
