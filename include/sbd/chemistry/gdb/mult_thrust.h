@@ -12,17 +12,19 @@
 // SBD_GDB_SUBWARP_SIZE selects the threading granularity:
 //   1            → stride=1, behaves like the original code path
 //                  (cub::WarpReduce<T,1> is identity; no cross-lane comm)
-//   8 / 16 / 32  → strided inner-k loop + cub::WarpReduce reduction +
-//                  per-iteration shuffle of last-lane start_idx
+//   2 / 4 / 8 / 16 / 32 → strided inner-k loop + cub::WarpReduce reduction
+//                  + per-iteration ballot-based candidate buffer.
 // Single code path for all sizes — no #ifdef'd duplicate body.
 #ifndef SBD_GDB_SUBWARP_SIZE
   #define SBD_GDB_SUBWARP_SIZE 1
 #endif
 static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
+              SBD_GDB_SUBWARP_SIZE == 2  ||
+              SBD_GDB_SUBWARP_SIZE == 4  ||
               SBD_GDB_SUBWARP_SIZE == 8  ||
               SBD_GDB_SUBWARP_SIZE == 16 ||
               SBD_GDB_SUBWARP_SIZE == 32,
-              "SBD_GDB_SUBWARP_SIZE must be 1, 8, 16, or 32");
+              "SBD_GDB_SUBWARP_SIZE must be 1, 2, 4, 8, 16, or 32");
 #include <cub/warp/warp_reduce.cuh>
 
 namespace sbd
@@ -46,15 +48,17 @@ static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_SUBWARP_SIZE == 0,
 // launch so the v2 SUBWARP-parallel kernel's shared-memory sizing
 // (`BUF_TOTAL = 2 * SBD_MULT_BLOCK_SIZE`) matches the actual block size.
 //
-// Note: the original d977b38 version added `__launch_bounds__(BlockSize,
-// 2048/BlockSize)` to constrain max-threads-per-SM to 2048 and let
-// smaller blocks free SM slots warp-by-warp. On the v2+B+drain kernel
-// (shared mem + ballot + TwoExcite), the annotation appears to force
-// register spilling — actual register pressure exceeds what fits in
-// 2048 threads/SM × 32 regs/thread × H100's 65536 regs/SM. Annotation
-// dropped to let the compiler pick its own register/occupancy tradeoff.
+// __launch_bounds__(BlockSize, 32): the second argument fixes
+// minBlocksPerMultiprocessor at 32 — H100's hardware maximum of
+// 32 thread blocks per SM. The compiler picks a register budget that
+// keeps 32 BlockSize-thread blocks resident per SM:
+//   BS=32 → 32 × 32 = 1024 threads/SM (50% occupancy); 65536/1024 = 64
+//           registers/thread budget.
+//   BS=64 → 32 × 64 = 2048 threads/SM (100% occupancy); 32 regs/thread.
+// Larger BlockSize (128, 256) cannot reach the 32-block/SM target and
+// are out of scope for this build configuration.
 template <int BlockSize, typename Functor>
-__global__
+__global__ __launch_bounds__(BlockSize, 32)
 void mult_for_each_n_kernel(size_t n, Functor functor)
 {
     size_t i = static_cast<size_t>(blockIdx.x) * BlockSize + threadIdx.x;
@@ -67,6 +71,10 @@ inline void launch_mult_for_each_n(size_t n, Functor functor)
     if (n == 0) return;
     const size_t grid = (n + BlockSize - 1) / BlockSize;
     mult_for_each_n_kernel<BlockSize><<<grid, BlockSize>>>(n, functor);
+    // E1 (advice-from-parent §5): force per-launch stream serialization to
+    // test the stream-ordering hypothesis. If this resolves the b_comm>=3
+    // Davidson hang, the legacy default stream is the contention surface.
+    cudaDeviceSynchronize();
 }
 
 template <typename ElemT>
