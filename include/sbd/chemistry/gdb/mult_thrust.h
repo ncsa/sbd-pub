@@ -43,22 +43,31 @@ static_assert(SBD_MULT_BLOCK_SIZE == 32  ||
 static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_SUBWARP_SIZE == 0,
               "SBD_MULT_BLOCK_SIZE must be a multiple of SBD_GDB_SUBWARP_SIZE.");
 
+// SBD_MULT_MIN_BLOCKS_PER_SM tunes the second argument of
+// __launch_bounds__ on mult_for_each_n_kernel — the
+// minBlocksPerMultiprocessor hint the compiler uses to pick a register
+// budget per thread. Default 32 = H100 hardware maximum; lower values
+// trade occupancy for a larger per-thread register budget.
+//   threads/SM = SBD_MULT_BLOCK_SIZE × SBD_MULT_MIN_BLOCKS_PER_SM
+//   regs/thread budget ≈ 65536 / threads/SM
+// Examples (BS=64):
+//   mbpsm=32 → 2048 threads/SM (100% occupancy); 32 regs/thread
+//   mbpsm=24 → 1536 threads/SM (75% occupancy); 42 regs/thread
+//   mbpsm=20 → 1280 threads/SM (62.5% occupancy); 51 regs/thread
+//   mbpsm=16 → 1024 threads/SM (50% occupancy); 64 regs/thread
+#ifndef SBD_MULT_MIN_BLOCKS_PER_SM
+  #define SBD_MULT_MIN_BLOCKS_PER_SM 32
+#endif
+static_assert(SBD_MULT_MIN_BLOCKS_PER_SM >= 1 &&
+              SBD_MULT_MIN_BLOCKS_PER_SM <= 32,
+              "SBD_MULT_MIN_BLOCKS_PER_SM must be in [1, 32] (H100 hw max).");
+
 // Custom blocksize-tunable launcher for the GDB Mult kernels. Replaces
 // thrust::for_each_n at the run()-level call sites with a fixed-block
 // launch so the v2 SUBWARP-parallel kernel's shared-memory sizing
 // (`BUF_TOTAL = 2 * SBD_MULT_BLOCK_SIZE`) matches the actual block size.
-//
-// __launch_bounds__(BlockSize, 32): the second argument fixes
-// minBlocksPerMultiprocessor at 32 — H100's hardware maximum of
-// 32 thread blocks per SM. The compiler picks a register budget that
-// keeps 32 BlockSize-thread blocks resident per SM:
-//   BS=32 → 32 × 32 = 1024 threads/SM (50% occupancy); 65536/1024 = 64
-//           registers/thread budget.
-//   BS=64 → 32 × 64 = 2048 threads/SM (100% occupancy); 32 regs/thread.
-// Larger BlockSize (128, 256) cannot reach the 32-block/SM target and
-// are out of scope for this build configuration.
 template <int BlockSize, typename Functor>
-__global__ __launch_bounds__(BlockSize, 32)
+__global__ __launch_bounds__(BlockSize, SBD_MULT_MIN_BLOCKS_PER_SM)
 void mult_for_each_n_kernel(size_t n, Functor functor)
 {
     size_t i = static_cast<size_t>(blockIdx.x) * BlockSize + threadIdx.x;
