@@ -529,7 +529,7 @@ public:
 		// for valid candidates per probe round, append at distinct ranks
 		// (no atomicAdd), then dispatch TwoExcite once the group's slice
 		// holds ≥ SUBWARP entries.
-		__shared__ int64_t  s_idxb [BUF_TOTAL];
+		__shared__ uint32_t s_idxb [BUF_TOTAL];
 		__shared__ uint32_t s_ja   [BUF_TOTAL];
 		__shared__ uint32_t s_k    [BUF_TOTAL];
 		__shared__ int     s_count[GROUPS];
@@ -582,7 +582,7 @@ public:
 
 				if (valid) {
 					int slot = buf_base + s_count[group] + rank;
-					s_idxb[slot] = idxb;
+					s_idxb[slot] = static_cast<uint32_t>(idxb);
 					s_ja  [slot] = ja;
 					s_k   [slot] = k;
 				}
@@ -605,10 +605,10 @@ public:
 					// guard: count may be < SUBWARP on the is_last_inner drain pass.
 					if (lane < s_count[group]) {
 						int      my_slot = buf_base + lane;
-						int64_t  my_idxb = s_idxb[my_slot];
+						uint32_t my_idxb = s_idxb[my_slot];
 						uint32_t my_ja   = s_ja  [my_slot];
 						uint32_t my_k    = s_k   [my_slot];
-						uint32_t jdet   = tidxmap.AdetToDetSM[my_idxb];
+						uint32_t jdet    = tidxmap.AdetToDetSM[my_idxb];
 						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 						                    exidx.SinglesAdetCrAnSM[my_ja],
 						                    exidx.SinglesBdetCrAnSM[my_k],
