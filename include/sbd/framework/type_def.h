@@ -39,6 +39,7 @@ namespace sbd {
   template<> inline MPI_Datatype GetMpiType<double>::MpiT = MPI_DOUBLE;
   template<> inline MPI_Datatype GetMpiType<std::complex<float>>::MpiT = MPI_CXX_FLOAT_COMPLEX;
   template<> inline MPI_Datatype GetMpiType<std::complex<double>>::MpiT = MPI_CXX_DOUBLE_COMPLEX;
+  template<> inline MPI_Datatype GetMpiType<uint32_t>::MpiT = MPI_UINT32_T;
 
 #if SIZE_MAX == UCHAR_MAX
   #define SBD_MPI_SIZE_T MPI_UNSIGNED_CHAR

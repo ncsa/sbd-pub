@@ -19,16 +19,16 @@ namespace gdb
 class DetIndexMapThrust
 {
 public:
-    size_t* AdetToDetOffset;
-    size_t* BdetToDetOffset;
-    size_t* AdetIndex;
-    size_t* BdetIndex;
-    size_t* AdetToBdetSM;
-    size_t* AdetToDetSM;
-    size_t* BdetToAdetSM;
-    size_t* BdetToDetSM;
-    size_t size_adet = 0;
-    size_t size_bdet = 0;
+    uint32_t* AdetToDetOffset;
+    uint32_t* BdetToDetOffset;
+    uint32_t* AdetIndex;
+    uint32_t* BdetIndex;
+    uint32_t* AdetToBdetSM;
+    uint32_t* AdetToDetSM;
+    uint32_t* BdetToAdetSM;
+    uint32_t* BdetToDetSM;
+    uint32_t size_adet = 0;
+    uint32_t size_bdet = 0;
 
     DetIndexMapThrust() {}
 
@@ -46,30 +46,36 @@ public:
         size_bdet = other.size_bdet;
     }
 
-    DetIndexMapThrust(thrust::device_vector<size_t>& storage, const DetIndexMap& idxmap)
+    DetIndexMapThrust(thrust::device_vector<uint32_t>& storage, const DetIndexMap& idxmap)
     {
-        size_t size = 0;
+        const size_t n_adet = idxmap.AdetToDetLen.size();
+        const size_t n_bdet = idxmap.BdetToDetLen.size();
 
-        std::vector<size_t> offset_adet(idxmap.AdetToDetLen.size() + 1);
-        std::vector<size_t> offset_bdet(idxmap.BdetToDetLen.size() + 1);
-        for(size_t i=0; i < idxmap.AdetToDetLen.size(); i++) {
+        assert(n_adet <= UINT32_MAX);
+        assert(n_bdet <= UINT32_MAX);
+
+        std::vector<uint32_t> offset_adet(n_adet + 1);
+        std::vector<uint32_t> offset_bdet(n_bdet + 1);
+        for (size_t i = 0; i < n_adet; i++) {
             offset_adet[i] = size_adet;
-            size_adet += idxmap.AdetToDetLen[i];
+            assert(idxmap.AdetToDetLen[i] <= UINT32_MAX - (size_t)size_adet);
+            size_adet += static_cast<uint32_t>(idxmap.AdetToDetLen[i]);
         }
-        offset_adet[idxmap.AdetToDetLen.size()] = size_adet;
+        offset_adet[n_adet] = size_adet;
 
-        for(size_t i=0; i < idxmap.BdetToDetLen.size(); i++) {
+        for (size_t i = 0; i < n_bdet; i++) {
             offset_bdet[i] = size_bdet;
-            size_bdet += idxmap.BdetToDetLen[i];
+            assert(idxmap.BdetToDetLen[i] <= UINT32_MAX - (size_t)size_bdet);
+            size_bdet += static_cast<uint32_t>(idxmap.BdetToDetLen[i]);
         }
-        offset_bdet[idxmap.BdetToDetLen.size()] = size_bdet;
+        offset_bdet[n_bdet] = size_bdet;
 
-        size = idxmap.AdetToDetLen.size() + 1 + idxmap.BdetToDetLen.size() + 1 + size_adet * 3 + size_bdet * 3;
+        size_t size = (n_adet + 1) + (n_bdet + 1) + (size_t)size_adet * 3 + (size_t)size_bdet * 3;
         storage.resize(size);
-        size_t* base_memory = (size_t*)thrust::raw_pointer_cast(storage.data());
+        uint32_t* base_memory = thrust::raw_pointer_cast(storage.data());
 
         size_t count = 0;
-        // store offset
+        // store offsets
         AdetToDetOffset = base_memory + count;
         thrust::copy_n(offset_adet.begin(), offset_adet.size(), storage.begin() + count);
         count += offset_adet.size();
@@ -78,21 +84,29 @@ public:
         thrust::copy_n(offset_bdet.begin(), offset_bdet.size(), storage.begin() + count);
         count += offset_bdet.size();
 
-        // set Adet, Bdet indices
+        // set Adet, Bdet indices — per-element fill_n, one kernel per segment
         AdetIndex = base_memory + count;
-        for(size_t i=0; i < idxmap.AdetToDetLen.size(); i++) {
-            thrust::fill_n(storage.begin() + count + offset_adet[i], idxmap.AdetToDetLen[i], i);
+        for (size_t i = 0; i < n_adet; i++) {
+            thrust::fill_n(storage.begin() + count + offset_adet[i],
+                           idxmap.AdetToDetLen[i], static_cast<uint32_t>(i));
         }
         count += size_adet;
 
         BdetIndex = base_memory + count;
-        for(size_t i=0; i < idxmap.BdetToDetLen.size(); i++) {
-            thrust::fill_n(storage.begin() + count + offset_bdet[i], idxmap.BdetToDetLen[i], i);
+        for (size_t i = 0; i < n_bdet; i++) {
+            thrust::fill_n(storage.begin() + count + offset_bdet[i],
+                           idxmap.BdetToDetLen[i], static_cast<uint32_t>(i));
         }
         count += size_bdet;
 
-        // copy SMs
-        thrust::copy_n(idxmap.storage.begin(), size_adet * 2 + size_bdet * 2, storage.begin() + count);
+        // copy SMs: convert size_t CPU data to uint32_t on device
+        const size_t sm_size = (size_t)size_adet * 2 + (size_t)size_bdet * 2;
+        std::vector<uint32_t> sm_buf(sm_size);
+        for (size_t i = 0; i < sm_size; i++) {
+            assert(idxmap.storage[i] <= UINT32_MAX);
+            sm_buf[i] = static_cast<uint32_t>(idxmap.storage[i]);
+        }
+        thrust::copy_n(sm_buf.begin(), sm_buf.size(), storage.begin() + count);
         AdetToDetSM = base_memory + count;
         count += size_adet;
         AdetToBdetSM = base_memory + count;
@@ -102,12 +116,12 @@ public:
         BdetToAdetSM = base_memory + count;
     }
 
-    void copy(thrust::device_vector<size_t>& storage, const DetIndexMapThrust& idxmap, const thrust::device_vector<size_t>& src_storage)
+    void copy(thrust::device_vector<uint32_t>& storage, const DetIndexMapThrust& idxmap, const thrust::device_vector<uint32_t>& src_storage)
     {
         storage = src_storage;
 
-        size_t* base = (size_t*)thrust::raw_pointer_cast(storage.data());
-        size_t* src_base = (size_t*)thrust::raw_pointer_cast(src_storage.data());
+        uint32_t* base = thrust::raw_pointer_cast(storage.data());
+        const uint32_t* src_base = thrust::raw_pointer_cast(src_storage.data());
 
         AdetToDetOffset = base + (idxmap.AdetToDetOffset - src_base);
         BdetToDetOffset = base + (idxmap.BdetToDetOffset - src_base);
@@ -123,11 +137,11 @@ public:
 
     inline __device__ __host__ int64_t adet_lower_bound(size_t jast, size_t jbst, size_t start = 0)
     {
-        size_t is = AdetToDetOffset[jast] + start;
-        size_t ie = AdetToDetOffset[jast + 1];
-        size_t i = (is + ie) / 2;
-        while(is != ie) {
-            if( AdetToBdetSM[i] < jbst) {
+        uint32_t is = AdetToDetOffset[jast] + static_cast<uint32_t>(start);
+        uint32_t ie = AdetToDetOffset[jast + 1];
+        uint32_t i = (is + ie) / 2;
+        while (is != ie) {
+            if (AdetToBdetSM[i] < static_cast<uint32_t>(jbst)) {
                 is = i + 1;
                 i = (is + ie) / 2;
             } else {
@@ -136,19 +150,18 @@ public:
             }
         }
         if (ie == AdetToDetOffset[jast + 1]) {
-            // not found
             return -1;
         }
-        return i;
+        return static_cast<int64_t>(i);
     }
 
     inline __device__ __host__ int64_t bdet_lower_bound(size_t jbst, size_t jast)
     {
-        size_t is = BdetToDetOffset[jbst];
-        size_t ie = BdetToDetOffset[jbst + 1];
-        size_t i = (is + ie) / 2;
-        while(is != ie) {
-            if( BdetToAdetSM[i] < jast) {
+        uint32_t is = BdetToDetOffset[jbst];
+        uint32_t ie = BdetToDetOffset[jbst + 1];
+        uint32_t i = (is + ie) / 2;
+        while (is != ie) {
+            if (BdetToAdetSM[i] < static_cast<uint32_t>(jast)) {
                 is = i + 1;
                 i = (is + ie) / 2;
             } else {
@@ -157,10 +170,9 @@ public:
             }
         }
         if (ie == BdetToDetOffset[jbst + 1]) {
-            // not found
             return -1;
         }
-        return i;
+        return static_cast<int64_t>(i);
     }
 
 
@@ -400,31 +412,33 @@ public:
 
 
 void MpiSlide(const DetIndexMapThrust& send_map,
-        const thrust::device_vector<size_t>& send_storage,
+        const thrust::device_vector<uint32_t>& send_storage,
         DetIndexMapThrust& recv_map,
-        thrust::device_vector<size_t>& recv_storage,
+        thrust::device_vector<uint32_t>& recv_storage,
         int slide,
         MPI_Comm comm)
 {
     std::vector<size_t> send_offset;
     std::vector<size_t> recv_offset;
 
-    size_t* base = (size_t*)thrust::raw_pointer_cast(send_storage.data());
-    send_offset.push_back((size_t)(send_map.AdetToDetOffset - base));
-    send_offset.push_back((size_t)(send_map.BdetToDetOffset - base));
-    send_offset.push_back((size_t)(send_map.AdetIndex - base));
-    send_offset.push_back((size_t)(send_map.BdetIndex - base));
-    send_offset.push_back((size_t)(send_map.AdetToBdetSM - base));
-    send_offset.push_back((size_t)(send_map.AdetToDetSM - base));
-    send_offset.push_back((size_t)(send_map.BdetToAdetSM - base));
-    send_offset.push_back((size_t)(send_map.BdetToDetSM - base));
-    send_offset.push_back(send_map.size_adet);
-    send_offset.push_back(send_map.size_bdet);
+    {
+        const uint32_t* send_base = thrust::raw_pointer_cast(send_storage.data());
+        send_offset.push_back((size_t)(send_map.AdetToDetOffset - send_base));
+        send_offset.push_back((size_t)(send_map.BdetToDetOffset - send_base));
+        send_offset.push_back((size_t)(send_map.AdetIndex - send_base));
+        send_offset.push_back((size_t)(send_map.BdetIndex - send_base));
+        send_offset.push_back((size_t)(send_map.AdetToBdetSM - send_base));
+        send_offset.push_back((size_t)(send_map.AdetToDetSM - send_base));
+        send_offset.push_back((size_t)(send_map.BdetToAdetSM - send_base));
+        send_offset.push_back((size_t)(send_map.BdetToDetSM - send_base));
+    }
+    send_offset.push_back((size_t)send_map.size_adet);
+    send_offset.push_back((size_t)send_map.size_bdet);
 
     sbd::MpiSlide(send_storage, recv_storage, slide, comm);
     sbd::MpiSlide(send_offset, recv_offset, slide, comm);
 
-    base = (size_t*)thrust::raw_pointer_cast(recv_storage.data());
+    uint32_t* base = thrust::raw_pointer_cast(recv_storage.data());
     recv_map.AdetToDetOffset = base + recv_offset[0];
     recv_map.BdetToDetOffset = base + recv_offset[1];
     recv_map.AdetIndex = base + recv_offset[2];
@@ -433,8 +447,8 @@ void MpiSlide(const DetIndexMapThrust& send_map,
     recv_map.AdetToDetSM = base + recv_offset[5];
     recv_map.BdetToAdetSM = base + recv_offset[6];
     recv_map.BdetToDetSM = base + recv_offset[7];
-    recv_map.size_adet = recv_offset[8];
-    recv_map.size_bdet = recv_offset[9];
+    recv_map.size_adet = static_cast<uint32_t>(recv_offset[8]);
+    recv_map.size_bdet = static_cast<uint32_t>(recv_offset[9]);
 }
 
 
@@ -462,9 +476,9 @@ public:
     void ExchangeAsync(const thrust::device_vector<ElemT> &send,
                 thrust::device_vector<ElemT> &recv,
                 const DetIndexMapThrust& send_map,
-                const thrust::device_vector<size_t> &send_map_storage,
+                const thrust::device_vector<uint32_t> &send_map_storage,
                 DetIndexMapThrust& recv_map,
-                thrust::device_vector<size_t> &recv_map_storage,
+                thrust::device_vector<uint32_t> &recv_map_storage,
                 int slide,
                 MPI_Comm comm,
                 int id)
@@ -485,17 +499,19 @@ public:
         send_offset[1] = send_map_storage.size();
 
         // exchange idxmap offset
-        size_t* base = (size_t*)thrust::raw_pointer_cast(send_map_storage.data());
-        send_offset[2] = (size_t)(send_map.AdetToDetOffset - base);
-        send_offset[3] = (size_t)(send_map.BdetToDetOffset - base);
-        send_offset[4] = (size_t)(send_map.AdetIndex - base);
-        send_offset[5] = (size_t)(send_map.BdetIndex - base);
-        send_offset[6] = (size_t)(send_map.AdetToBdetSM - base);
-        send_offset[7] = (size_t)(send_map.AdetToDetSM - base);
-        send_offset[8] = (size_t)(send_map.BdetToAdetSM - base);
-        send_offset[9] = (size_t)(send_map.BdetToDetSM - base);
-        send_offset[10] = send_map.size_adet;
-        send_offset[11] = send_map.size_bdet;
+        {
+            const uint32_t* send_base = thrust::raw_pointer_cast(send_map_storage.data());
+            send_offset[2] = (size_t)(send_map.AdetToDetOffset - send_base);
+            send_offset[3] = (size_t)(send_map.BdetToDetOffset - send_base);
+            send_offset[4] = (size_t)(send_map.AdetIndex - send_base);
+            send_offset[5] = (size_t)(send_map.BdetIndex - send_base);
+            send_offset[6] = (size_t)(send_map.AdetToBdetSM - send_base);
+            send_offset[7] = (size_t)(send_map.AdetToDetSM - send_base);
+            send_offset[8] = (size_t)(send_map.BdetToAdetSM - send_base);
+            send_offset[9] = (size_t)(send_map.BdetToDetSM - send_base);
+        }
+        send_offset[10] = (size_t)send_map.size_adet;
+        send_offset[11] = (size_t)send_map.size_bdet;
 
         MPI_Isend(send_offset.data(),12,SBD_MPI_SIZE_T,mpi_dest,id*4,comm,&req_size[0]);
         MPI_Irecv(recv_offset.data(),12,SBD_MPI_SIZE_T,mpi_source,id*4,comm,&req_size[1]);
@@ -519,17 +535,17 @@ public:
         }
 
         if( send_size_map != 0 ) {
-            MPI_Isend((size_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,SBD_MPI_SIZE_T,mpi_dest,id*4+3,comm,&req_send_map);
+            MPI_Isend((uint32_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,MPI_UINT32_T,mpi_dest,id*4+3,comm,&req_send_map);
         }
         if( recv_size_map != 0 ) {
             recv_map_storage.resize(recv_size_map);
-            MPI_Irecv((size_t*)thrust::raw_pointer_cast(recv_map_storage.data()),recv_size_map,SBD_MPI_SIZE_T,mpi_source,id*4+3,comm,&req_recv_map);
+            MPI_Irecv((uint32_t*)thrust::raw_pointer_cast(recv_map_storage.data()),recv_size_map,MPI_UINT32_T,mpi_source,id*4+3,comm,&req_recv_map);
 
         } else {
             recv_map_storage = send_map_storage;
             recv_offset = send_offset;
         }
-        base = (size_t*)thrust::raw_pointer_cast(recv_map_storage.data());
+        uint32_t* base = thrust::raw_pointer_cast(recv_map_storage.data());
         recv_map.AdetToDetOffset = base + recv_offset[2];
         recv_map.BdetToDetOffset = base + recv_offset[3];
         recv_map.AdetIndex = base + recv_offset[4];
@@ -538,8 +554,8 @@ public:
         recv_map.AdetToDetSM = base + recv_offset[7];
         recv_map.BdetToAdetSM = base + recv_offset[8];
         recv_map.BdetToDetSM = base + recv_offset[9];
-        recv_map.size_adet = recv_offset[10];
-        recv_map.size_bdet = recv_offset[11];
+        recv_map.size_adet = static_cast<uint32_t>(recv_offset[10]);
+        recv_map.size_bdet = static_cast<uint32_t>(recv_offset[11]);
     }
 
     bool Sync(void)

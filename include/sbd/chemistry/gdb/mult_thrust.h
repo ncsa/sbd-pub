@@ -89,7 +89,7 @@ inline void launch_mult_for_each_n(size_t n, Functor functor)
 template <typename ElemT>
 class MultGDBThrust : public sbd::MultBase<ElemT> {
 protected:
-	thrust::device_vector<size_t> idxmap_storage;
+	thrust::device_vector<uint32_t> idxmap_storage;
 	DetIndexMapThrust idxmap;
     thrust::device_vector<size_t> dets_;
     ElemT I0_;
@@ -262,10 +262,10 @@ public:
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -284,7 +284,7 @@ public:
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
 						continue;
-					size_t jdet = tidxmap.BdetToDetSM[idxa];
+					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
 											exidx.SinglesAdetCrAnSM[ja],
 											exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet]);
@@ -321,10 +321,10 @@ public:
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -343,13 +343,12 @@ public:
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
 						continue;
-					size_t jdet = tidxmap.BdetToDetSM[idxa];
+					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 											exidx.DoublesAdetCrAnSM[ja],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet * 2],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet * 3]);
-					// size_t od;
 					thread_sum += eij * this->twk[jdet];
 				}
 			}
@@ -386,10 +385,10 @@ public:
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
-		size_t iast = idxmap.BdetToAdetSM[i];
-		size_t idet = idxmap.BdetToDetSM[i];
-		size_t ib = idxmap.BdetIndex[i];
-		size_t ibst = ib;
+		uint32_t iast = idxmap.BdetToAdetSM[i];
+		uint32_t idet = idxmap.BdetToDetSM[i];
+		uint32_t ib   = idxmap.BdetIndex[i];
+		uint32_t ibst = ib;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -408,7 +407,7 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					size_t jdet = tidxmap.AdetToDetSM[idxb];
+					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
 											exidx.SinglesBdetCrAnSM[jb],
 											exidx.SinglesBdetCrAnSM[jb + exidx.size_single_bdet]);
@@ -445,10 +444,10 @@ public:
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
-		size_t iast = idxmap.BdetToAdetSM[i];
-		size_t idet = idxmap.BdetToDetSM[i];
-		size_t ib = idxmap.BdetIndex[i];
-		size_t ibst = ib;
+		uint32_t iast = idxmap.BdetToAdetSM[i];
+		uint32_t idet = idxmap.BdetToDetSM[i];
+		uint32_t ib   = idxmap.BdetIndex[i];
+		uint32_t ibst = ib;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -467,13 +466,12 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					size_t jdet = tidxmap.AdetToDetSM[idxb];
+					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 											exidx.DoublesBdetCrAnSM[jb],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet * 2],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet * 3]);
-					// size_t od;
 					thread_sum += eij * this->twk[jdet];
 				}
 			}
@@ -515,10 +513,10 @@ public:
 		int    group = static_cast<int>(i % GROUPS);      // 0..GROUPS-1 within block
 		int    buf_base = group * BUF_PG;
 
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -610,7 +608,7 @@ public:
 						int64_t my_idxb = s_idxb[my_slot];
 						size_t  my_ja   = s_ja  [my_slot];
 						size_t  my_k    = s_k   [my_slot];
-						size_t  jdet    = tidxmap.AdetToDetSM[my_idxb];
+						uint32_t jdet   = tidxmap.AdetToDetSM[my_idxb];
 						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 						                    exidx.SinglesAdetCrAnSM[my_ja],
 						                    exidx.SinglesBdetCrAnSM[my_k],
@@ -682,7 +680,7 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 
 	// double buffering for MPI slide
 	thrust::device_vector<ElemT> twk[2];
-	thrust::device_vector<size_t> tidxmap_storage[2];
+	thrust::device_vector<uint32_t> tidxmap_storage[2];
 	DetIndexMapThrust tidxmap[2];
 	int active_buf = 0;
     int recv_buf = 1;

@@ -72,10 +72,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -88,7 +88,7 @@ public:
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
 						continue;
-					size_t jdet = tidxmap.BdetToDetSM[idxa];
+					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					this->correlation.OneDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
 											exidx.SinglesAdetCrAnSM[ja],
@@ -120,10 +120,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -136,7 +136,7 @@ public:
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
 						continue;
-					size_t jdet = tidxmap.BdetToDetSM[idxa];
+					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
 											exidx.DoublesAdetCrAnSM[ja],
@@ -171,10 +171,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		size_t iast = idxmap.BdetToAdetSM[i];
-		size_t idet = idxmap.BdetToDetSM[i];
-		size_t ib = idxmap.BdetIndex[i];
-		size_t ibst = ib;
+		uint32_t iast = idxmap.BdetToAdetSM[i];
+		uint32_t idet = idxmap.BdetToDetSM[i];
+		uint32_t ib   = idxmap.BdetIndex[i];
+		uint32_t ibst = ib;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -187,7 +187,7 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					size_t jdet = tidxmap.AdetToDetSM[idxb];
+					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					this->correlation.OneDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
 											exidx.SinglesBdetCrAnSM[jb],
@@ -219,10 +219,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		size_t iast = idxmap.BdetToAdetSM[i];
-		size_t idet = idxmap.BdetToDetSM[i];
-		size_t ib = idxmap.BdetIndex[i];
-		size_t ibst = ib;
+		uint32_t iast = idxmap.BdetToAdetSM[i];
+		uint32_t idet = idxmap.BdetToDetSM[i];
+		uint32_t ib   = idxmap.BdetIndex[i];
+		uint32_t ibst = ib;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -235,7 +235,7 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					size_t jdet = tidxmap.AdetToDetSM[idxb];
+					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
 											exidx.DoublesBdetCrAnSM[jb],
@@ -270,10 +270,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		size_t ibst = idxmap.AdetToBdetSM[i];
-		size_t idet = idxmap.AdetToDetSM[i];
-		size_t ia = idxmap.AdetIndex[i];
-		size_t iast = ia;
+		uint32_t ibst = idxmap.AdetToBdetSM[i];
+		uint32_t idet = idxmap.AdetToDetSM[i];
+		uint32_t ia   = idxmap.AdetIndex[i];
+		uint32_t iast = ia;
 		if (idet % this->mpi_size_h != this->mpi_rank_h)
 			return;
 
@@ -290,9 +290,9 @@ public:
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
-					start_idx = idxb - tidxmap.AdetToDetOffset[jast];
+					start_idx = static_cast<size_t>(idxb) - tidxmap.AdetToDetOffset[jast];
 					if (start_idx < end_idx) {
-						size_t jdet = tidxmap.AdetToDetSM[idxb];
+						uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 						this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
 												exidx.SinglesAdetCrAnSM[ja],
@@ -332,7 +332,7 @@ void MultGDBThrust<ElemT>::correlation(const std::vector<ElemT> & w_in,
 	thrust::device_vector<ElemT> w(w_in.size());
 	thrust::device_vector<ElemT> tw(w_in.size());
 	thrust::device_vector<ElemT> rw;
-	thrust::device_vector<size_t> tidxmap_storage;
+	thrust::device_vector<uint32_t> tidxmap_storage;
 	DetIndexMapThrust tidxmap;
 
     thrust::copy_n(w_in.begin(), w_in.size(), w.begin());
@@ -396,7 +396,7 @@ void MultGDBThrust<ElemT>::correlation(const std::vector<ElemT> & w_in,
 			sbd::MpiSlide(rw, tw, slide, this->b_comm());
 			sbd::gdb::MpiSlide(idxmap, idxmap_storage, tidxmap, tidxmap_storage, -exidx[0].slide, this->b_comm());
 
-			thrust::device_vector<size_t> ridxmap_storage;
+			thrust::device_vector<uint32_t> ridxmap_storage;
 			DetIndexMapThrust ridxmap;
 			ridxmap.copy(ridxmap_storage, tidxmap, tidxmap_storage);
 			sbd::gdb::MpiSlide(ridxmap, ridxmap_storage, tidxmap, tidxmap_storage, slide, this->b_comm());
