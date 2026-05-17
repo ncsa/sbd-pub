@@ -100,7 +100,7 @@ protected:
     thrust::device_vector<ElemT> I2_dm;
     thrust::device_vector<ElemT> I2_em;
 
-	std::vector<thrust::device_vector<size_t>> exidx_storage;
+	std::vector<thrust::device_vector<uint32_t>> exidx_storage;
     std::vector<thrust::device_vector<int>> CrAn_storage;
 	std::vector<ExcitationLookupThrust> exidx;
 public:
@@ -274,12 +274,12 @@ public:
 		ElemT thread_sum = ElemT(0);
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
 			// single alpha excitations — strided across SUBWARP lanes
-			for (size_t ja = exidx.SinglesFromAdetOffset[ia] + lane;
-			            ja < exidx.SinglesFromAdetOffset[ia + 1];
-			            ja += SUBWARP) {
-				size_t jast = exidx.SinglesFromAdetSM[ja];
+			for (uint32_t ja = exidx.SinglesFromAdetOffset[ia] + lane;
+			              ja < exidx.SinglesFromAdetOffset[ia + 1];
+			              ja += SUBWARP) {
+				uint32_t jast = exidx.SinglesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
@@ -333,12 +333,12 @@ public:
 		ElemT thread_sum = ElemT(0);
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
 			// double alpha excitations — strided across SUBWARP lanes
-			for (size_t ja = exidx.DoublesFromAdetOffset[ia] + lane;
-			            ja < exidx.DoublesFromAdetOffset[ia + 1];
-			            ja += SUBWARP) {
-				size_t jast = exidx.DoublesFromAdetSM[ja];
+			for (uint32_t ja = exidx.DoublesFromAdetOffset[ia] + lane;
+			              ja < exidx.DoublesFromAdetOffset[ia + 1];
+			              ja += SUBWARP) {
+				uint32_t jast = exidx.DoublesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
@@ -397,12 +397,12 @@ public:
 		ElemT thread_sum = ElemT(0);
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
 			// single beta excitations — strided across SUBWARP lanes
-			for (size_t jb = exidx.SinglesFromBdetOffset[ib] + lane;
-			            jb < exidx.SinglesFromBdetOffset[ib + 1];
-			            jb += SUBWARP) {
-				size_t jbst = exidx.SinglesFromBdetSM[jb];
+			for (uint32_t jb = exidx.SinglesFromBdetOffset[ib] + lane;
+			              jb < exidx.SinglesFromBdetOffset[ib + 1];
+			              jb += SUBWARP) {
+				uint32_t jbst = exidx.SinglesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
@@ -456,12 +456,12 @@ public:
 		ElemT thread_sum = ElemT(0);
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
 			// double beta excitations — strided across SUBWARP lanes
-			for (size_t jb = exidx.DoublesFromBdetOffset[ib] + lane;
-			            jb < exidx.DoublesFromBdetOffset[ib + 1];
-			            jb += SUBWARP) {
-				size_t jbst = exidx.DoublesFromBdetSM[jb];
+			for (uint32_t jb = exidx.DoublesFromBdetOffset[ib] + lane;
+			              jb < exidx.DoublesFromBdetOffset[ib + 1];
+			              jb += SUBWARP) {
+				uint32_t jbst = exidx.DoublesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
@@ -529,9 +529,9 @@ public:
 		// for valid candidates per probe round, append at distinct ranks
 		// (no atomicAdd), then dispatch TwoExcite once the group's slice
 		// holds ≥ SUBWARP entries.
-		__shared__ int64_t s_idxb [BUF_TOTAL];
-		__shared__ size_t  s_ja   [BUF_TOTAL];
-		__shared__ size_t  s_k    [BUF_TOTAL];
+		__shared__ int64_t  s_idxb [BUF_TOTAL];
+		__shared__ uint32_t s_ja   [BUF_TOTAL];
+		__shared__ uint32_t s_k    [BUF_TOTAL];
 		__shared__ int     s_count[GROUPS];
 		if (lane == 0) s_count[group] = 0;
 
@@ -552,17 +552,17 @@ public:
 		// every iteration — fixing the divergent-loop-exit bug in v1.
 		// adet_lower_bound returns -1 on miss, otherwise i < AdetToDetOffset[jast+1];
 		// so (idxb - AdetToDetOffset[jast]) is in-range whenever idxb >= 0.
-		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
-			size_t jast    = exidx.SinglesFromAdetSM[ja];
-			size_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
-			size_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
-			size_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
+		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
+			uint32_t jast    = exidx.SinglesFromAdetSM[ja];
+			uint32_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
+			uint32_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
+			uint32_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
 
-			for (size_t it = 0; it < k_iters; it++) {
-				size_t  k        = k_lo + it * SUBWARP + lane;
-				bool    in_range = (k < k_hi);
-				int64_t idxb     = -1;
-				size_t  jbst     = 0;
+			for (uint32_t it = 0; it < k_iters; it++) {
+				uint32_t k        = k_lo + it * SUBWARP + lane;
+				bool     in_range = (k < k_hi);
+				int64_t  idxb     = -1;
+				uint32_t jbst     = 0;
 				bool    valid    = false;
 				if (in_range) {
 					jbst  = exidx.SinglesFromBdetSM[k];
@@ -604,10 +604,10 @@ public:
 					// Dispatch up to SUBWARP TwoExcite() calls in parallel. Lane
 					// guard: count may be < SUBWARP on the is_last_inner drain pass.
 					if (lane < s_count[group]) {
-						int     my_slot = buf_base + lane;
-						int64_t my_idxb = s_idxb[my_slot];
-						size_t  my_ja   = s_ja  [my_slot];
-						size_t  my_k    = s_k   [my_slot];
+						int      my_slot = buf_base + lane;
+						int64_t  my_idxb = s_idxb[my_slot];
+						uint32_t my_ja   = s_ja  [my_slot];
+						uint32_t my_k    = s_k   [my_slot];
 						uint32_t jdet   = tidxmap.AdetToDetSM[my_idxb];
 						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
 						                    exidx.SinglesAdetCrAnSM[my_ja],

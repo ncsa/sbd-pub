@@ -80,10 +80,10 @@ public:
 			return;
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
 			// single alpha excitations
-			for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
-				size_t jast = exidx.SinglesFromAdetSM[ja];
+			for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
+				uint32_t jast = exidx.SinglesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
@@ -128,10 +128,10 @@ public:
 			return;
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			size_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
 			// double alpha excitations
-			for (size_t ja = exidx.DoublesFromAdetOffset[ia]; ja < exidx.DoublesFromAdetOffset[ia + 1]; ja++) {
-				size_t jast = exidx.DoublesFromAdetSM[ja];
+			for (uint32_t ja = exidx.DoublesFromAdetOffset[ia]; ja < exidx.DoublesFromAdetOffset[ia + 1]; ja++) {
+				uint32_t jast = exidx.DoublesFromAdetSM[ja];
 				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
 				if (idxa >= 0) {
 					if (jast != tidxmap.BdetToAdetSM[idxa])
@@ -179,10 +179,10 @@ public:
 			return;
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
-			// single alpha excitations
-			for (size_t jb = exidx.SinglesFromBdetOffset[ib]; jb < exidx.SinglesFromBdetOffset[ib + 1]; jb++) {
-				size_t jbst = exidx.SinglesFromBdetSM[jb];
+			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+			// single beta excitations
+			for (uint32_t jb = exidx.SinglesFromBdetOffset[ib]; jb < exidx.SinglesFromBdetOffset[ib + 1]; jb++) {
+				uint32_t jbst = exidx.SinglesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
@@ -227,10 +227,10 @@ public:
 			return;
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			size_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
-			// double alpha excitations
-			for (size_t jb = exidx.DoublesFromBdetOffset[ib]; jb < exidx.DoublesFromBdetOffset[ib + 1]; jb++) {
-				size_t jbst = exidx.DoublesFromBdetSM[jb];
+			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+			// double beta excitations
+			for (uint32_t jb = exidx.DoublesFromBdetOffset[ib]; jb < exidx.DoublesFromBdetOffset[ib + 1]; jb++) {
+				uint32_t jbst = exidx.DoublesFromBdetSM[jb];
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
 				if (idxb >= 0) {
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
@@ -278,12 +278,12 @@ public:
 			return;
 
 		// alpha-beta two-particle excitations
-		for (size_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
-			size_t jast = exidx.SinglesFromAdetSM[ja];
+		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
+			uint32_t jast = exidx.SinglesFromAdetSM[ja];
 			size_t start_idx = 0;
 			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
-			for (size_t k = exidx.SinglesFromBdetOffset[ibst]; k < exidx.SinglesFromBdetOffset[ibst + 1]; k++) {
-				size_t jbst = exidx.SinglesFromBdetSM[k];
+			for (uint32_t k = exidx.SinglesFromBdetOffset[ibst]; k < exidx.SinglesFromBdetOffset[ibst + 1]; k++) {
+				uint32_t jbst = exidx.SinglesFromBdetSM[k];
 				if (start_idx >= end_idx)
 					break;
 				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);

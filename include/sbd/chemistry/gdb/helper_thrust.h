@@ -185,28 +185,28 @@ class ExcitationLookupThrust
 {
 public:
     int slide;
-    size_t* SelfFromAdetOffset;
-    size_t* SelfFromBdetOffset;
-    size_t* SinglesFromAdetOffset;
-    size_t* SinglesFromBdetOffset;
-    size_t* DoublesFromAdetOffset;
-    size_t* DoublesFromBdetOffset;
-    size_t* SelfFromAdetSM;
-    size_t* SelfFromBdetSM;
-    size_t* SinglesFromAdetSM;
+    uint32_t* SelfFromAdetOffset;
+    uint32_t* SelfFromBdetOffset;
+    uint32_t* SinglesFromAdetOffset;
+    uint32_t* SinglesFromBdetOffset;
+    uint32_t* DoublesFromAdetOffset;
+    uint32_t* DoublesFromBdetOffset;
+    uint32_t* SelfFromAdetSM;
+    uint32_t* SelfFromBdetSM;
+    uint32_t* SinglesFromAdetSM;
     int* SinglesAdetCrAnSM;
-    size_t* SinglesFromBdetSM;
+    uint32_t* SinglesFromBdetSM;
     int* SinglesBdetCrAnSM;
-    size_t* DoublesFromAdetSM;
+    uint32_t* DoublesFromAdetSM;
     int* DoublesAdetCrAnSM;
-    size_t* DoublesFromBdetSM;
+    uint32_t* DoublesFromBdetSM;
     int* DoublesBdetCrAnSM;
-    size_t size_self_adet = 0;
-    size_t size_self_bdet = 0;
-    size_t size_single_adet = 0;
-    size_t size_single_bdet = 0;
-    size_t size_double_adet = 0;
-    size_t size_double_bdet = 0;
+    uint32_t size_self_adet = 0;
+    uint32_t size_self_bdet = 0;
+    uint32_t size_single_adet = 0;
+    uint32_t size_single_bdet = 0;
+    uint32_t size_double_adet = 0;
+    uint32_t size_double_bdet = 0;
 
     ExcitationLookupThrust() {}
 
@@ -238,68 +238,74 @@ public:
         size_double_bdet = other.size_double_bdet;
     }
 
-    ExcitationLookupThrust(thrust::device_vector<size_t>& storage, thrust::device_vector<int>& cran_storage, const ExcitationLookup& exidx)
+    ExcitationLookupThrust(thrust::device_vector<uint32_t>& storage, thrust::device_vector<int>& cran_storage, const ExcitationLookup& exidx)
     {
         size_t size = 0;
 
         slide = exidx.slide;
 
-        std::vector<size_t> offset_self_adet(exidx.SelfFromAdetLen.size() + 1);
+        std::vector<uint32_t> offset_self_adet(exidx.SelfFromAdetLen.size() + 1);
         for(size_t i=0; i < exidx.SelfFromAdetLen.size(); i++) {
             offset_self_adet[i] = size_self_adet;
-            size_self_adet += exidx.SelfFromAdetLen[i];
+            assert(exidx.SelfFromAdetLen[i] <= UINT32_MAX - (size_t)size_self_adet);
+            size_self_adet += static_cast<uint32_t>(exidx.SelfFromAdetLen[i]);
             size++;
         }
         offset_self_adet[exidx.SelfFromAdetLen.size()] = size_self_adet;
-        size += size_self_adet + 1;
+        size += (size_t)size_self_adet + 1;
 
-        std::vector<size_t> offset_self_bdet(exidx.SelfFromBdetLen.size() + 1);
+        std::vector<uint32_t> offset_self_bdet(exidx.SelfFromBdetLen.size() + 1);
         for(size_t i=0; i < exidx.SelfFromBdetLen.size(); i++) {
             offset_self_bdet[i] = size_self_bdet;
-            size_self_bdet += exidx.SelfFromBdetLen[i];
+            assert(exidx.SelfFromBdetLen[i] <= UINT32_MAX - (size_t)size_self_bdet);
+            size_self_bdet += static_cast<uint32_t>(exidx.SelfFromBdetLen[i]);
             size++;
         }
         offset_self_bdet[exidx.SelfFromBdetLen.size()] = size_self_bdet;
-        size += size_self_bdet + 1;
+        size += (size_t)size_self_bdet + 1;
 
-        std::vector<size_t> offset_single_adet(exidx.SinglesFromAdetLen.size() + 1);
+        std::vector<uint32_t> offset_single_adet(exidx.SinglesFromAdetLen.size() + 1);
         for(size_t i=0; i < exidx.SinglesFromAdetLen.size(); i++) {
             offset_single_adet[i] = size_single_adet;
-            size_single_adet += exidx.SinglesFromAdetLen[i];
+            assert(exidx.SinglesFromAdetLen[i] <= UINT32_MAX - (size_t)size_single_adet);
+            size_single_adet += static_cast<uint32_t>(exidx.SinglesFromAdetLen[i]);
             size++;
         }
         offset_single_adet[exidx.SinglesFromAdetLen.size()] = size_single_adet;
-        size += size_single_adet + 1;
+        size += (size_t)size_single_adet + 1;
 
-        std::vector<size_t> offset_double_adet(exidx.DoublesFromAdetLen.size() + 1);
+        std::vector<uint32_t> offset_double_adet(exidx.DoublesFromAdetLen.size() + 1);
         for(size_t i=0; i < exidx.DoublesFromAdetLen.size(); i++) {
             offset_double_adet[i] = size_double_adet;
-            size_double_adet += exidx.DoublesFromAdetLen[i];
+            assert(exidx.DoublesFromAdetLen[i] <= UINT32_MAX - (size_t)size_double_adet);
+            size_double_adet += static_cast<uint32_t>(exidx.DoublesFromAdetLen[i]);
             size++;
         }
         offset_double_adet[exidx.DoublesFromAdetLen.size()] = size_double_adet;
-        size += size_double_adet + 1;
+        size += (size_t)size_double_adet + 1;
 
-        std::vector<size_t> offset_single_bdet(exidx.SinglesFromBdetLen.size() + 1);
+        std::vector<uint32_t> offset_single_bdet(exidx.SinglesFromBdetLen.size() + 1);
         for(size_t i=0; i < exidx.SinglesFromBdetLen.size(); i++) {
             offset_single_bdet[i] = size_single_bdet;
-            size_single_bdet += exidx.SinglesFromBdetLen[i];
+            assert(exidx.SinglesFromBdetLen[i] <= UINT32_MAX - (size_t)size_single_bdet);
+            size_single_bdet += static_cast<uint32_t>(exidx.SinglesFromBdetLen[i]);
             size++;
         }
         offset_single_bdet[exidx.SinglesFromBdetLen.size()] = size_single_bdet;
-        size += size_single_bdet + 1;
+        size += (size_t)size_single_bdet + 1;
 
-        std::vector<size_t> offset_double_bdet(exidx.DoublesFromBdetLen.size() + 1);
+        std::vector<uint32_t> offset_double_bdet(exidx.DoublesFromBdetLen.size() + 1);
         for(size_t i=0; i < exidx.DoublesFromBdetLen.size(); i++) {
             offset_double_bdet[i] = size_double_bdet;
-            size_double_bdet += exidx.DoublesFromBdetLen[i];
+            assert(exidx.DoublesFromBdetLen[i] <= UINT32_MAX - (size_t)size_double_bdet);
+            size_double_bdet += static_cast<uint32_t>(exidx.DoublesFromBdetLen[i]);
             size++;
         }
         offset_double_bdet[exidx.DoublesFromBdetLen.size()] = size_double_bdet;
-        size += size_double_bdet + 1;
+        size += (size_t)size_double_bdet + 1;
 
         storage.resize(size);
-        size_t* base_memory = (size_t*)thrust::raw_pointer_cast(storage.data());
+        uint32_t* base_memory = thrust::raw_pointer_cast(storage.data());
 
         size_t count = 0;
         // store offset
@@ -327,8 +333,14 @@ public:
         thrust::copy_n(offset_double_bdet.begin(), offset_double_bdet.size(), storage.begin() + count);
         count += offset_double_bdet.size();
 
-        // copy SMs
-        thrust::copy_n(exidx.storage.begin(), size - count, storage.begin() + count);
+        // copy SMs (exidx.storage is size_t; convert to uint32_t with overflow assertions)
+        size_t sm_count = size - count;
+        std::vector<uint32_t> sm_buf(sm_count);
+        for (size_t i = 0; i < sm_count; i++) {
+            assert(exidx.storage[i] <= UINT32_MAX);
+            sm_buf[i] = static_cast<uint32_t>(exidx.storage[i]);
+        }
+        thrust::copy_n(sm_buf.begin(), sm_count, storage.begin() + count);
         SelfFromAdetSM = base_memory + count;
         count += size_self_adet;
         SinglesFromAdetSM = base_memory + count;
@@ -342,7 +354,7 @@ public:
         DoublesFromBdetSM = base_memory + count;
 
         // convert CrAn from AoS to SoA
-        size_t size_cran = size_single_adet * 2 + size_double_adet * 4 + size_single_bdet * 2 + size_double_bdet * 4;
+        size_t size_cran = (size_t)size_single_adet * 2 + (size_t)size_double_adet * 4 + (size_t)size_single_bdet * 2 + (size_t)size_double_bdet * 4;
         std::vector<int> buf;
         count = 0;
 
@@ -350,61 +362,61 @@ public:
         int* base_cran = (int*)thrust::raw_pointer_cast(cran_storage.data());
 
         SinglesAdetCrAnSM = base_cran + count;
-        buf.resize(size_single_adet * 2);
+        buf.resize((size_t)size_single_adet * 2);
 #pragma omp parallel for
         for(size_t i=0; i < exidx.SinglesFromAdetLen.size(); i++) {
             for (int j=0; j <  exidx.SinglesFromAdetLen[i]; j++) {
                 size_t offset = offset_single_adet[i] + j;
                 buf[offset] = exidx.SinglesAdetCrAnSM[i][j * 2];
-                buf[size_single_adet + offset] = exidx.SinglesAdetCrAnSM[i][j * 2 + 1];
+                buf[(size_t)size_single_adet + offset] = exidx.SinglesAdetCrAnSM[i][j * 2 + 1];
             }
         }
-        thrust::copy_n(buf.begin(), size_single_adet * 2, cran_storage.begin() + count);
-        count += size_single_adet * 2;
+        thrust::copy_n(buf.begin(), (size_t)size_single_adet * 2, cran_storage.begin() + count);
+        count += (size_t)size_single_adet * 2;
 
 
         DoublesAdetCrAnSM = base_cran + count;
-        buf.resize(size_double_adet * 4);
+        buf.resize((size_t)size_double_adet * 4);
 #pragma omp parallel for
         for(size_t i=0; i < exidx.DoublesFromAdetLen.size(); i++) {
             for (int j=0; j <  exidx.DoublesFromAdetLen[i]; j++) {
                 size_t offset = offset_double_adet[i] + j;
                 buf[offset] = exidx.DoublesAdetCrAnSM[i][j * 4];
-                buf[size_double_adet + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 1];
-                buf[size_double_adet * 2 + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 2];
-                buf[size_double_adet * 3 + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 3];
+                buf[(size_t)size_double_adet + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 1];
+                buf[(size_t)size_double_adet * 2 + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 2];
+                buf[(size_t)size_double_adet * 3 + offset] = exidx.DoublesAdetCrAnSM[i][j * 4 + 3];
             }
         }
-        thrust::copy_n(buf.begin(), size_double_adet * 4, cran_storage.begin() + count);
-        count += size_double_adet * 4;
+        thrust::copy_n(buf.begin(), (size_t)size_double_adet * 4, cran_storage.begin() + count);
+        count += (size_t)size_double_adet * 4;
 
         SinglesBdetCrAnSM = base_cran + count;
-        buf.resize(size_single_bdet * 2);
+        buf.resize((size_t)size_single_bdet * 2);
 #pragma omp parallel for
         for(size_t i=0; i < exidx.SinglesFromBdetLen.size(); i++) {
             for (int j=0; j <  exidx.SinglesFromBdetLen[i]; j++) {
                 size_t offset = offset_single_bdet[i] + j;
                 buf[offset] = exidx.SinglesBdetCrAnSM[i][j * 2];
-                buf[size_single_bdet + offset] = exidx.SinglesBdetCrAnSM[i][j * 2 + 1];
+                buf[(size_t)size_single_bdet + offset] = exidx.SinglesBdetCrAnSM[i][j * 2 + 1];
             }
         }
-        thrust::copy_n(buf.begin(), size_single_bdet * 2, cran_storage.begin() + count);
-        count += size_single_bdet * 2;
+        thrust::copy_n(buf.begin(), (size_t)size_single_bdet * 2, cran_storage.begin() + count);
+        count += (size_t)size_single_bdet * 2;
 
         DoublesBdetCrAnSM = base_cran + count;
-        buf.resize(size_double_bdet * 4);
+        buf.resize((size_t)size_double_bdet * 4);
 #pragma omp parallel for
         for(size_t i=0; i < exidx.DoublesFromBdetLen.size(); i++) {
             for (int j=0; j <  exidx.DoublesFromBdetLen[i]; j++) {
                 size_t offset = offset_double_bdet[i] + j;
                 buf[offset] = exidx.DoublesBdetCrAnSM[i][j * 4];
-                buf[size_double_bdet + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 1];
-                buf[size_double_bdet * 2 + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 2];
-                buf[size_double_bdet * 3 + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 3];
+                buf[(size_t)size_double_bdet + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 1];
+                buf[(size_t)size_double_bdet * 2 + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 2];
+                buf[(size_t)size_double_bdet * 3 + offset] = exidx.DoublesBdetCrAnSM[i][j * 4 + 3];
             }
         }
-        thrust::copy_n(buf.begin(), size_double_bdet * 4, cran_storage.begin() + count);
-        count += size_double_bdet * 4;
+        thrust::copy_n(buf.begin(), (size_t)size_double_bdet * 4, cran_storage.begin() + count);
+        count += (size_t)size_double_bdet * 4;
     }
 
 
