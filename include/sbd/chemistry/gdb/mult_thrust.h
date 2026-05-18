@@ -18,7 +18,7 @@
 //                  + per-iteration ballot-based candidate buffer.
 // Single code path for all sizes — no #ifdef'd duplicate body.
 #ifndef SBD_GDB_SUBWARP_SIZE
-  #define SBD_GDB_SUBWARP_SIZE 1
+  #define SBD_GDB_SUBWARP_SIZE 8
 #endif
 static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
               SBD_GDB_SUBWARP_SIZE == 2  ||
@@ -33,7 +33,7 @@ static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
 // across all five mult kernels). Set independently to sweep the AlphaBeta
 // subwarp size without changing the other four kernels.
 #ifndef SBD_GDB_AB_SUBWARP_SIZE
-  #define SBD_GDB_AB_SUBWARP_SIZE SBD_GDB_SUBWARP_SIZE
+  #define SBD_GDB_AB_SUBWARP_SIZE 32
 #endif
 static_assert(SBD_GDB_AB_SUBWARP_SIZE == 1  ||
               SBD_GDB_AB_SUBWARP_SIZE == 2  ||
@@ -51,7 +51,7 @@ namespace gdb
 {
 
 #ifndef SBD_MULT_BLOCK_SIZE
-  #define SBD_MULT_BLOCK_SIZE 32
+  #define SBD_MULT_BLOCK_SIZE 64
 #endif
 static_assert(SBD_MULT_BLOCK_SIZE == 32  ||
               SBD_MULT_BLOCK_SIZE == 64  ||
@@ -76,7 +76,7 @@ static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_AB_SUBWARP_SIZE == 0,
 //   mbpsm=20 → 1280 threads/SM (62.5% occupancy); 51 regs/thread
 //   mbpsm=16 → 1024 threads/SM (50% occupancy); 64 regs/thread
 #ifndef SBD_MULT_MIN_BLOCKS_PER_SM
-  #define SBD_MULT_MIN_BLOCKS_PER_SM 32
+  #define SBD_MULT_MIN_BLOCKS_PER_SM 18
 #endif
 static_assert(SBD_MULT_MIN_BLOCKS_PER_SM >= 1 &&
               SBD_MULT_MIN_BLOCKS_PER_SM <= 32,
