@@ -8,6 +8,7 @@
 
 #include "sbd/framework/mpi_utility_thrust.h"
 #include <cassert>
+#include <chrono>
 
 // SUBWARP threading for MultAlphaBetaKernel (track gh-A).
 // SBD_GDB_SUBWARP_SIZE selects the threading granularity:
@@ -26,6 +27,22 @@ static_assert(SBD_GDB_SUBWARP_SIZE == 1  ||
               SBD_GDB_SUBWARP_SIZE == 16 ||
               SBD_GDB_SUBWARP_SIZE == 32,
               "SBD_GDB_SUBWARP_SIZE must be 1, 2, 4, 8, 16, or 32");
+
+// SBD_GDB_AB_SUBWARP_SIZE overrides SubwarpSize for MultAlphaBetaKernel only.
+// When unset, defaults to SBD_GDB_SUBWARP_SIZE (uniform subwarp granularity
+// across all five mult kernels). Set independently to sweep the AlphaBeta
+// subwarp size without changing the other four kernels.
+#ifndef SBD_GDB_AB_SUBWARP_SIZE
+  #define SBD_GDB_AB_SUBWARP_SIZE SBD_GDB_SUBWARP_SIZE
+#endif
+static_assert(SBD_GDB_AB_SUBWARP_SIZE == 1  ||
+              SBD_GDB_AB_SUBWARP_SIZE == 2  ||
+              SBD_GDB_AB_SUBWARP_SIZE == 4  ||
+              SBD_GDB_AB_SUBWARP_SIZE == 8  ||
+              SBD_GDB_AB_SUBWARP_SIZE == 16 ||
+              SBD_GDB_AB_SUBWARP_SIZE == 32,
+              "SBD_GDB_AB_SUBWARP_SIZE must be 1, 2, 4, 8, 16, or 32");
+
 #include <cub/warp/warp_reduce.cuh>
 
 namespace sbd
@@ -43,6 +60,8 @@ static_assert(SBD_MULT_BLOCK_SIZE == 32  ||
               "SBD_MULT_BLOCK_SIZE must be 32, 64, 128, or 256");
 static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_SUBWARP_SIZE == 0,
               "SBD_MULT_BLOCK_SIZE must be a multiple of SBD_GDB_SUBWARP_SIZE.");
+static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_AB_SUBWARP_SIZE == 0,
+              "SBD_MULT_BLOCK_SIZE must be a multiple of SBD_GDB_AB_SUBWARP_SIZE.");
 
 // SBD_MULT_MIN_BLOCKS_PER_SM tunes the second argument of
 // __launch_bounds__ on mult_for_each_n_kernel — the
@@ -494,7 +513,7 @@ template <typename ElemT>
 class MultAlphaBetaKernel : public MultKernelBase<ElemT>
 {
 public:
-    using MultKernelBase<ElemT>::SubwarpSize;
+    static constexpr int SubwarpSize = SBD_GDB_AB_SUBWARP_SIZE;
     using MultKernelBase<ElemT>::BlockSize;
 protected:
 	DetIndexMapThrust idxmap;
@@ -708,6 +727,15 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	}
 
 	MpiSlider<ElemT> slider;
+#ifdef SBD_MULT_TIME_KERNELS
+	double _t_sa = 0, _t_da = 0, _t_sb = 0, _t_db = 0, _t_ab = 0;
+	using _ck = std::chrono::steady_clock;
+	auto _timed = [](auto n, auto& kern, double& accum) {
+		auto t0 = _ck::now();
+		launch_mult_for_each_n(n, kern);
+		accum += std::chrono::duration<double, std::milli>(_ck::now() - t0).count();
+	};
+#endif
 	for (size_t task = 0; task < exidx.size(); task++) {
         if (task_sent == task) {
             if (task_sent != 0) {
@@ -730,28 +758,54 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		// single alpha excitations
 		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
+#ifdef SBD_MULT_TIME_KERNELS
+		_timed(idxmap.size_adet, kernel_single_alpha, _t_sa);
+#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_single_alpha);
+#endif
 
 		// double alpha excitations
 		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
+#ifdef SBD_MULT_TIME_KERNELS
+		_timed(idxmap.size_adet, kernel_double_alpha, _t_da);
+#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_double_alpha);
+#endif
 
 		// single beta excitations
 		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+#ifdef SBD_MULT_TIME_KERNELS
+		_timed(idxmap.size_bdet, kernel_single_beta, _t_sb);
+#else
 		launch_mult_for_each_n(idxmap.size_bdet, kernel_single_beta);
+#endif
 
 		// double beta excitations
 		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+#ifdef SBD_MULT_TIME_KERNELS
+		_timed(idxmap.size_bdet, kernel_double_beta, _t_db);
+#else
 		launch_mult_for_each_n(idxmap.size_bdet, kernel_double_beta);
+#endif
 
 		// alpha-beta excitations
 		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+#ifdef SBD_MULT_TIME_KERNELS
+		_timed(idxmap.size_adet, kernel_alpha_beta, _t_ab);
+#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta);
+#endif
 	} // end task for loop
+
+#ifdef SBD_MULT_TIME_KERNELS
+	if (mpi_rank_t == 0 && mpi_rank_b == 0 && mpi_rank_h == 0)
+		fprintf(stderr, "mult_kernel_ms: tasks=%zu sa=%.1f da=%.1f sb=%.1f db=%.1f ab=%.1f\n",
+		        exidx.size(), _t_sa, _t_da, _t_sb, _t_db, _t_ab);
+#endif
 
 	if (mpi_size_t > 1)
 		MpiAllreduce(wb, MPI_SUM, this->t_comm());
