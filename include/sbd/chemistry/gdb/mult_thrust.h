@@ -7,6 +7,7 @@
 
 
 #include "sbd/framework/mpi_utility_thrust.h"
+#include <cassert>
 
 // SUBWARP threading for MultAlphaBetaKernel (track gh-A).
 // SBD_GDB_SUBWARP_SIZE selects the threading granularity:
@@ -66,20 +67,25 @@ static_assert(SBD_MULT_MIN_BLOCKS_PER_SM >= 1 &&
 // thrust::for_each_n at the run()-level call sites with a fixed-block
 // launch so the v2 SUBWARP-parallel kernel's shared-memory sizing
 // (`BUF_TOTAL = 2 * SBD_MULT_BLOCK_SIZE`) matches the actual block size.
-template <int BlockSize, typename Functor>
-__global__ __launch_bounds__(BlockSize, SBD_MULT_MIN_BLOCKS_PER_SM)
+// BlockSize and MinBlocksPerSM are read from the Functor class (static constexpr
+// members defined in MultKernelBase); n is the number of subwarps, not threads.
+template <typename Functor>
+__global__ __launch_bounds__(Functor::BlockSize, Functor::MinBlocksPerSM)
 void mult_for_each_n_kernel(size_t n, Functor functor)
 {
-    size_t i = static_cast<size_t>(blockIdx.x) * BlockSize + threadIdx.x;
+    size_t i = static_cast<size_t>(blockIdx.x) * Functor::BlockSize + threadIdx.x;
     if (i < n) functor(i);
 }
 
-template <int BlockSize, typename Functor>
-inline void launch_mult_for_each_n(size_t n, Functor functor)
+template <typename Functor>
+inline void launch_mult_for_each_n(size_t n_subwarps, Functor functor)
 {
-    if (n == 0) return;
-    const size_t grid = (n + BlockSize - 1) / BlockSize;
-    mult_for_each_n_kernel<BlockSize><<<grid, BlockSize>>>(n, functor);
+    if (n_subwarps == 0) return;
+    constexpr int BS = Functor::BlockSize;
+    constexpr int SW = Functor::SubwarpSize;
+    const size_t n_threads = n_subwarps * SW;
+    const size_t grid = (n_threads + BS - 1) / BS;
+    mult_for_each_n_kernel<Functor><<<grid, BS>>>(n_threads, functor);
     // E1 (advice-from-parent §5): force per-launch stream serialization to
     // test the stream-ordering hypothesis. If this resolves the b_comm>=3
     // Davidson hang, the legacy default stream is the contention surface.
@@ -206,11 +212,13 @@ void MultGDBThrust<ElemT>::Init(
 
 template <typename ElemT>
 class MultKernelBase : public DeterminantKernels<ElemT> {
+public:
+    static constexpr int BlockSize      = SBD_MULT_BLOCK_SIZE;
+    static constexpr int SubwarpSize    = SBD_GDB_SUBWARP_SIZE;
+    static constexpr int MinBlocksPerSM = SBD_MULT_MIN_BLOCKS_PER_SM;
 protected:
     ElemT *wb;
     ElemT* twk;
-    size_t mpi_rank_h;
-    size_t mpi_size_h;
     size_t* det;
 public:
     MultKernelBase() {}
@@ -233,8 +241,7 @@ public:
 
     void set_mpi_size(size_t h_rank, size_t h_size)
     {
-        mpi_rank_h = h_rank;
-        mpi_size_h = h_size;
+        assert(h_rank == 0 && h_size == 1);
     }
 };
 
@@ -242,6 +249,8 @@ public:
 template <typename ElemT>
 class MultSingleAlphaKernel : public MultKernelBase<ElemT>
 {
+public:
+    using MultKernelBase<ElemT>::SubwarpSize;
 protected:
 	DetIndexMapThrust idxmap;
 	DetIndexMapThrust tidxmap;
@@ -258,7 +267,7 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		constexpr int SUBWARP = SubwarpSize;
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
@@ -266,8 +275,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
 		typename WarpReduceSum::TempStorage temp_sum;
@@ -301,6 +308,8 @@ public:
 template <typename ElemT>
 class MultDoubleAlphaKernel : public MultKernelBase<ElemT>
 {
+public:
+    using MultKernelBase<ElemT>::SubwarpSize;
 protected:
 	DetIndexMapThrust idxmap;
 	DetIndexMapThrust tidxmap;
@@ -317,7 +326,7 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		constexpr int SUBWARP = SubwarpSize;
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
@@ -325,8 +334,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
 		typename WarpReduceSum::TempStorage temp_sum;
@@ -365,6 +372,8 @@ public:
 template <typename ElemT>
 class MultSingleBetaKernel : public MultKernelBase<ElemT>
 {
+public:
+    using MultKernelBase<ElemT>::SubwarpSize;
 protected:
 	DetIndexMapThrust idxmap;
 	DetIndexMapThrust tidxmap;
@@ -381,7 +390,7 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		constexpr int SUBWARP = SubwarpSize;
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
@@ -389,8 +398,6 @@ public:
 		uint32_t idet = idxmap.BdetToDetSM[i];
 		uint32_t ib   = idxmap.BdetIndex[i];
 		uint32_t ibst = ib;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
 		typename WarpReduceSum::TempStorage temp_sum;
@@ -424,6 +431,8 @@ public:
 template <typename ElemT>
 class MultDoubleBetaKernel : public MultKernelBase<ElemT>
 {
+public:
+    using MultKernelBase<ElemT>::SubwarpSize;
 protected:
 	DetIndexMapThrust idxmap;
 	DetIndexMapThrust tidxmap;
@@ -440,7 +449,7 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP = SBD_GDB_SUBWARP_SIZE;
+		constexpr int SUBWARP = SubwarpSize;
 		size_t i    = arg_i / SUBWARP;
 		int    lane = static_cast<int>(arg_i % SUBWARP);
 
@@ -448,8 +457,6 @@ public:
 		uint32_t idet = idxmap.BdetToDetSM[i];
 		uint32_t ib   = idxmap.BdetIndex[i];
 		uint32_t ibst = ib;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
 		typename WarpReduceSum::TempStorage temp_sum;
@@ -486,6 +493,9 @@ public:
 template <typename ElemT>
 class MultAlphaBetaKernel : public MultKernelBase<ElemT>
 {
+public:
+    using MultKernelBase<ElemT>::SubwarpSize;
+    using MultKernelBase<ElemT>::BlockSize;
 protected:
 	DetIndexMapThrust idxmap;
 	DetIndexMapThrust tidxmap;
@@ -502,8 +512,8 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t arg_i)
     {
-		constexpr int SUBWARP   = SBD_GDB_SUBWARP_SIZE;
-		constexpr int BLOCK     = SBD_MULT_BLOCK_SIZE;
+		constexpr int SUBWARP   = SubwarpSize;
+		constexpr int BLOCK     = BlockSize;
 		constexpr int GROUPS    = BLOCK / SUBWARP;        // SUBWARP groups per block
 		constexpr int BUF_PG    = 2 * SUBWARP;            // slots per group
 		constexpr int BUF_TOTAL = 2 * BLOCK;              // = GROUPS * BUF_PG
@@ -517,8 +527,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		using WarpReduceSum = cub::WarpReduce<ElemT, SUBWARP>;
 		typename WarpReduceSum::TempStorage temp_sum;   // local; shuffle-only at p2 sizes
@@ -722,32 +730,27 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		// single alpha excitations
 		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
-		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_single_alpha);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_single_alpha);
 
 		// double alpha excitations
 		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
-		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_double_alpha);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_double_alpha);
 
 		// single beta excitations
 		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
-		    SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_single_beta);
+		launch_mult_for_each_n(idxmap.size_bdet, kernel_single_beta);
 
 		// double beta excitations
 		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
-		    SBD_GDB_SUBWARP_SIZE * idxmap.size_bdet, kernel_double_beta);
+		launch_mult_for_each_n(idxmap.size_bdet, kernel_double_beta);
 
 		// alpha-beta excitations
 		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n<SBD_MULT_BLOCK_SIZE>(
-		    SBD_GDB_SUBWARP_SIZE * idxmap.size_adet, kernel_alpha_beta);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta);
 	} // end task for loop
 
 	if (mpi_size_t > 1)
@@ -808,10 +811,8 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		if (i % this->mpi_size_h == this->mpi_rank_h) {
-	        size_t* Det = this->det + i * this->D_size;
-            hii[i] = this->ZeroExcite(Det);
-		}
+        size_t* Det = this->det + i * this->D_size;
+        hii[i] = this->ZeroExcite(Det);
     }
 };
 

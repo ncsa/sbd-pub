@@ -45,9 +45,7 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-		if( (i % this->mpi_size_h) == this->mpi_rank_h ) {
-			this->correlation.ZeroDiffCorrelation(this->det + i * this->D_size, this->wb[i]);
-        }
+        this->correlation.ZeroDiffCorrelation(this->det + i * this->D_size, this->wb[i]);
     }
 };
 
@@ -76,8 +74,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
 			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
@@ -124,8 +120,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
 			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
@@ -175,8 +169,6 @@ public:
 		uint32_t idet = idxmap.BdetToDetSM[i];
 		uint32_t ib   = idxmap.BdetIndex[i];
 		uint32_t ibst = ib;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
 			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
@@ -223,8 +215,6 @@ public:
 		uint32_t idet = idxmap.BdetToDetSM[i];
 		uint32_t ib   = idxmap.BdetIndex[i];
 		uint32_t ibst = ib;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
 			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
@@ -274,8 +264,6 @@ public:
 		uint32_t idet = idxmap.AdetToDetSM[i];
 		uint32_t ia   = idxmap.AdetIndex[i];
 		uint32_t iast = ia;
-		if (idet % this->mpi_size_h != this->mpi_rank_h)
-			return;
 
 		// alpha-beta two-particle excitations
 		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
