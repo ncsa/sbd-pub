@@ -66,17 +66,17 @@ static_assert(SBD_MULT_BLOCK_SIZE % SBD_GDB_AB_SUBWARP_SIZE == 0,
 // SBD_MULT_MIN_BLOCKS_PER_SM tunes the second argument of
 // __launch_bounds__ on mult_for_each_n_kernel — the
 // minBlocksPerMultiprocessor hint the compiler uses to pick a register
-// budget per thread. Default 32 = H100 hardware maximum; lower values
-// trade occupancy for a larger per-thread register budget.
+// budget per thread. Lower values trade occupancy for a larger per-thread
+// register budget.
 //   threads/SM = SBD_MULT_BLOCK_SIZE × SBD_MULT_MIN_BLOCKS_PER_SM
 //   regs/thread budget ≈ 65536 / threads/SM
 // Examples (BS=64):
 //   mbpsm=32 → 2048 threads/SM (100% occupancy); 32 regs/thread
 //   mbpsm=24 → 1536 threads/SM (75% occupancy); 42 regs/thread
-//   mbpsm=20 → 1280 threads/SM (62.5% occupancy); 51 regs/thread
+//   mbpsm=20 → 1280 threads/SM (62.5% occupancy); 51 regs/thread  ← default (track U)
 //   mbpsm=16 → 1024 threads/SM (50% occupancy); 64 regs/thread
 #ifndef SBD_MULT_MIN_BLOCKS_PER_SM
-  #define SBD_MULT_MIN_BLOCKS_PER_SM 18
+  #define SBD_MULT_MIN_BLOCKS_PER_SM 20
 #endif
 static_assert(SBD_MULT_MIN_BLOCKS_PER_SM >= 1 &&
               SBD_MULT_MIN_BLOCKS_PER_SM <= 32,
