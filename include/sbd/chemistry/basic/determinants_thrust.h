@@ -168,27 +168,27 @@ public:
     // the determinant itself. Parity of (start, end) = detsum_bit[end-1] XOR
     // detsum_bit[start]; no start-bit correction needed because the inclusive
     // scan already excludes the start orbital from the interval count.
-    inline __device__ __host__ void parity_fast(const size_t* detsum, int start, int end, double& sgn)
+    // Returns true if the interval contains an odd number of occupied orbitals
+    // (i.e., the parity contributes a sign flip).
+    inline __device__ __host__ bool parity_fast(const size_t* detsum, int start, int end)
     {
-        if (start >= end) return;
+        if (start >= end) return false;
         size_t p_start = (detsum[start       / bit_length] >> (start       % bit_length)) & 1;
         size_t p_end1  = (detsum[(end - 1)   / bit_length] >> ((end - 1)   % bit_length)) & 1;
-        if (p_start ^ p_end1) sgn *= -1.0;
+        return (p_start ^ p_end1) != 0;
     }
 
     inline __device__ __host__ ElemT TwoExciteFast(const size_t* detsum,
                                                     int i, int j, int a, int b)
     {
-        double sgn = 1.0;
         int I = std::min(i, j);
         int J = std::max(i, j);
         int A = std::min(a, b);
         int B = std::max(a, b);
-        parity_fast(detsum, std::min(I, A), std::max(I, A), sgn);
-        parity_fast(detsum, std::min(J, B), std::max(J, B), sgn);
-        if (A > J || B < I)
-            sgn *= -1.0;
-        return ElemT(sgn) * (I2.Value(A, I, B, J) - I2.Value(A, J, B, I));
+        bool parity_I_A = parity_fast(detsum, std::min(I, A), std::max(I, A));
+        bool parity_J_B = parity_fast(detsum, std::min(J, B), std::max(J, B));
+        const ElemT sgn = ((A > J || B < I) ^ parity_I_A ^ parity_J_B) ? ElemT(-1) : ElemT(1);
+        return sgn * (I2.Value(A, I, B, J) - I2.Value(A, J, B, I));
     }
 };
 
