@@ -161,6 +161,35 @@ public:
             sgn *= -1.0;
         return ElemT(sgn) * (I2.Value(A, I, B, J) - I2.Value(A, J, B, I));
     }
+
+    // O(1) parity of open interval (start, end) using a precomputed inclusive
+    // prefix-parity array (detsum). detsum[k] = parity of bits [0, k] of the
+    // determinant bit string, stored as a single bit in the same word layout as
+    // the determinant itself. Parity of (start, end) = detsum_bit[end-1] XOR
+    // detsum_bit[start]; no start-bit correction needed because the inclusive
+    // scan already excludes the start orbital from the interval count.
+    inline __device__ __host__ void parity_fast(const size_t* detsum, int start, int end, double& sgn)
+    {
+        if (start >= end) return;
+        size_t p_start = (detsum[start       / bit_length] >> (start       % bit_length)) & 1;
+        size_t p_end1  = (detsum[(end - 1)   / bit_length] >> ((end - 1)   % bit_length)) & 1;
+        if (p_start ^ p_end1) sgn *= -1.0;
+    }
+
+    inline __device__ __host__ ElemT TwoExciteFast(const size_t* detsum,
+                                                    int i, int j, int a, int b)
+    {
+        double sgn = 1.0;
+        int I = std::min(i, j);
+        int J = std::max(i, j);
+        int A = std::min(a, b);
+        int B = std::max(a, b);
+        parity_fast(detsum, std::min(I, A), std::max(I, A), sgn);
+        parity_fast(detsum, std::min(J, B), std::max(J, B), sgn);
+        if (A > J || B < I)
+            sgn *= -1.0;
+        return ElemT(sgn) * (I2.Value(A, I, B, J) - I2.Value(A, J, B, I));
+    }
 };
 
 }

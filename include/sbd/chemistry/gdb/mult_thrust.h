@@ -117,6 +117,7 @@ protected:
 	thrust::device_vector<uint32_t> idxmap_storage;
 	DetIndexMapThrust idxmap;
     thrust::device_vector<size_t> dets_;
+    thrust::device_vector<size_t> detsums_;
     ElemT I0_;
     oneInt_Thrust<ElemT> I1_;
     thrust::device_vector<ElemT> I1_store;
@@ -147,6 +148,10 @@ public:
 	const thrust::device_vector<size_t>& dets(void) const
 	{
 		return dets_;
+	}
+	const thrust::device_vector<size_t>& detsums(void) const
+	{
+		return detsums_;
 	}
 
 	void Init(
@@ -225,6 +230,35 @@ void MultGDBThrust<ElemT>::Init(
         thrust::copy_n(dets_in[i].begin(), this->D_size_, dets_.begin() + i * this->D_size_);
     }
 
+    // compute detsums_: inclusive prefix parity of each determinant's bit string.
+    // detsums_[d*D_size+w] bit k = parity of bits [0, w*bit_length+k] of det d.
+    // Computed via a 6-step parallel prefix XOR scan per word, carrying parity
+    // between words. Used by parity_fast() / TwoExciteFast() for O(1) parity lookup.
+    {
+        const size_t n_dets = dets_in.size();
+        const size_t bl     = bit_length_in;
+        std::vector<size_t> detsums_host(this->D_size_ * n_dets);
+        for (size_t d = 0; d < n_dets; d++) {
+            size_t carry = 0; // parity of all bits in preceding words (0 or 1)
+            for (size_t w = 0; w < this->D_size_; w++) {
+                size_t q = dets_in[d][w];
+                // inclusive prefix XOR scan: q[k] = XOR of original bits [0..k]
+                q ^= (q << 1);
+                q ^= (q << 2);
+                q ^= (q << 4);
+                q ^= (q << 8);
+                q ^= (q << 16);
+                q ^= (q << 32);
+                // apply carry from previous words
+                if (carry) q = ~q;
+                detsums_host[d * this->D_size_ + w] = q;
+                carry = (q >> (bl - 1)) & 1; // parity of bits [0, (w+1)*bl-1]
+            }
+        }
+        detsums_.resize(this->D_size_ * n_dets);
+        thrust::copy_n(detsums_host.begin(), detsums_host.size(), detsums_.begin());
+    }
+
 	// copy indexmap
 	idxmap = DetIndexMapThrust(idxmap_storage, idxmap_in);
 }
@@ -239,6 +273,7 @@ protected:
     ElemT *wb;
     ElemT* twk;
     size_t* det;
+    size_t* detsum;
 public:
     MultKernelBase() {}
 
@@ -249,13 +284,15 @@ public:
     {
         wb = (ElemT*)thrust::raw_pointer_cast(v_wb.data());
         twk = (ElemT*)thrust::raw_pointer_cast(v_t.data());
-        det = (size_t*)thrust::raw_pointer_cast(data.dets().data());
+        det    = (size_t*)thrust::raw_pointer_cast(data.dets().data());
+        detsum = (size_t*)thrust::raw_pointer_cast(data.detsums().data());
     }
 
     MultKernelBase(const MultGDBThrust<ElemT>& data)
                  : DeterminantKernels<ElemT>(data.bit_length(), data.norbs(), data.I0(), data.I1(), data.I2())
     {
-        det = (size_t*)thrust::raw_pointer_cast(data.dets().data());
+        det    = (size_t*)thrust::raw_pointer_cast(data.dets().data());
+        detsum = (size_t*)thrust::raw_pointer_cast(data.detsums().data());
     }
 
     void set_mpi_size(size_t h_rank, size_t h_size)
@@ -370,7 +407,7 @@ public:
 					if (jast != tidxmap.BdetToAdetSM[idxa])
 						continue;
 					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
-					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+					ElemT eij = this->TwoExciteFast(this->detsum + idet * this->D_size,
 											exidx.DoublesAdetCrAnSM[ja],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet],
 											exidx.DoublesAdetCrAnSM[ja + exidx.size_double_adet * 2],
@@ -493,7 +530,7 @@ public:
 					if (jbst != tidxmap.AdetToBdetSM[idxb])
 						continue;
 					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
-					ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+					ElemT eij = this->TwoExciteFast(this->detsum + idet * this->D_size,
 											exidx.DoublesBdetCrAnSM[jb],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet],
 											exidx.DoublesBdetCrAnSM[jb + exidx.size_double_bdet * 2],
@@ -636,7 +673,7 @@ public:
 						uint32_t my_ja   = s_ja  [my_slot];
 						uint32_t my_k    = s_k   [my_slot];
 						uint32_t jdet    = tidxmap.AdetToDetSM[my_idxb];
-						ElemT eij = this->TwoExcite(this->det + idet * this->D_size,
+						ElemT eij = this->TwoExciteFast(this->detsum + idet * this->D_size,
 						                    exidx.SinglesAdetCrAnSM[my_ja],
 						                    exidx.SinglesBdetCrAnSM[my_k],
 						                    exidx.SinglesAdetCrAnSM[my_ja + exidx.size_single_adet],
