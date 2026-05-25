@@ -7,16 +7,11 @@
 
 #include <cassert>
 
-namespace sbd {
-
-<<<<<<< HEAD
 #include "sbd/chemistry/tpb/helper.h"
-
-//#include <thrust/device_vector.h>
+#include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 
-=======
->>>>>>> upstream/main
+namespace sbd {
 
 template <typename ElemT>
 class TaskHelpersThrust {
