@@ -80,10 +80,8 @@ public:
 			// single alpha excitations
 			for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 				uint32_t jast = exidx.SinglesFromAdetSM[ja];
-				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
-				if (idxa >= 0) {
-					if (jast != tidxmap.BdetToAdetSM[idxa])
-						continue;
+				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
+				if (found_a) {
 					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					this->correlation.OneDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
@@ -126,10 +124,8 @@ public:
 			// double alpha excitations
 			for (uint32_t ja = exidx.DoublesFromAdetOffset[ia]; ja < exidx.DoublesFromAdetOffset[ia + 1]; ja++) {
 				uint32_t jast = exidx.DoublesFromAdetSM[ja];
-				int64_t idxa = tidxmap.bdet_lower_bound(jbst, jast);
-				if (idxa >= 0) {
-					if (jast != tidxmap.BdetToAdetSM[idxa])
-						continue;
+				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
+				if (found_a) {
 					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
@@ -175,10 +171,8 @@ public:
 			// single beta excitations
 			for (uint32_t jb = exidx.SinglesFromBdetOffset[ib]; jb < exidx.SinglesFromBdetOffset[ib + 1]; jb++) {
 				uint32_t jbst = exidx.SinglesFromBdetSM[jb];
-				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
-				if (idxb >= 0) {
-					if (jbst != tidxmap.AdetToBdetSM[idxb])
-						continue;
+				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
+				if (found_b) {
 					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					this->correlation.OneDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
@@ -221,10 +215,8 @@ public:
 			// double beta excitations
 			for (uint32_t jb = exidx.DoublesFromBdetOffset[ib]; jb < exidx.DoublesFromBdetOffset[ib + 1]; jb++) {
 				uint32_t jbst = exidx.DoublesFromBdetSM[jb];
-				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst);
-				if (idxb >= 0) {
-					if (jbst != tidxmap.AdetToBdetSM[idxb])
-						continue;
+				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
+				if (found_b) {
 					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
 											this->wb[idet], this->twk[jdet],
@@ -268,26 +260,17 @@ public:
 		// alpha-beta two-particle excitations
 		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
 			uint32_t jast = exidx.SinglesFromAdetSM[ja];
-			size_t start_idx = 0;
-			size_t end_idx = tidxmap.AdetToDetOffset[jast + 1] - tidxmap.AdetToDetOffset[jast];
 			for (uint32_t k = exidx.SinglesFromBdetOffset[ibst]; k < exidx.SinglesFromBdetOffset[ibst + 1]; k++) {
 				uint32_t jbst = exidx.SinglesFromBdetSM[k];
-				if (start_idx >= end_idx)
-					break;
-				int64_t idxb = tidxmap.adet_lower_bound(jast, jbst, start_idx);
-				if (idxb >= 0) {
-					if (jbst != tidxmap.AdetToBdetSM[idxb])
-						continue;
-					start_idx = static_cast<size_t>(idxb) - tidxmap.AdetToDetOffset[jast];
-					if (start_idx < end_idx) {
-						uint32_t jdet = tidxmap.AdetToDetSM[idxb];
-						this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
-											this->wb[idet], this->twk[jdet],
-												exidx.SinglesAdetCrAnSM[ja],
-												exidx.SinglesBdetCrAnSM[k],
-												exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
-												exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
-					}
+				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
+				if (found_b) {
+					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
+					this->correlation.TwoDiffCorrelation(this->det + idet * this->D_size,
+										this->wb[idet], this->twk[jdet],
+											exidx.SinglesAdetCrAnSM[ja],
+											exidx.SinglesBdetCrAnSM[k],
+											exidx.SinglesAdetCrAnSM[ja + exidx.size_single_adet],
+											exidx.SinglesBdetCrAnSM[k + exidx.size_single_bdet]);
 				}
 			}
 		}
