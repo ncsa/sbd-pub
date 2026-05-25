@@ -7,6 +7,10 @@
 
 #include <chrono>
 
+#ifdef USE_OMP_OFFLOAD
+#include "../basic/omp_offload.h"
+#endif
+
 namespace sbd {
 
   // current mult
@@ -174,6 +178,25 @@ namespace sbd {
 	      << mpi_rank_h << "," << mpi_rank_b << "," << mpi_rank_t << ")" << std::endl;
 #endif
 
+#ifdef USE_OMP_OFFLOAD
+    size_t Tmax = T.size();
+    MPI_Allreduce(MPI_IN_PLACE, &Tmax, 1, MPI_UNSIGNED_LONG, MPI_MAX, b_comm);
+
+    // define Wb, T, and R pointers
+    ElemT * Wb_ptr = Wb.data();
+    size_t  Wb_size = Wb.size();
+
+    size_t  T_size = T.size();
+    T.resize(Tmax);
+    ElemT * T_ptr = T.data();
+
+    R.resize(Tmax);
+    ElemT * R_ptr = R.data();
+    size_t  R_size = T_size;
+
+#pragma omp target enter data map(to: T_ptr[0:Tmax], Wb_ptr[0:Wb_size]) map(alloc: R_ptr[0:Tmax])
+#endif
+
     double time_slid = 0.0;
     for(size_t task=0; task < helper.size(); task++) {
 
@@ -192,10 +215,233 @@ namespace sbd {
 #endif
       size_t ketAlphaSize = helper[task].ketAlphaEnd-helper[task].ketAlphaStart;
       size_t ketBetaSize  = helper[task].ketBetaEnd-helper[task].ketBetaStart;
+
+#ifdef USE_OMP_OFFLOAD
+      // ---- GPU path: OpenMP target offload ----
+      // transfer helper flat arrays, adets/bdets, T, Wb to device
+      // use OneExcite_device/TwoExcite_device with CrAn_ptr arrays
+      // use DetFromAlphaBeta on device for DetI
+
+      // Get helper array pointers
+      size_t nAlpha = helper[task].braAlphaEnd - helper[task].braAlphaStart;
+      size_t *SinglesFromAlphaLen = helper[task].SinglesFromAlphaLen;
+      size_t *DoublesFromAlphaLen = helper[task].DoublesFromAlphaLen;
+      const size_t *SinglesFromAlphaOffset = helper[task].SinglesFromAlphaOffset.data();
+      const size_t *DoublesFromAlphaOffset = helper[task].DoublesFromAlphaOffset.data();
+
+      // Use pre-flattened arrays from helper construction (no per-mult() // flattening)
+      size_t singles_alpha_total = helper[task].SinglesFromAlpha_flat.size();
+      size_t doubles_alpha_total = helper[task].DoublesFromAlpha_flat.size();
+      const size_t *SinglesFromAlpha_ptr = helper[task].SinglesFromAlpha_flat.data();
+      const size_t *DoublesFromAlpha_ptr = helper[task].DoublesFromAlpha_flat.data();
+
+      // Also corresponding CrAn arrays for Singles/Alpha and Doubles/Alpha
+      const int *SinglesAlphaCrAn_ptr = helper[task].SinglesAlphaCrAn_flat.data();
+      const int *DoublesAlphaCrAn_ptr = helper[task].DoublesAlphaCrAn_flat.data();
+      size_t singles_alpha_cran_total = helper[task].SinglesAlphaCrAn_flat.size();
+      size_t doubles_alpha_cran_total = helper[task].DoublesAlphaCrAn_flat.size();
+
+      // Get helper array pointers
+      size_t nBeta = helper[task].braBetaEnd - helper[task].braBetaStart;
+      size_t *SinglesFromBetaLen = helper[task].SinglesFromBetaLen;
+      size_t *DoublesFromBetaLen = helper[task].DoublesFromBetaLen;			
+      const size_t *SinglesFromBetaOffset = helper[task].SinglesFromBetaOffset.data();
+      const size_t *DoublesFromBetaOffset = helper[task].DoublesFromBetaOffset.data();
+
+      // Use pre-flattened arrays from helper construction (no per-mult() // flattening)
+      size_t singles_beta_total = helper[task].SinglesFromBeta_flat.size();
+      size_t doubles_beta_total = helper[task].DoublesFromBeta_flat.size();
+      const size_t *SinglesFromBeta_ptr = helper[task].SinglesFromBeta_flat.data();
+      const size_t *DoublesFromBeta_ptr = helper[task].DoublesFromBeta_flat.data();
+
+      // Also corresponding CrAn arrays for Singles/Beta and Doubles/Beta
+      const int *SinglesBetaCrAn_ptr = helper[task].SinglesBetaCrAn_flat.data();
+      const int *DoublesBetaCrAn_ptr = helper[task].DoublesBetaCrAn_flat.data();
+      size_t singles_beta_cran_total = helper[task].SinglesBetaCrAn_flat.size();
+      size_t doubles_beta_cran_total = helper[task].DoublesBetaCrAn_flat.size();
+
+      // Task parameters
+      size_t braAlphaStart = helper[task].braAlphaStart;
+      size_t braAlphaEnd   = helper[task].braAlphaEnd;
+      size_t braBetaStart = helper[task].braBetaStart;
+      size_t braBetaEnd   = helper[task].braBetaEnd;
+      size_t ketAlphaStart = helper[task].ketAlphaStart;
+      size_t ketBetaStart  = helper[task].ketBetaStart;
+
+      // block partition the braBeta loop over rank in the row communicator
+      size_t ibBeg, ibEnd, nwork, extra, ncut;
+      nwork = (braBetaEnd - braBetaStart) / mpi_size_h;
+      extra = (braBetaEnd - braBetaStart) - mpi_size_h*nwork;
+      ncut = mpi_size_h - extra;
+      if (mpi_rank_h < ncut) {
+         ibBeg = braBetaStart + mpi_rank_h*nwork;
+         ibEnd = ibBeg + nwork;
+      }
+      else {
+         ibBeg = braBetaStart + ncut*nwork + (mpi_rank_h - ncut)*(nwork + 1);
+         ibEnd = ibBeg + (nwork + 1);
+      }
+
+      size_t detSize  = (norbs + bit_length - 1) / bit_length;
+      size_t AdetSize = (braAlphaEnd - braAlphaStart)*detSize;
+      size_t BdetSize = (ibEnd - ibBeg)*detSize;
+      //-----------------------------------------------------------------------------------------
+      // use simple arrays Adets, Bdets in place of std::vector<std::vector<size_t>> adets, bdets
+      //-----------------------------------------------------------------------------------------
+      size_t * Adets = (size_t *) malloc(AdetSize*sizeof(size_t));
+      size_t * Bdets = (size_t *) malloc(BdetSize*sizeof(size_t));
+      for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
+        const size_t * ptr = adets[ia].data();
+        for (size_t d = 0; d < detSize; d++) Adets[d + (ia - braAlphaStart)*detSize] = ptr[d];
+      }
+      for (size_t ib = ibBeg; ib < ibEnd; ib++) {
+        const size_t * ptr = bdets[ib].data();
+        for (size_t d = 0; d < detSize; d++) Bdets[d + (ib - ibBeg)*detSize] = ptr[d];
+      }
+
+      #pragma omp target enter data map(to: Adets[0:AdetSize], Bdets[0:BdetSize])
+						
+      if( helper[task].taskType == 2 ) {
+	#pragma omp target teams distribute parallel for collapse(2)            \
+	map(to : SinglesFromAlphaLen[0 : nAlpha],                               \
+		 DoublesFromAlphaLen[0 : nAlpha],                               \
+		 SinglesFromAlphaOffset[0 : nAlpha + 1],                        \
+		 DoublesFromAlphaOffset[0 : nAlpha + 1],                        \
+		 SinglesFromAlpha_ptr[0 : singles_alpha_total],                 \
+		 DoublesFromAlpha_ptr[0 : doubles_alpha_total],                 \
+		 SinglesAlphaCrAn_ptr[0 : singles_alpha_cran_total],            \
+		 DoublesAlphaCrAn_ptr[0 : doubles_alpha_cran_total]) thread_limit(1024)
+	for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
+	  for(size_t ib = ibBeg; ib < ibEnd; ib++) {
+	    size_t braIdx = (ia - braAlphaStart) * braBetaSize	+ (ib - braBetaStart);
+
+	    size_t ia_local = ia - braAlphaStart;
+
+            size_t DetI[SBD_MAX_DETSIZE];
+            DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
+                             &Bdets[(ib - ibBeg)*detSize],
+                             bit_length, norbs, DetI);
+
+	    // single alpha excitation
+	    for(size_t j = SinglesFromAlphaOffset[ia_local]; j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
+              size_t ja = SinglesFromAlpha_ptr[j];
+              size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
+	      int cr = SinglesAlphaCrAn_ptr[2*j + 0];
+	      int an = SinglesAlphaCrAn_ptr[2*j + 1];							
+	      ElemT eij = OneExcite_device(DetI, bit_length, cr, an, I1_ptr, I2_ptr, 2 * norbs);
+	      Wb_ptr[braIdx] += eij * T_ptr[ketIdx];
+    	    }
+	    // double alpha excitation
+	    for (size_t j = DoublesFromAlphaOffset[ia_local]; j < DoublesFromAlphaOffset[ia_local + 1]; j++) {
+	      size_t ja = DoublesFromAlpha_ptr[j];
+	      size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (ib - ketBetaStart);
+	      int cr = DoublesAlphaCrAn_ptr[4*j + 0];
+	      int an = DoublesAlphaCrAn_ptr[4*j + 1];
+	      int bn = DoublesAlphaCrAn_ptr[4*j + 2];
+	      int cn = DoublesAlphaCrAn_ptr[4*j + 3];
+	      ElemT eij = TwoExcite_device(DetI,bit_length, cr, an, bn, cn, I2_ptr);
+	      Wb_ptr[braIdx] += eij * T_ptr[ketIdx];
+	    }
+          } // end for ib
+        } // end for ia
+      } else if ( helper[task].taskType == 1 ) { // alpha range are same
+#pragma omp target teams distribute parallel for collapse(2)                \
+    	map(to : SinglesFromBetaLen[0 : nBeta],                             \
+             DoublesFromBetaLen[0 : nBeta],                                 \
+             SinglesFromBetaOffset[0 : nBeta + 1],                          \
+             DoublesFromBetaOffset[0 : nBeta + 1],                          \
+             SinglesFromBeta_ptr[0 : singles_beta_total],                   \
+             DoublesFromBeta_ptr[0 : doubles_beta_total],                   \
+             SinglesBetaCrAn_ptr[0 : singles_beta_cran_total],              \
+             DoublesBetaCrAn_ptr[0 : doubles_beta_cran_total]) thread_limit(1024)
+
+        for (size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
+          for (size_t ib = ibBeg; ib < ibEnd; ib++) {
+
+            size_t braIdx = (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
+
+            size_t ib_local = ib - braBetaStart;
+
+            size_t DetI[SBD_MAX_DETSIZE];
+            DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
+                             &Bdets[(ib - ibBeg)*detSize],
+                             bit_length, norbs, DetI);
+
+            // Single beta excitations
+            for (size_t j = SinglesFromBetaOffset[ib_local]; j < SinglesFromBetaOffset[ib_local + 1]; j++) {
+              size_t jb = SinglesFromBeta_ptr[j];
+              size_t ketIdx = (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);				
+	      int cr = SinglesBetaCrAn_ptr[2*j + 0];
+	      int an = SinglesBetaCrAn_ptr[2*j + 1];	
+	      ElemT eij = OneExcite_device(DetI,bit_length, cr, an, I1_ptr, I2_ptr, 2 * norbs);
+	      Wb_ptr[braIdx] += eij * T_ptr[ketIdx];
+	    }
+
+	    // Double beta excitations
+	    for (size_t j = DoublesFromBetaOffset[ib_local]; j < DoublesFromBetaOffset[ib_local + 1]; j++) {
+	      size_t jb = DoublesFromBeta_ptr[j];
+	      size_t ketIdx = (ia - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);		
+	      int cr = DoublesBetaCrAn_ptr[4*j + 0];
+	      int an = DoublesBetaCrAn_ptr[4*j + 1];
+	      int bn = DoublesBetaCrAn_ptr[4*j + 2];
+	      int cn = DoublesBetaCrAn_ptr[4*j + 3];
+	      ElemT eij = TwoExcite_device(DetI,bit_length, cr, an, bn, cn, I2_ptr);						
+	      Wb_ptr[braIdx] += eij * T_ptr[ketIdx];
+ 	    }
+          } // end for ib	
+        } // end for ia
+      } else { // taskType == 0: mixed alpha+beta excitations
+	#pragma omp target teams distribute parallel for collapse(2)               \
+		map(to : SinglesFromAlphaLen[0 : nAlpha],                          \
+			 SinglesFromBetaLen[0 : nBeta],                            \
+			 SinglesFromAlphaOffset[0 : nAlpha + 1],                   \
+			 SinglesFromBetaOffset[0 : nBeta + 1],                     \
+			 SinglesFromAlpha_ptr[0 : singles_alpha_total],            \
+			 SinglesFromBeta_ptr[0 : singles_beta_total],              \
+			 SinglesAlphaCrAn_ptr[0 : singles_alpha_cran_total],       \
+			 SinglesBetaCrAn_ptr[0 : singles_beta_cran_total]) thread_limit(1024)
+	for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
+	  for(size_t ib = ibBeg; ib < ibEnd; ib++) {
+
+            size_t DetI[SBD_MAX_DETSIZE];
+            DetFromAlphaBeta(&Adets[(ia - braAlphaStart)*detSize],
+                             &Bdets[(ib - ibBeg)*detSize],
+                             bit_length, norbs, DetI);
+
+  	    size_t braIdx = (ia - braAlphaStart) * braBetaSize + (ib - braBetaStart);
+
+	    size_t ia_local = ia - braAlphaStart;
+	    size_t ib_local = ib - braBetaStart;
+
+	    // Mixed excitations: bra=(ia,ib), ket=(ja,jb)
+ 	    for(size_t j = SinglesFromAlphaOffset[ia_local]; j < SinglesFromAlphaOffset[ia_local + 1]; j++) {
+	      size_t ja = SinglesFromAlpha_ptr[j];
+	      for(size_t k = SinglesFromBetaOffset[ib_local]; k < SinglesFromBetaOffset[ib_local + 1]; k++) {
+	        size_t jb = SinglesFromBeta_ptr[k];
+	        size_t ketIdx = (ja - ketAlphaStart) * ketBetaSize + (jb - ketBetaStart);
+	        int cr = SinglesAlphaCrAn_ptr[2*j + 0];
+	        int an = SinglesBetaCrAn_ptr[2*k + 0];
+	        int bn = SinglesAlphaCrAn_ptr[2*j + 1];
+	        int cn = SinglesBetaCrAn_ptr[2*k + 1];								
+	        ElemT eij = TwoExcite_device(DetI,bit_length,	cr, an, bn, cn, I2_ptr);
+	        Wb_ptr[braIdx] += eij * T_ptr[ketIdx];								
+	      }
+	    }
+	  } // end for ib
+	} // end for ia
+      } // end taskType == 0
+
+      #pragma omp target exit data map(delete: Adets[0:AdetSize], Bdets[0:BdetSize])
+      // free the size_t arrays for alpha and beta bit-strings
+      free(Adets);
+      free(Bdets);
+
+#else
+      // ---- CPU path: OpenMP threading ----
 #pragma omp parallel
       {
-	size_t ia_start = helper[task].braAlphaStart;
-	size_t ia_end   = helper[task].braAlphaEnd;
+	size_t braAlphaStart = helper[task].braAlphaStart;
+	size_t braAlphaEnd   = helper[task].braAlphaEnd;
 
 	auto DetI = DetFromAlphaBeta(adets[0],bdets[0],bit_length,norbs);
 	std::vector<int> c(2,0);
@@ -203,7 +449,7 @@ namespace sbd {
 
 	if( helper[task].taskType == 2 ) { // beta range are same
 #pragma omp for	schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -242,7 +488,7 @@ namespace sbd {
 
 	} else if ( helper[task].taskType == 1 ) { // alpha range are same
 #pragma omp for schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -280,7 +526,7 @@ namespace sbd {
 
 	} else {
 #pragma omp for schedule(dynamic)
-	  for(size_t ia = ia_start; ia < ia_end; ia++) {
+	  for(size_t ia = braAlphaStart; ia < braAlphaEnd; ia++) {
 	    for(size_t ib = helper[task].braBetaStart; ib < helper[task].braBetaEnd; ib++) {
 
 	      size_t braIdx = (ia-helper[task].braAlphaStart)*braBetaSize
@@ -309,7 +555,8 @@ namespace sbd {
 	    } // end for(size_t ib=ib_start; ib < ib_end; ib++)
 	  } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	} // if ( helper[task].taskType == ? )
-      } // end pragma paralell
+      } // end pragma parallel
+#endif // USE_OMP_OFFLOAD
 
       if( helper[task].taskType == 0 && task != helper.size()-1 ) {
 #ifdef SBD_DEBUG_MULT
@@ -329,10 +576,17 @@ namespace sbd {
 #endif
 	int adetslide = helper[task].adetShift-helper[task+1].adetShift;
 	int bdetslide = helper[task].bdetShift-helper[task+1].bdetShift;
+	auto time_slid_start = std::chrono::high_resolution_clock::now();
+#ifdef USE_OMP_OFFLOAD
+#pragma omp target teams distribute parallel for
+        for (size_t i = 0; i < T_size; i++) R_ptr[i] = T_ptr[i];
+        R_size = T_size;
+        Mpi2dSlide(R_ptr, R_size, T_ptr, T_size, adet_comm_size, bdet_comm_size, adetslide, bdetslide, b_comm);
+#else
 	R.resize(T.size());
 	std::memcpy(R.data(),T.data(),T.size()*sizeof(ElemT));
-	auto time_slid_start = std::chrono::high_resolution_clock::now();
 	Mpi2dSlide(R,T,adet_comm_size,bdet_comm_size,adetslide,bdetslide,b_comm);
+#endif
 	auto time_slid_end = std::chrono::high_resolution_clock::now();
 	auto time_slid_count = std::chrono::duration_cast<std::chrono::microseconds>(time_slid_end-time_slid_start).count();
 	time_slid += 1.0e-6 * time_slid_count;
@@ -340,6 +594,10 @@ namespace sbd {
 
     } // end for(size_t task=0; task < helper.size(); task++)
     auto time_mult_end = std::chrono::high_resolution_clock::now();
+
+#ifdef USE_OMP_OFFLOAD
+#pragma omp target exit data map(from: Wb_ptr[0:Wb_size]) map(delete: T_ptr[0:Tmax], R_ptr[0:Tmax])
+#endif
 
     auto time_comm_start = std::chrono::high_resolution_clock::now();
     MpiAllreduce(Wb,MPI_SUM,t_comm);
@@ -569,7 +827,7 @@ namespace sbd {
 	  } // end for(size_t ia=helper[task].braAlphaStart; ia < helper[task].braAlphaEnd; ia++)
 	} // if ( helper[task].taskType == ? )
 	
-      } // end pragma paralell
+      } // end pragma parallel
       
       if( helper[task].taskType == 0 && task != helper.size()-1 ) {
 #ifdef SBD_DEBUG_MULT

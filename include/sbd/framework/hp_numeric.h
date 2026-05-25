@@ -131,8 +131,8 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, iwork, &info);    // query workspace
-  assert(info == 0);                  // TODO: handle error
-  lwork = work[0];                    // TODO:  float to int, check it is safe
+  assert(info == 0);
+  lwork = work[0];
   free(work);
   work = (float *) malloc(lwork * sizeof(float));
   iwork = (int *) malloc(8 * k * sizeof(int));
@@ -141,7 +141,7 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, iwork, &info);
-  assert(info == 0);                  // TODO: handle error
+  assert(info == 0);
   free(work);
   free(iwork);
 }
@@ -163,8 +163,8 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, iwork, &info);    // query workspace
-  assert(info == 0);                  // TODO: handle error
-  lwork = work[0];                    // TODO:  float to int, check it is safe
+  assert(info == 0);
+  lwork = work[0];
   free(work);
   work = (double *) malloc(lwork * sizeof(double));
   iwork = (int *) malloc(8 * k * sizeof(int));
@@ -173,7 +173,7 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, iwork, &info);
-  assert(info == 0);                  // TODO: handle error
+  assert(info == 0);
   free(work);
   free(iwork);
 }
@@ -210,8 +210,8 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, rwork, iwork, &info);   // query workspace
-  assert(info == 0);                        // TODO: handle error
-  lwork = work[0].real();                   // TODO:  float to int, check it is safe
+  assert(info == 0);
+  lwork = work[0].real();
   free(work);
   work = (std::complex<float> *) malloc(lwork * sizeof(std::complex<float>));
   iwork = (int *) malloc(8 * k * sizeof(int));
@@ -221,7 +221,7 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, rwork, iwork, &info);
-  assert(info == 0);                        // TODO: handle error
+  assert(info == 0);
   free(work);
   free(iwork);
   free(rwork);
@@ -259,8 +259,8 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, rwork, iwork, &info);   // query workspace
-  lwork = work[0].real();                   // TODO: float to int, check it is safe
-  assert(info == 0);                        // TODO: handle error
+  lwork = work[0].real();
+  assert(info == 0);
   free(work);
   work = (std::complex<double> *) malloc(lwork * sizeof(std::complex<double>));
   iwork = (int *) malloc(8 * k * sizeof(int));
@@ -270,7 +270,7 @@ inline void MatSvd(
       &jobz, &m, &n,
       pa, &m, ps, pu, &m, pvt, &k,
       work, &lwork, rwork, iwork, &info);
-  assert(info == 0);                        // TODO: handle error
+  assert(info == 0);
   free(work);
   free(iwork);
   free(rwork);
@@ -292,7 +292,7 @@ inline void MatQr(int m, int n, int k, float *pa, float *pq, float *pr) {
   int lwork = -1;
   float *work = (float *) malloc(elem_t_size);
   sgeqrf_(&m, &n, pa, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0];    // TODO: float to int, check it is safe
+  lwork = work[0];
   free(work);
   work = (float *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -315,7 +315,7 @@ inline void MatQr(int m, int n, int k, float *pa, float *pq, float *pr) {
   lwork = -1;
   work = (float *) malloc(elem_t_size);
   sorgqr_(&m, &k, &k, pq, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0];    // TODO: float to int, check it is safe
+  lwork = work[0];
   free(work);
   work = (float *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -341,7 +341,7 @@ inline void MatQr(int m, int n, int k, double *pa, double *pq, double *pr) {
   int lwork = -1;
   double *work = (double *) malloc(elem_t_size);
   dgeqrf_(&m, &n, pa, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0];    // TODO: float to int, check it is safe
+  lwork = work[0];
   free(work);
   work = (double *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -364,7 +364,7 @@ inline void MatQr(int m, int n, int k, double *pa, double *pq, double *pr) {
   lwork = -1;
   work = (double *) malloc(elem_t_size);
   dorgqr_(&m, &k, &k, pq, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0];    // TODO: float to int, check it is safe
+  lwork = work[0];
   free(work);
   work = (double *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -390,7 +390,7 @@ inline void MatQr(int m, int n, int k, std::complex<float> *pa, std::complex<flo
   int lwork = -1;
   std::complex<float> *work = (std::complex<float> *) malloc(elem_t_size);
   cgeqrf_(&m, &n, pa, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0].real();    // TODO: float to int, check it is safe
+  lwork = work[0].real();
   free(work);
   work = (std::complex<float> *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -413,7 +413,7 @@ inline void MatQr(int m, int n, int k, std::complex<float> *pa, std::complex<flo
   lwork = -1;
   work = (std::complex<float> *) malloc(elem_t_size);
   cungqr_(&m, &k, &k, pq, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0].real();    // TODO: float to int, check it is safe
+  lwork = work[0].real();
   free(work);
   work = (std::complex<float> *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -439,7 +439,7 @@ inline void MatQr(int m, int n, int k, std::complex<double> *pa, std::complex<do
   int lwork = -1;
   std::complex<double> *work = (std::complex<double> *) malloc(elem_t_size);
   zgeqrf_(&m, &n, pa, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0].real();    // TODO: float to int, check it is safe
+  lwork = work[0].real();
   free(work);
   work = (std::complex<double> *) malloc(lwork * elem_t_size);
   // Actual calculation
@@ -462,7 +462,7 @@ inline void MatQr(int m, int n, int k, std::complex<double> *pa, std::complex<do
   lwork = -1;
   work = (std::complex<double> *) malloc(elem_t_size);
   zungqr_(&m, &k, &k, pq, &m, ptau, work, &lwork, &info);   // query workspace
-  lwork = work[0].real();    // TODO: float to int, check it is safe
+  lwork = work[0].real();
   free(work);
   work = (std::complex<double> *) malloc(lwork * elem_t_size);
   // Actual calculation

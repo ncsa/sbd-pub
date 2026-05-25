@@ -11,6 +11,10 @@
 
 #include "sbd/framework/nvtx.h"
 
+#ifdef USE_OMP_OFFLOAD
+#include "../basic/omp_offload.h"
+#endif
+
 namespace sbd {
 
   namespace tpb {
@@ -174,6 +178,57 @@ namespace sbd {
       sbd::oneInt<double> I1;
       sbd::twoInt<double> I2;
       sbd::SetupIntegrals(fcidump,L,N,I0,I1,I2);
+
+      int norbs = L;
+
+#ifdef USE_OMP_OFFLOAD
+      // check orbital count and determinant size : there are limits in omp_offload.h
+      size_t detSize = (2*norbs + bit_length - 1) / bit_length;
+      if ( (detSize > SBD_MAX_DETSIZE) && (mpi_rank == 0) ) {
+        std::cout << "determinant size " << detSize << " exceeds the current limit " << SBD_MAX_DETSIZE << std::endl;
+        std::cout << "increase bit_length or increase SBD_MAX_DETSIZE in omp_offload.h ... exiting" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, 0);
+      }
+      if ( (2*norbs > SBD_MAX_SPINORBITALS) && (mpi_rank == 0) ) {
+        std::cout << "the number of spin-orbitals " << 2*norbs << " exceeds the current limit " << SBD_MAX_SPINORBITALS << std::endl;
+        std::cout << "increase SBD_MAX_SPINORBITALS in omp_offload.h ... exiting" << std::endl;
+        MPI_Abort(MPI_COMM_WORLD, 0);
+      }
+
+      // Flatten I1/I2 integrals once and keep on GPU for all tasks
+      I1_size = (2 * norbs) * (2 * norbs);
+      I2_size = (norbs * (norbs + 1) / 2) * ((norbs * (norbs + 1) / 2) + 1) / 2;
+      I2_Direct_size = norbs * norbs;
+      I2_Exchange_size = norbs * norbs;
+      std::vector<double> I1_flat(I1_size);
+      std::vector<double> I2_flat(I2_size);
+      std::vector<double> I2_Direct_flat(I2_Direct_size);
+      std::vector<double> I2_Exchange_flat(I2_Exchange_size);
+
+      for (size_t i = 0; i < 2 * norbs; i++) {
+        for (size_t j = 0; j < 2 * norbs; j++) {
+          I1_flat[i * (2 * norbs) + j] = I1.Value(i, j);
+        }
+      }
+      for (size_t ij = 0; ij < I2_size; ij++) {
+        I2_flat[ij] = I2.store[ij];
+      }
+      for (size_t i = 0; i < norbs; i++) {
+        for (size_t j = 0; j < norbs; j++) {
+          I2_Direct_flat[i + norbs * j] = I2.DirectValue(i, j);
+          I2_Exchange_flat[i + norbs * j] = I2.ExchangeValue(i, j);
+        }
+      }
+
+      I1_ptr = I1_flat.data();
+      I2_ptr = I2_flat.data();
+      I2_Direct_ptr = I2_Direct_flat.data();
+      I2_Exchange_ptr = I2_Exchange_flat.data();
+#pragma omp target enter data map(to : I1_ptr[0 : I1_size],                    \
+                                       I2_ptr[0 : I2_size],                     \
+                                       I2_Direct_ptr[0 : I2_Direct_size],       \
+                                       I2_Exchange_ptr[0 : I2_Exchange_size])
+#endif
 
       /**
 	 Setup helpers
@@ -412,6 +467,15 @@ namespace sbd {
 	auto time_start_diag = std::chrono::high_resolution_clock::now();
 	auto time_start_mkham = std::chrono::high_resolution_clock::now();
 	std::vector<double> hii;
+
+#ifdef SBD_THRUST
+	// initialize hii
+	sbd::makeQChamDiagTerms(adet, bdet, bit_length, L,
+				helper, I0, I1, I2, hii,
+				h_comm, b_comm, t_comm);
+	device_data.Init(adet, bdet, bit_length, static_cast<size_t>(L), helper, I0, I1, I2,
+ 		             sbd_data.use_precalculated_dets, sbd_data.max_memory_gb_for_determinants);
+#else
 	std::vector<std::vector<size_t*>> ih;
 	std::vector<std::vector<size_t*>> jh;
 	std::vector<std::vector<double*>> hij;
@@ -469,6 +533,12 @@ namespace sbd {
 	std::vector<double> C(W.size(),0.0);
 
 	auto time_start_mult = std::chrono::high_resolution_clock::now();
+#endif
+#ifdef SBD_THRUST
+	sbd::mult(hii, W, C, device_data,
+		  adet_comm_size, bdet_comm_size,
+		  h_comm, b_comm, t_comm);
+#else
 	sbd::mult(hii,ih,jh,hij,len,
 		  tasktype,adetshift,bdetshift,
 		  adet_comm_size,bdet_comm_size,
@@ -489,6 +559,14 @@ namespace sbd {
 	energy = E;
 
       }
+#endif
+#ifdef USE_OMP_OFFLOAD
+      // Clean up GPU memory for integrals
+#pragma omp target exit data map(delete : I1_ptr[0 : I1_size],                    \
+                                          I2_ptr[0 : I2_size],                     \
+                                          I2_Direct_ptr[0 : I2_Direct_size],      \
+                                          I2_Exchange_ptr[0 : I2_Exchange_size])
+#endif
 
       /**
 	 Evaluation of expectation values
@@ -685,7 +763,7 @@ namespace sbd {
       size_t N;
 
       /**
-	 Load fcifump data
+	 Load fcidump data
        */
       sbd::FCIDump fcidump;
       if( mpi_rank == 0 ) {

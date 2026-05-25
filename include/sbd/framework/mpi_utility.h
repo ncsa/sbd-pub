@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 #include "mpi.h"
 
@@ -603,6 +604,77 @@ namespace sbd {
     
   }
 		    
+#ifdef USE_OMP_OFFLOAD
+  template <typename ElemT>
+  void Mpi2dSlide(const ElemT * A_ptr, size_t & A_size,
+		  ElemT * B_ptr, size_t & B_size,
+		  int x_size,
+		  int y_size,
+		  int x_slide,
+		  int y_slide,
+		  MPI_Comm comm) {
+    // Assuming mpi_rank = x_rank * y_size + y_rank;
+
+    int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
+    int mpi_size; MPI_Comm_size(comm,&mpi_size);
+
+    int x_rank = mpi_rank / y_size;
+    int y_rank = mpi_rank % y_size;
+
+    int x_dist = ( x_rank + x_slide + x_size ) % x_size;
+    int y_dist = ( y_rank + y_slide + y_size ) % y_size;
+    int mpi_dist = x_dist * y_size + y_dist;
+
+    int x_source = ( x_rank - x_slide + x_size ) % x_size;
+    int y_source = ( y_rank - y_slide + y_size ) % y_size;
+    int mpi_source = x_source * y_size + y_source;
+
+#ifdef SBD_DEBUG_MPI_UTILITY
+    std::cout << " Mpi2dSlide at rank " << mpi_rank << " = (" << x_rank << "," << y_rank
+	      << "): distination rank = " << mpi_dist << " = (" << x_dist << "," << y_dist
+	      << "), source rank = " << mpi_source << " = (" << x_source << "," << y_source
+	      << ")" << std::endl;
+#endif
+    std::vector<MPI_Request> req_size(2);
+    std::vector<MPI_Status> sta_size(2);
+    std::vector<size_t> size_send(1);
+    std::vector<size_t> size_recv(1);
+    size_send[0] = A_size;
+    
+    MPI_Isend(size_send.data(),1,SBD_MPI_SIZE_T,
+	      mpi_dist,0,comm,&req_size[0]);
+    MPI_Irecv(size_recv.data(),1,SBD_MPI_SIZE_T,
+	      mpi_source,0,comm,&req_size[1]);
+    MPI_Waitall(2,req_size.data(),sta_size.data());
+
+    size_t send_size = size_send[0];
+    size_t recv_size = size_recv[0];
+    B_size = recv_size;
+    std::vector<MPI_Request> req_data(2);
+    std::vector<MPI_Status> sta_data(2);
+
+    MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+#pragma omp target data use_device_ptr(A_ptr, B_ptr)
+    {
+#if MPI_VERSION >= 4
+      if( send_size != 0 ) MPI_Isend_c(A_ptr,send_size,DataT,mpi_dist,  1,comm,&req_data[0]);
+      if( recv_size != 0 ) MPI_Irecv_c(B_ptr,recv_size,DataT,mpi_source,1,comm,&req_data[1]);
+#else
+      if( send_size != 0 ) MPI_Isend(A_ptr,send_size,DataT,mpi_dist,  1,comm,&req_data[0]);
+      if( recv_size != 0 ) MPI_Irecv(B_ptr,recv_size,DataT,mpi_source,1,comm,&req_data[1]);
+#endif
+    }
+
+    if( send_size != 0 && recv_size != 0 ) {
+      MPI_Waitall(2,req_data.data(),sta_data.data());
+    } else if ( send_size != 0 && recv_size == 0 ) {
+      MPI_Waitall(1,&req_data[0],&sta_data[0]);
+    } else if ( send_size == 0 && recv_size != 0 ) {
+      MPI_Waitall(1,&req_data[1],&sta_data[1]);
+    }
+    
+  }
+#endif
   
 }
 
