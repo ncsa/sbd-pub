@@ -105,10 +105,6 @@ inline void launch_mult_for_each_n(size_t n_subwarps, Functor functor)
     const size_t n_threads = n_subwarps * SW;
     const size_t grid = (n_threads + BS - 1) / BS;
     mult_for_each_n_kernel<Functor><<<grid, BS>>>(n_threads, functor);
-    // E1 (advice-from-parent §5): force per-launch stream serialization to
-    // test the stream-ordering hypothesis. If this resolves the b_comm>=3
-    // Davidson hang, the legacy default stream is the contention surface.
-    cudaDeviceSynchronize();
 }
 
 template <typename ElemT>
@@ -738,7 +734,6 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	DetIndexMapThrust tidxmap[2];
 	int active_buf = 0;
     int recv_buf = 1;
-    size_t task_sent = 0;
 
 	if (exidx[0].slide != 0) {
 		sbd::gdb::MpiSlide(idxmap, idxmap_storage, tidxmap[active_buf], tidxmap_storage[active_buf], -exidx[0].slide, this->b_comm());
@@ -754,85 +749,63 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	}
 
 	MpiSlider<ElemT> slider;
-#ifdef SBD_MULT_TIME_KERNELS
-	double _t_sa = 0, _t_da = 0, _t_sb = 0, _t_db = 0, _t_ab = 0;
 	using _ck = std::chrono::steady_clock;
-	auto _timed = [](auto n, auto& kern, double& accum) {
-		auto t0 = _ck::now();
-		launch_mult_for_each_n(n, kern);
-		accum += std::chrono::duration<double, std::milli>(_ck::now() - t0).count();
-	};
-#endif
+	double _t_exch = 0, _t_sync = 0, _t_gpu = 0;
 	for (size_t task = 0; task < exidx.size(); task++) {
-        if (task_sent == task) {
-            if (task_sent != 0) {
-                if (slider.Sync()) {
-					int t = active_buf;
-					active_buf = recv_buf;
-					recv_buf = t;
-                }
-            }
-
-            // exchange asynchronously for later tasks
-            for (size_t extask = task_sent; extask < exidx.size() - 1; extask++) {
-				int slide = exidx[extask].slide - exidx[extask + 1].slide;
-				slider.ExchangeAsync(twk[active_buf], twk[recv_buf], tidxmap[active_buf], tidxmap_storage[active_buf], tidxmap[recv_buf], tidxmap_storage[recv_buf], slide, this->b_comm(), (int)extask);
-				task_sent = extask + 1;
-				break;
-            }
-        }
+		// Launch all GPU kernels for this task asynchronously.
+		// The exchange below will overlap with these kernels.
 
 		// single alpha excitations
 		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifdef SBD_MULT_TIME_KERNELS
-		_timed(idxmap.size_adet, kernel_single_alpha, _t_sa);
-#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_single_alpha);
-#endif
 
 		// double alpha excitations
 		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifdef SBD_MULT_TIME_KERNELS
-		_timed(idxmap.size_adet, kernel_double_alpha, _t_da);
-#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_double_alpha);
-#endif
 
 		// single beta excitations
 		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifdef SBD_MULT_TIME_KERNELS
-		_timed(idxmap.size_bdet, kernel_single_beta, _t_sb);
-#else
 		launch_mult_for_each_n(idxmap.size_bdet, kernel_single_beta);
-#endif
 
 		// double beta excitations
 		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifdef SBD_MULT_TIME_KERNELS
-		_timed(idxmap.size_bdet, kernel_double_beta, _t_db);
-#else
 		launch_mult_for_each_n(idxmap.size_bdet, kernel_double_beta);
-#endif
 
 		// alpha-beta excitations
 		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-#ifdef SBD_MULT_TIME_KERNELS
-		_timed(idxmap.size_adet, kernel_alpha_beta, _t_ab);
-#else
 		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta);
-#endif
-	} // end task for loop
 
-#ifdef SBD_MULT_TIME_KERNELS
-	if (mpi_rank_t == 0 && mpi_rank_b == 0 && mpi_rank_h == 0)
-		fprintf(stderr, "mult_kernel_ms: tasks=%zu sa=%.1f da=%.1f sb=%.1f db=%.1f ab=%.1f\n",
-		        exidx.size(), _t_sa, _t_da, _t_sb, _t_db, _t_ab);
-#endif
+		// While the GPU runs the kernels above, exchange the ket for the next
+		// task.  ExchangeAsync and Sync are called back-to-back: the internal
+		// size MPI_Waitall (rendezvous with neighbours) and the large data
+		// transfer both complete while this task's kernels are in flight.
+		if (task < exidx.size() - 1) {
+			int slide = exidx[task].slide - exidx[task + 1].slide;
+			{ auto _t0 = _ck::now();
+			  slider.ExchangeAsync(twk[active_buf], twk[recv_buf],
+			                       tidxmap[active_buf], tidxmap_storage[active_buf],
+			                       tidxmap[recv_buf], tidxmap_storage[recv_buf],
+			                       slide, this->b_comm(), (int)task);
+			  _t_exch += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+			{ auto _t0 = _ck::now();
+			  if (slider.Sync()) {
+			    int t = active_buf; active_buf = recv_buf; recv_buf = t;
+			  }
+			  _t_sync += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+		}
+
+		// Wait for this task's kernels before the next task writes to wb.
+		{ auto _t0 = _ck::now();
+		  cudaDeviceSynchronize();
+		  _t_gpu += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+	} // end task for loop
+	fprintf(stderr, "mult_overlap_ms: rank_b=%d exch=%.1f sync=%.1f gpu_sync=%.1f\n",
+	        mpi_rank_b, _t_exch, _t_sync, _t_gpu);
 
 	if (mpi_size_t > 1)
 		MpiAllreduce(wb, MPI_SUM, this->t_comm());
