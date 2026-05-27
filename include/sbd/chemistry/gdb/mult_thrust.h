@@ -606,12 +606,15 @@ void MultGDBThrust<ElemT>::makeQChamDiagTerms(thrust::device_vector<ElemT> &hii)
     MPI_Comm_rank(this->h_comm_, &mpi_rank_h);
     MPI_Comm_size(this->h_comm_, &mpi_size_h);
 
-    hii.resize(dets_.size(), ElemT(0.0));
+    // dets_ packs n_dets bit-strings of length D_size_ each; iterate over
+    // n_dets, not dets_.size(), or the kernel will overrun dets_.
+    const size_t n_dets = dets_.size() / this->D_size_;
+    hii.resize(n_dets, ElemT(0.0));
 
     MakeQChamDiagTermKernel kernel(hii, *this);
 	kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
     auto ci = thrust::counting_iterator<size_t>(0);
-    thrust::for_each_n(thrust::device, ci, dets_.size(), kernel);
+    thrust::for_each_n(thrust::device, ci, n_dets, kernel);
 }
 
 
