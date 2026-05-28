@@ -97,14 +97,15 @@ void mult_for_each_n_kernel(size_t n, Functor functor)
 }
 
 template <typename Functor>
-inline void launch_mult_for_each_n(size_t n_subwarps, Functor functor)
+inline void launch_mult_for_each_n(size_t n_subwarps, Functor functor,
+                                    cudaStream_t stream = 0)
 {
     if (n_subwarps == 0) return;
     constexpr int BS = Functor::BlockSize;
     constexpr int SW = Functor::SubwarpSize;
     const size_t n_threads = n_subwarps * SW;
     const size_t grid = (n_threads + BS - 1) / BS;
-    mult_for_each_n_kernel<Functor><<<grid, BS>>>(n_threads, functor);
+    mult_for_each_n_kernel<Functor><<<grid, BS, 0, stream>>>(n_threads, functor);
 }
 
 template <typename ElemT>
@@ -812,46 +813,19 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
         thrust::for_each_n(thrust::device, ci, twk_ket_size[active_buf], Wb_init_kernel(wb, hii, twk[active_buf]));
 	}
 
+	// Non-blocking stream keeps mult kernels off the default stream so
+	// Cray MPICH GPU-direct DMA (which syncs the default stream) does not
+	// stall waiting for kernel completion.
+	cudaStream_t compute_stream;
+	cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
+
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
 	for (size_t task = 0; task < exidx.size(); task++) {
-		// No GPU/MPI overlap: kernels run to completion before ExchangeAsync
-		// is posted.  Isolates whether concurrent GPU activity interferes with
-		// NIC DMA throughput from GPU buffers.
+		// H20 ordering (ExchangeAsync before kernel launches) with kernels
+		// on compute_stream.  NIC DMA runs on the default stream and sees
+		// no outstanding GPU work there.
 		double _t_launch, _t_exch, _t_sync, _t_gpu;
-
-		{ auto _t0 = _ck::now();
-
-		// single alpha excitations
-		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
-		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n(idxmap.size_adet, kernel_single_alpha);
-
-		// double alpha excitations
-		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
-		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n(idxmap.size_adet, kernel_double_alpha);
-
-		// single beta excitations
-		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
-		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n(idxmap.size_bdet, kernel_single_beta);
-
-		// double beta excitations
-		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
-		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n(idxmap.size_bdet, kernel_double_beta);
-
-		// alpha-beta excitations
-		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
-		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
-		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta);
-
-		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
-
-		{ auto _t0 = _ck::now();
-		  cudaDeviceSynchronize();
-		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
 		if (task < exidx.size() - 1) {
 			int slide = exidx[task].slide - exidx[task + 1].slide;
@@ -863,6 +837,40 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
 			      slide, this->b_comm(), (int)task);
 			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+		} else {
+			_t_exch = 0.0;
+		}
+
+		{ auto _t0 = _ck::now();
+
+		// single alpha excitations
+		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
+		kernel_single_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_single_alpha, compute_stream);
+
+		// double alpha excitations
+		MultDoubleAlphaKernel kernel_double_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
+		kernel_double_alpha.set_mpi_size(mpi_rank_h, mpi_size_h);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_double_alpha, compute_stream);
+
+		// single beta excitations
+		MultSingleBetaKernel kernel_single_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
+		kernel_single_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+		launch_mult_for_each_n(idxmap.size_bdet, kernel_single_beta, compute_stream);
+
+		// double beta excitations
+		MultDoubleBetaKernel kernel_double_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
+		kernel_double_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+		launch_mult_for_each_n(idxmap.size_bdet, kernel_double_beta, compute_stream);
+
+		// alpha-beta excitations
+		MultAlphaBetaKernel kernel_alpha_beta(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
+		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
+		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta, compute_stream);
+
+		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+
+		if (task < exidx.size() - 1) {
 			{ auto _t0 = _ck::now();
 			  if (slider.Sync()) {
 			    twk_ket_size[recv_buf] = slider.get_recv_size();
@@ -871,14 +879,19 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			  }
 			  _t_sync = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 		} else {
-			_t_exch = 0.0;
 			_t_sync = 0.0;
 		}
+
+		{ auto _t0 = _ck::now();
+		  cudaStreamSynchronize(compute_stream);
+		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
 		fprintf(stderr, "mult_task_ms: rank_b=%d task=%zu"
 		        " launch=%.1f exch=%.1f sync=%.1f gpu_sync=%.1f\n",
 		        mpi_rank_b, task, _t_launch, _t_exch, _t_sync, _t_gpu);
 	} // end task for loop
+
+	cudaStreamDestroy(compute_stream);
 
 	if (mpi_size_t > 1)
 		MpiAllreduce(wb, MPI_SUM, this->t_comm());
