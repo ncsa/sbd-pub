@@ -822,24 +822,11 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
 	for (size_t task = 0; task < exidx.size(); task++) {
-		// H20 ordering (ExchangeAsync before kernel launches) with kernels
-		// on compute_stream.  NIC DMA runs on the default stream and sees
-		// no outstanding GPU work there.
+		// H19 ordering (kernels first, then ExchangeAsync) with kernels on
+		// compute_stream.  Cray MPICH syncs the default stream before DMA;
+		// since kernels run on compute_stream the default stream is always
+		// clean when ExchangeAsync posts MPI_Isend.
 		double _t_launch, _t_exch, _t_sync, _t_gpu;
-
-		if (task < exidx.size() - 1) {
-			int slide = exidx[task].slide - exidx[task + 1].slide;
-			{ auto _t0 = _ck::now();
-			  slider.ExchangeAsync(
-			      twk[active_buf], twk_ket_size[active_buf],
-			      twk[recv_buf],
-			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
-			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
-			      slide, this->b_comm(), (int)task);
-			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
-		} else {
-			_t_exch = 0.0;
-		}
 
 		{ auto _t0 = _ck::now();
 
@@ -869,6 +856,20 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta, compute_stream);
 
 		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+
+		if (task < exidx.size() - 1) {
+			int slide = exidx[task].slide - exidx[task + 1].slide;
+			{ auto _t0 = _ck::now();
+			  slider.ExchangeAsync(
+			      twk[active_buf], twk_ket_size[active_buf],
+			      twk[recv_buf],
+			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
+			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
+			      slide, this->b_comm(), (int)task);
+			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+		} else {
+			_t_exch = 0.0;
+		}
 
 		if (task < exidx.size() - 1) {
 			{ auto _t0 = _ck::now();
