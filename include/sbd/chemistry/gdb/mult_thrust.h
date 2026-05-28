@@ -743,16 +743,16 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		twk[active_buf] = wk;
 	}
 
-	if (mpi_rank_t == 0) {
-        auto ci = thrust::counting_iterator<size_t>(0);
-        thrust::for_each_n(thrust::device, ci, twk[active_buf].size(), Wb_init_kernel(wb, hii, twk[active_buf]));
-	}
-
 	// Pre-allocate both double buffers to the global maximum ket/map size before
 	// the task loop.  This eliminates per-task thrust::device_vector::resize()
 	// calls inside ExchangeAsync, which previously launched a Thrust fill-to-zero
 	// kernel followed by cudaDeviceSynchronize() — serializing GPU/MPI overlap on
 	// every task where the recv buffer needed to grow.
+	//
+	// ORDERING: pre-allocation MUST come before Wb_init_kernel.  Wb_init_kernel
+	// captures twk[active_buf].data() at construction time; if resize() ran after
+	// the kernel was launched it could reallocate the buffer and free the old device
+	// memory while the kernel is still running on it.
 	//
 	// Because send.size() / send_map_storage.size() would then equal global_max
 	// rather than the actual ket/map element count, the caller-supplied logical
@@ -775,16 +775,41 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		twk_map_size[active_buf] = local_map_size;
 		twk_map_size[recv_buf]   = global_max_map_size;
 
-		// Resize both buffers to global max (fill runs twice total, not per-task).
-		// Active buffer: already has data in [0, local_ket_size); fill only extends
-		// the tail, which is never accessed by kernels (they use tidxmap sizes).
+		// Resize both ket buffers to global max.
 		twk[active_buf].resize(global_max_ket_size);
 		twk[recv_buf].resize(global_max_ket_size);
-		tidxmap_storage[active_buf].resize(global_max_map_size);
+
+		// Resize active map storage.  If resize() triggers reallocation the data
+		// moves to a new device address, which would invalidate the raw pointers
+		// already stored in tidxmap[active_buf].  Detect and fix up.
+		{
+			uint32_t* old_base = thrust::raw_pointer_cast(tidxmap_storage[active_buf].data());
+			tidxmap_storage[active_buf].resize(global_max_map_size);
+			uint32_t* new_base = thrust::raw_pointer_cast(tidxmap_storage[active_buf].data());
+			if (new_base != old_base) {
+				ptrdiff_t delta = new_base - old_base;
+				tidxmap[active_buf].AdetToDetOffset += delta;
+				tidxmap[active_buf].BdetToDetOffset += delta;
+				tidxmap[active_buf].AdetIndex       += delta;
+				tidxmap[active_buf].BdetIndex       += delta;
+				tidxmap[active_buf].AdetToBdetSM    += delta;
+				tidxmap[active_buf].AdetToDetSM     += delta;
+				tidxmap[active_buf].BdetToAdetSM    += delta;
+				tidxmap[active_buf].BdetToDetSM     += delta;
+			}
+		}
 		tidxmap_storage[recv_buf].resize(global_max_map_size);
-		// Ensure the fill kernels complete before MPI_Irecv writes into these
+		// Ensure all fill kernels complete before MPI_Irecv writes into these
 		// buffers via GPUDirect RDMA.
 		cudaDeviceSynchronize();
+	}
+
+	// Wb_init_kernel AFTER pre-allocation so it captures the (potentially
+	// reallocated) twk[active_buf] pointer.  Use twk_ket_size[active_buf]
+	// — not twk[active_buf].size() which equals global_max after resize.
+	if (mpi_rank_t == 0) {
+        auto ci = thrust::counting_iterator<size_t>(0);
+        thrust::for_each_n(thrust::device, ci, twk_ket_size[active_buf], Wb_init_kernel(wb, hii, twk[active_buf]));
 	}
 
 	MpiSlider<ElemT> slider;
