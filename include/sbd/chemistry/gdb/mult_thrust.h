@@ -748,12 +748,53 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
         thrust::for_each_n(thrust::device, ci, twk[active_buf].size(), Wb_init_kernel(wb, hii, twk[active_buf]));
 	}
 
+	// Pre-allocate both double buffers to the global maximum ket/map size before
+	// the task loop.  This eliminates per-task thrust::device_vector::resize()
+	// calls inside ExchangeAsync, which previously launched a Thrust fill-to-zero
+	// kernel followed by cudaDeviceSynchronize() — serializing GPU/MPI overlap on
+	// every task where the recv buffer needed to grow.
+	//
+	// Because send.size() / send_map_storage.size() would then equal global_max
+	// rather than the actual ket/map element count, the caller-supplied logical
+	// sizes (twk_ket_size[] / twk_map_size[]) are passed explicitly to
+	// ExchangeAsync and updated after each successful Sync().
+	size_t twk_ket_size[2];
+	size_t twk_map_size[2];
+	{
+		size_t local_ket_size = twk[active_buf].size();
+		size_t global_max_ket_size;
+		MPI_Allreduce(&local_ket_size, &global_max_ket_size, 1, SBD_MPI_SIZE_T, MPI_MAX, this->b_comm());
+
+		size_t local_map_size = tidxmap_storage[active_buf].size();
+		size_t global_max_map_size;
+		MPI_Allreduce(&local_map_size, &global_max_map_size, 1, SBD_MPI_SIZE_T, MPI_MAX, this->b_comm());
+
+		// Logical sizes tracked independently of vector .size() (which = global_max).
+		twk_ket_size[active_buf] = local_ket_size;
+		twk_ket_size[recv_buf]   = global_max_ket_size;  // placeholder; set after first recv
+		twk_map_size[active_buf] = local_map_size;
+		twk_map_size[recv_buf]   = global_max_map_size;
+
+		// Resize both buffers to global max (fill runs twice total, not per-task).
+		// Active buffer: already has data in [0, local_ket_size); fill only extends
+		// the tail, which is never accessed by kernels (they use tidxmap sizes).
+		twk[active_buf].resize(global_max_ket_size);
+		twk[recv_buf].resize(global_max_ket_size);
+		tidxmap_storage[active_buf].resize(global_max_map_size);
+		tidxmap_storage[recv_buf].resize(global_max_map_size);
+		// Ensure the fill kernels complete before MPI_Irecv writes into these
+		// buffers via GPUDirect RDMA.
+		cudaDeviceSynchronize();
+	}
+
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
-	double _t_exch = 0, _t_sync = 0, _t_gpu = 0;
 	for (size_t task = 0; task < exidx.size(); task++) {
 		// Launch all GPU kernels for this task asynchronously.
 		// The exchange below will overlap with these kernels.
+		double _t_launch, _t_exch, _t_sync, _t_gpu;
+
+		{ auto _t0 = _ck::now();
 
 		// single alpha excitations
 		MultSingleAlphaKernel kernel_single_alpha(wb, twk[active_buf], *this, idxmap, tidxmap[active_buf], exidx[task]);
@@ -780,32 +821,46 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		kernel_alpha_beta.set_mpi_size(mpi_rank_h, mpi_size_h);
 		launch_mult_for_each_n(idxmap.size_adet, kernel_alpha_beta);
 
+		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+
 		// While the GPU runs the kernels above, exchange the ket for the next
-		// task.  ExchangeAsync and Sync are called back-to-back: the internal
-		// size MPI_Waitall (rendezvous with neighbours) and the large data
-		// transfer both complete while this task's kernels are in flight.
+		// task.  ExchangeAsync posts MPI_Irecv directly into the pre-allocated
+		// device buffer — no resize, no fill kernel, no cudaDeviceSynchronize
+		// inside the exchange.
 		if (task < exidx.size() - 1) {
 			int slide = exidx[task].slide - exidx[task + 1].slide;
 			{ auto _t0 = _ck::now();
-			  slider.ExchangeAsync(twk[active_buf], twk[recv_buf],
-			                       tidxmap[active_buf], tidxmap_storage[active_buf],
-			                       tidxmap[recv_buf], tidxmap_storage[recv_buf],
-			                       slide, this->b_comm(), (int)task);
-			  _t_exch += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+			  slider.ExchangeAsync(
+			      twk[active_buf], twk_ket_size[active_buf],
+			      twk[recv_buf],
+			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
+			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
+			      slide, this->b_comm(), (int)task);
+			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+			// Save recv sizes before Sync() clears them, then complete the transfer.
+			size_t actual_recv_ket = slider.get_recv_size();
+			size_t actual_recv_map = slider.get_recv_size_map();
 			{ auto _t0 = _ck::now();
 			  if (slider.Sync()) {
+			    twk_ket_size[recv_buf] = actual_recv_ket;
+			    twk_map_size[recv_buf] = actual_recv_map;
 			    int t = active_buf; active_buf = recv_buf; recv_buf = t;
 			  }
-			  _t_sync += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+			  _t_sync = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+		} else {
+			_t_exch = 0.0;
+			_t_sync = 0.0;
 		}
 
 		// Wait for this task's kernels before the next task writes to wb.
 		{ auto _t0 = _ck::now();
 		  cudaDeviceSynchronize();
-		  _t_gpu += std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+
+		fprintf(stderr, "mult_task_ms: rank_b=%d task=%zu"
+		        " launch=%.1f exch=%.1f sync=%.1f gpu_sync=%.1f\n",
+		        mpi_rank_b, task, _t_launch, _t_exch, _t_sync, _t_gpu);
 	} // end task for loop
-	fprintf(stderr, "mult_overlap_ms: rank_b=%d exch=%.1f sync=%.1f gpu_sync=%.1f\n",
-	        mpi_rank_b, _t_exch, _t_sync, _t_gpu);
 
 	if (mpi_size_t > 1)
 		MpiAllreduce(wb, MPI_SUM, this->t_comm());

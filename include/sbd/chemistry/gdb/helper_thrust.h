@@ -473,10 +473,36 @@ public:
         recv_size_map = 0;
     }
 
+    // Return the ket/map recv sizes recorded by the most recent ExchangeAsync call.
+    // Valid after ExchangeAsync returns and before Sync() clears them.
+    size_t get_recv_size()     const { return recv_size; }
+    size_t get_recv_size_map() const { return recv_size_map; }
+
+    // ExchangeAsync with caller-managed recv buffer capacity.
+    //
+    // send_ket_size    — actual number of ket elements in send (the caller
+    //                    tracks this separately because send.size() may equal
+    //                    global_max_ket_size after pre-allocation).
+    // send_map_size    — actual number of map elements in send_map_storage.
+    //
+    // recv / recv_map_storage — both device_vectors, pre-allocated by the
+    //                    caller to global_max_ket_size / global_max_map_size
+    //                    respectively and kept at that size throughout the
+    //                    task loop.  No resize is performed here; MPI_Irecv
+    //                    writes directly into the pre-allocated device memory.
+    //
+    // The caller is responsible for:
+    //   1. Before the first call: resize both recv buffers to the global max
+    //      (MPI_Allreduce MAX of local sizes), then cudaDeviceSynchronize()
+    //      so the fill kernels complete before MPI_Irecv fires.
+    //   2. After Sync() returns true: update the tracked ket/map sizes via
+    //      get_recv_size() / get_recv_size_map(), then swap active/recv buffers.
     void ExchangeAsync(const thrust::device_vector<ElemT> &send,
+                size_t send_ket_size,
                 thrust::device_vector<ElemT> &recv,
                 const DetIndexMapThrust& send_map,
                 const thrust::device_vector<uint32_t> &send_map_storage,
+                size_t send_map_size,
                 DetIndexMapThrust& recv_map,
                 thrust::device_vector<uint32_t> &recv_map_storage,
                 int slide,
@@ -495,8 +521,11 @@ public:
         std::vector<MPI_Status> sta_size(2);
         std::vector<size_t> send_offset(12);
         std::vector<size_t> recv_offset(12);
-        send_offset[0] = send.size();
-        send_offset[1] = send_map_storage.size();
+        // Use the caller-supplied logical sizes, not send.size() /
+        // send_map_storage.size(), which may equal global_max after
+        // pre-allocation rather than the actual ket/map element count.
+        send_offset[0] = send_ket_size;
+        send_offset[1] = send_map_size;
 
         // exchange idxmap offset
         {
@@ -513,47 +542,66 @@ public:
         send_offset[10] = (size_t)send_map.size_adet;
         send_offset[11] = (size_t)send_map.size_bdet;
 
-        MPI_Isend(send_offset.data(),12,SBD_MPI_SIZE_T,mpi_dest,id*4,comm,&req_size[0]);
-        MPI_Irecv(recv_offset.data(),12,SBD_MPI_SIZE_T,mpi_source,id*4,comm,&req_size[1]);
-        MPI_Waitall(2,req_size.data(),sta_size.data());
+        {
+            MPI_Isend(send_offset.data(),12,SBD_MPI_SIZE_T,mpi_dest,id*4,comm,&req_size[0]);
+        }
+        {
+            MPI_Irecv(recv_offset.data(),12,SBD_MPI_SIZE_T,mpi_source,id*4,comm,&req_size[1]);
+        }
+        {
+            MPI_Waitall(2,req_size.data(),sta_size.data());
+        }
 
         send_size = send_offset[0];
         recv_size = recv_offset[0];
         send_size_map = send_offset[1];
         recv_size_map = recv_offset[1];
 
-        // exchange async
+        // Post async send/recv without any resize or fill kernel.
+        // recv and recv_map_storage are pre-allocated to global_max by the caller.
         MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
         if( send_size != 0 ) {
-            MPI_Isend((ElemT*)thrust::raw_pointer_cast(send.data()),send_size,DataT,mpi_dest,id*4+2,comm,&req_send);
+            {
+                MPI_Isend((ElemT*)thrust::raw_pointer_cast(send.data()),send_size,DataT,mpi_dest,id*4+2,comm,&req_send);
+            }
         }
         if( recv_size != 0 ) {
-            recv.resize(recv_size);
-            MPI_Irecv((ElemT*)thrust::raw_pointer_cast(recv.data()),recv_size,DataT,mpi_source,id*4+2,comm,&req_recv);
-        } else {
-            recv = send;
+            // No resize: recv is pre-allocated to global_max_ket_size by the caller.
+            // MPI_Irecv writes recv_size elements directly into the device buffer.
+            {
+                MPI_Irecv((ElemT*)thrust::raw_pointer_cast(recv.data()),recv_size,DataT,mpi_source,id*4+2,comm,&req_recv);
+            }
         }
+        // recv_size == 0: nothing to receive; Sync() will return false for ket.
 
         if( send_size_map != 0 ) {
-            MPI_Isend((uint32_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,MPI_UINT32_T,mpi_dest,id*4+3,comm,&req_send_map);
+            {
+                MPI_Isend((uint32_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,MPI_UINT32_T,mpi_dest,id*4+3,comm,&req_send_map);
+            }
         }
-        if( recv_size_map != 0 ) {
-            recv_map_storage.resize(recv_size_map);
-            MPI_Irecv((uint32_t*)thrust::raw_pointer_cast(recv_map_storage.data()),recv_size_map,MPI_UINT32_T,mpi_source,id*4+3,comm,&req_recv_map);
 
+        // recv_map_base: pointer used to set up recv_map field offsets below.
+        uint32_t* recv_map_base;
+        if( recv_size_map != 0 ) {
+            // No resize: recv_map_storage is pre-allocated to global_max_map_size.
+            {
+                MPI_Irecv((uint32_t*)thrust::raw_pointer_cast(recv_map_storage.data()),recv_size_map,MPI_UINT32_T,mpi_source,id*4+3,comm,&req_recv_map);
+            }
+            recv_map_base = thrust::raw_pointer_cast(recv_map_storage.data());
         } else {
-            recv_map_storage = send_map_storage;
+            // recv_size_map == 0: degenerate case; point recv_map at send's map.
+            // Sync() will not swap if recv_size is also 0.
             recv_offset = send_offset;
+            recv_map_base = const_cast<uint32_t*>(thrust::raw_pointer_cast(send_map_storage.data()));
         }
-        uint32_t* base = thrust::raw_pointer_cast(recv_map_storage.data());
-        recv_map.AdetToDetOffset = base + recv_offset[2];
-        recv_map.BdetToDetOffset = base + recv_offset[3];
-        recv_map.AdetIndex = base + recv_offset[4];
-        recv_map.BdetIndex = base + recv_offset[5];
-        recv_map.AdetToBdetSM = base + recv_offset[6];
-        recv_map.AdetToDetSM = base + recv_offset[7];
-        recv_map.BdetToAdetSM = base + recv_offset[8];
-        recv_map.BdetToDetSM = base + recv_offset[9];
+        recv_map.AdetToDetOffset = recv_map_base + recv_offset[2];
+        recv_map.BdetToDetOffset = recv_map_base + recv_offset[3];
+        recv_map.AdetIndex = recv_map_base + recv_offset[4];
+        recv_map.BdetIndex = recv_map_base + recv_offset[5];
+        recv_map.AdetToBdetSM = recv_map_base + recv_offset[6];
+        recv_map.AdetToDetSM = recv_map_base + recv_offset[7];
+        recv_map.BdetToAdetSM = recv_map_base + recv_offset[8];
+        recv_map.BdetToDetSM = recv_map_base + recv_offset[9];
         recv_map.size_adet = static_cast<uint32_t>(recv_offset[10]);
         recv_map.size_bdet = static_cast<uint32_t>(recv_offset[11]);
     }
@@ -564,23 +612,31 @@ public:
         if (send_size > 0) {
             MPI_Status st;
 
-            MPI_Wait(&req_send, &st);
+            {
+                MPI_Wait(&req_send, &st);
+            }
         }
         if (recv_size > 0) {
             MPI_Status st;
 
-            MPI_Wait(&req_recv, &st);
+            {
+                MPI_Wait(&req_recv, &st);
+            }
             recv = true;
         }
         if (send_size_map > 0) {
             MPI_Status st;
 
-            MPI_Wait(&req_send_map, &st);
+            {
+                MPI_Wait(&req_send_map, &st);
+            }
         }
         if (recv_size_map > 0) {
             MPI_Status st;
 
-            MPI_Wait(&req_recv_map, &st);
+            {
+                MPI_Wait(&req_recv_map, &st);
+            }
             recv = true;
         }
 
