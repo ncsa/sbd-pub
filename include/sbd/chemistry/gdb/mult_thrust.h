@@ -862,13 +862,13 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
 			      slide, this->b_comm(), (int)task);
 			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
-			// Save recv sizes before Sync() clears them, then complete the transfer.
-			size_t actual_recv_ket = slider.get_recv_size();
-			size_t actual_recv_map = slider.get_recv_size_map();
+			// Sync() waits for the offset message (deferred from ExchangeAsync) and
+			// then waits for the large ket/map data.  get_recv_size() is valid after
+			// Sync() returns because recv_size is set inside Sync().
 			{ auto _t0 = _ck::now();
 			  if (slider.Sync()) {
-			    twk_ket_size[recv_buf] = actual_recv_ket;
-			    twk_map_size[recv_buf] = actual_recv_map;
+			    twk_ket_size[recv_buf] = slider.get_recv_size();
+			    twk_map_size[recv_buf] = slider.get_recv_size_map();
 			    int t = active_buf; active_buf = recv_buf; recv_buf = t;
 			  }
 			  _t_sync = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }

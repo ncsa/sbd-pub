@@ -460,6 +460,16 @@ protected:
     MPI_Request req_recv;
     MPI_Request req_send_map;
     MPI_Request req_recv_map;
+    MPI_Request req_size_send;
+    MPI_Request req_size_recv;
+    std::vector<size_t> send_offset_buf;
+    std::vector<size_t> recv_offset_buf;
+    DetIndexMapThrust*  recv_map_ptr;
+    uint32_t*           recv_map_base_saved;
+    bool have_req_send;
+    bool have_req_recv;
+    bool have_req_send_map;
+    bool have_req_recv_map;
     size_t send_size;
     size_t recv_size;
     size_t send_size_map;
@@ -471,6 +481,14 @@ public:
         recv_size = 0;
         send_size_map = 0;
         recv_size_map = 0;
+        send_offset_buf.resize(12, 0);
+        recv_offset_buf.resize(12, 0);
+        recv_map_ptr = nullptr;
+        recv_map_base_saved = nullptr;
+        have_req_send = false;
+        have_req_recv = false;
+        have_req_send_map = false;
+        have_req_recv_map = false;
     }
 
     // Return the ket/map recv sizes recorded by the most recent ExchangeAsync call.
@@ -516,135 +534,131 @@ public:
         int mpi_dest   = (mpi_size+mpi_rank+slide) % mpi_size;
         int mpi_source = (mpi_size+mpi_rank-slide) % mpi_size;
 
-        // exchange data size to be sent
-        std::vector<MPI_Request> req_size(2);
-        std::vector<MPI_Status> sta_size(2);
-        std::vector<size_t> send_offset(12);
-        std::vector<size_t> recv_offset(12);
-        // Use the caller-supplied logical sizes, not send.size() /
-        // send_map_storage.size(), which may equal global_max after
-        // pre-allocation rather than the actual ket/map element count.
-        send_offset[0] = send_ket_size;
-        send_offset[1] = send_map_size;
-
-        // exchange idxmap offset
+        // Build the 12-element offset packet to send:
+        //   [0]  = send_ket_size  (actual ket elements, not global_max)
+        //   [1]  = send_map_size  (actual map elements, not global_max)
+        //   [2..9] = recv_map field byte-offsets relative to send_map_storage base
+        //   [10] = size_adet, [11] = size_bdet
+        // send_offset_buf is a member so its lifetime extends through Sync().
+        send_offset_buf[0] = send_ket_size;
+        send_offset_buf[1] = send_map_size;
         {
             const uint32_t* send_base = thrust::raw_pointer_cast(send_map_storage.data());
-            send_offset[2] = (size_t)(send_map.AdetToDetOffset - send_base);
-            send_offset[3] = (size_t)(send_map.BdetToDetOffset - send_base);
-            send_offset[4] = (size_t)(send_map.AdetIndex - send_base);
-            send_offset[5] = (size_t)(send_map.BdetIndex - send_base);
-            send_offset[6] = (size_t)(send_map.AdetToBdetSM - send_base);
-            send_offset[7] = (size_t)(send_map.AdetToDetSM - send_base);
-            send_offset[8] = (size_t)(send_map.BdetToAdetSM - send_base);
-            send_offset[9] = (size_t)(send_map.BdetToDetSM - send_base);
+            send_offset_buf[2] = (size_t)(send_map.AdetToDetOffset - send_base);
+            send_offset_buf[3] = (size_t)(send_map.BdetToDetOffset - send_base);
+            send_offset_buf[4] = (size_t)(send_map.AdetIndex - send_base);
+            send_offset_buf[5] = (size_t)(send_map.BdetIndex - send_base);
+            send_offset_buf[6] = (size_t)(send_map.AdetToBdetSM - send_base);
+            send_offset_buf[7] = (size_t)(send_map.AdetToDetSM - send_base);
+            send_offset_buf[8] = (size_t)(send_map.BdetToAdetSM - send_base);
+            send_offset_buf[9] = (size_t)(send_map.BdetToDetSM - send_base);
         }
-        send_offset[10] = (size_t)send_map.size_adet;
-        send_offset[11] = (size_t)send_map.size_bdet;
+        send_offset_buf[10] = (size_t)send_map.size_adet;
+        send_offset_buf[11] = (size_t)send_map.size_bdet;
 
-        {
-            MPI_Isend(send_offset.data(),12,SBD_MPI_SIZE_T,mpi_dest,id*4,comm,&req_size[0]);
-        }
-        {
-            MPI_Irecv(recv_offset.data(),12,SBD_MPI_SIZE_T,mpi_source,id*4,comm,&req_size[1]);
-        }
-        {
-            MPI_Waitall(2,req_size.data(),sta_size.data());
-        }
+        // Post offset send and recv non-blocking.  The Waitall is deferred to
+        // Sync() so ExchangeAsync returns immediately without stalling on the
+        // ring-sender having called ExchangeAsync itself.
+        MPI_Isend(send_offset_buf.data(),12,SBD_MPI_SIZE_T,mpi_dest,id*4,comm,&req_size_send);
+        MPI_Irecv(recv_offset_buf.data(),12,SBD_MPI_SIZE_T,mpi_source,id*4,comm,&req_size_recv);
+        // No MPI_Waitall here — Sync() will wait for the offset and then set
+        // recv_size, recv_size_map, and recv_map field pointers.
 
-        send_size = send_offset[0];
-        recv_size = recv_offset[0];
-        send_size_map = send_offset[1];
-        recv_size_map = recv_offset[1];
+        send_size     = send_ket_size;
+        send_size_map = send_map_size;
+        // recv_size and recv_size_map are unknown until Sync() reads recv_offset_buf.
 
-        // Post async send/recv without any resize or fill kernel.
-        // recv and recv_map_storage are pre-allocated to global_max by the caller.
+        // Post large ket and map sends/recvs.
+        // MPI_Irecv count uses recv.size() / recv_map_storage.size() (= global_max),
+        // which is always >= the actual recv_size the sender will send.  MPI allows
+        // receive count >= send count; only the sent elements are written.
         MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
-        if( send_size != 0 ) {
-            {
-                MPI_Isend((ElemT*)thrust::raw_pointer_cast(send.data()),send_size,DataT,mpi_dest,id*4+2,comm,&req_send);
-            }
+        have_req_send = (send_size != 0);
+        if (have_req_send) {
+            MPI_Isend((ElemT*)thrust::raw_pointer_cast(send.data()),send_size,DataT,mpi_dest,id*4+2,comm,&req_send);
         }
-        if( recv_size != 0 ) {
-            // No resize: recv is pre-allocated to global_max_ket_size by the caller.
-            // MPI_Irecv writes recv_size elements directly into the device buffer.
-            {
-                MPI_Irecv((ElemT*)thrust::raw_pointer_cast(recv.data()),recv_size,DataT,mpi_source,id*4+2,comm,&req_recv);
-            }
-        }
-        // recv_size == 0: nothing to receive; Sync() will return false for ket.
-
-        if( send_size_map != 0 ) {
-            {
-                MPI_Isend((uint32_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,MPI_UINT32_T,mpi_dest,id*4+3,comm,&req_send_map);
-            }
+        size_t max_recv_ket = recv.size();
+        have_req_recv = (max_recv_ket != 0);
+        if (have_req_recv) {
+            MPI_Irecv((ElemT*)thrust::raw_pointer_cast(recv.data()),max_recv_ket,DataT,mpi_source,id*4+2,comm,&req_recv);
         }
 
-        // recv_map_base: pointer used to set up recv_map field offsets below.
-        uint32_t* recv_map_base;
-        if( recv_size_map != 0 ) {
-            // No resize: recv_map_storage is pre-allocated to global_max_map_size.
-            {
-                MPI_Irecv((uint32_t*)thrust::raw_pointer_cast(recv_map_storage.data()),recv_size_map,MPI_UINT32_T,mpi_source,id*4+3,comm,&req_recv_map);
-            }
-            recv_map_base = thrust::raw_pointer_cast(recv_map_storage.data());
-        } else {
-            // recv_size_map == 0: degenerate case; point recv_map at send's map.
-            // Sync() will not swap if recv_size is also 0.
-            recv_offset = send_offset;
-            recv_map_base = const_cast<uint32_t*>(thrust::raw_pointer_cast(send_map_storage.data()));
+        have_req_send_map = (send_size_map != 0);
+        if (have_req_send_map) {
+            MPI_Isend((uint32_t*)thrust::raw_pointer_cast(send_map_storage.data()),send_size_map,MPI_UINT32_T,mpi_dest,id*4+3,comm,&req_send_map);
         }
-        recv_map.AdetToDetOffset = recv_map_base + recv_offset[2];
-        recv_map.BdetToDetOffset = recv_map_base + recv_offset[3];
-        recv_map.AdetIndex = recv_map_base + recv_offset[4];
-        recv_map.BdetIndex = recv_map_base + recv_offset[5];
-        recv_map.AdetToBdetSM = recv_map_base + recv_offset[6];
-        recv_map.AdetToDetSM = recv_map_base + recv_offset[7];
-        recv_map.BdetToAdetSM = recv_map_base + recv_offset[8];
-        recv_map.BdetToDetSM = recv_map_base + recv_offset[9];
-        recv_map.size_adet = static_cast<uint32_t>(recv_offset[10]);
-        recv_map.size_bdet = static_cast<uint32_t>(recv_offset[11]);
+        size_t max_recv_map = recv_map_storage.size();
+        have_req_recv_map = (max_recv_map != 0);
+        if (have_req_recv_map) {
+            MPI_Irecv((uint32_t*)thrust::raw_pointer_cast(recv_map_storage.data()),max_recv_map,MPI_UINT32_T,mpi_source,id*4+3,comm,&req_recv_map);
+        }
+
+        // Save recv_map pointer and base address so Sync() can set up the field
+        // pointers after the offset message arrives with the actual offsets.
+        recv_map_ptr        = &recv_map;
+        recv_map_base_saved = thrust::raw_pointer_cast(recv_map_storage.data());
     }
 
     bool Sync(void)
     {
-        bool recv = false;
-        if (send_size > 0) {
+        // Wait for the offset message from the ring-sender.  Previously this
+        // Waitall was inside ExchangeAsync, blocking before GPU kernels started.
+        // Moving it here overlaps the offset handshake with GPU kernel execution.
+        {
             MPI_Status st;
-
-            {
-                MPI_Wait(&req_send, &st);
-            }
+            MPI_Wait(&req_size_recv, &st);
         }
-        if (recv_size > 0) {
-            MPI_Status st;
+        recv_size     = recv_offset_buf[0];
+        recv_size_map = recv_offset_buf[1];
 
-            {
-                MPI_Wait(&req_recv, &st);
-            }
-            recv = true;
+        // Set up recv_map field pointers from the received offsets.
+        if (recv_map_ptr) {
+            uint32_t* base = recv_map_base_saved;
+            recv_map_ptr->AdetToDetOffset = base + recv_offset_buf[2];
+            recv_map_ptr->BdetToDetOffset = base + recv_offset_buf[3];
+            recv_map_ptr->AdetIndex       = base + recv_offset_buf[4];
+            recv_map_ptr->BdetIndex       = base + recv_offset_buf[5];
+            recv_map_ptr->AdetToBdetSM    = base + recv_offset_buf[6];
+            recv_map_ptr->AdetToDetSM     = base + recv_offset_buf[7];
+            recv_map_ptr->BdetToAdetSM    = base + recv_offset_buf[8];
+            recv_map_ptr->BdetToDetSM     = base + recv_offset_buf[9];
+            recv_map_ptr->size_adet       = static_cast<uint32_t>(recv_offset_buf[10]);
+            recv_map_ptr->size_bdet       = static_cast<uint32_t>(recv_offset_buf[11]);
+            recv_map_ptr        = nullptr;
+            recv_map_base_saved = nullptr;
         }
-        if (send_size_map > 0) {
-            MPI_Status st;
 
-            {
-                MPI_Wait(&req_send_map, &st);
-            }
+        if (have_req_send) {
+            MPI_Status st;
+            MPI_Wait(&req_send, &st);
+            have_req_send = false;
         }
-        if (recv_size_map > 0) {
+        if (have_req_recv) {
             MPI_Status st;
-
-            {
-                MPI_Wait(&req_recv_map, &st);
-            }
-            recv = true;
+            MPI_Wait(&req_recv, &st);
+            have_req_recv = false;
+        }
+        if (have_req_send_map) {
+            MPI_Status st;
+            MPI_Wait(&req_send_map, &st);
+            have_req_send_map = false;
+        }
+        if (have_req_recv_map) {
+            MPI_Status st;
+            MPI_Wait(&req_recv_map, &st);
+            have_req_recv_map = false;
+        }
+        // Wait for offset send last — send_offset_buf must stay alive until here.
+        {
+            MPI_Status st;
+            MPI_Wait(&req_size_send, &st);
         }
 
         send_size = 0;
-        recv_size = 0;
         send_size_map = 0;
-        recv_size_map = 0;
-        return recv;
+        // recv_size and recv_size_map remain valid for get_recv_size() /
+        // get_recv_size_map() calls after Sync() returns.
+        return (recv_size > 0);
     }
 };
 
