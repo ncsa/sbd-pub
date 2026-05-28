@@ -815,27 +815,10 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
 	for (size_t task = 0; task < exidx.size(); task++) {
-		// ExchangeAsync is posted BEFORE the GPU kernel launches.  active_buf
-		// holds MPI-received data from the previous Sync() with no outstanding
-		// GPU work (cudaDeviceSynchronize completed at end of prev task), so
-		// Cray MPICH's MPI_Isend finds a clean GPU stream and DMA starts
-		// immediately.  GPU kernels then run concurrently with NIC DMA — both
-		// read active_buf, neither writes it.
+		// No GPU/MPI overlap: kernels run to completion before ExchangeAsync
+		// is posted.  Isolates whether concurrent GPU activity interferes with
+		// NIC DMA throughput from GPU buffers.
 		double _t_launch, _t_exch, _t_sync, _t_gpu;
-
-		if (task < exidx.size() - 1) {
-			int slide = exidx[task].slide - exidx[task + 1].slide;
-			{ auto _t0 = _ck::now();
-			  slider.ExchangeAsync(
-			      twk[active_buf], twk_ket_size[active_buf],
-			      twk[recv_buf],
-			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
-			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
-			      slide, this->b_comm(), (int)task);
-			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
-		} else {
-			_t_exch = 0.0;
-		}
 
 		{ auto _t0 = _ck::now();
 
@@ -866,10 +849,20 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 
 		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
-		// Sync() waits for offset + large data.  GPU kernels are running
-		// concurrently; cudaDeviceSynchronize below ensures they finish before
-		// the next task overwrites wb.
+		{ auto _t0 = _ck::now();
+		  cudaDeviceSynchronize();
+		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
+
 		if (task < exidx.size() - 1) {
+			int slide = exidx[task].slide - exidx[task + 1].slide;
+			{ auto _t0 = _ck::now();
+			  slider.ExchangeAsync(
+			      twk[active_buf], twk_ket_size[active_buf],
+			      twk[recv_buf],
+			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
+			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
+			      slide, this->b_comm(), (int)task);
+			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 			{ auto _t0 = _ck::now();
 			  if (slider.Sync()) {
 			    twk_ket_size[recv_buf] = slider.get_recv_size();
@@ -878,12 +871,9 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			  }
 			  _t_sync = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 		} else {
+			_t_exch = 0.0;
 			_t_sync = 0.0;
 		}
-
-		{ auto _t0 = _ck::now();
-		  cudaDeviceSynchronize();
-		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
 		fprintf(stderr, "mult_task_ms: rank_b=%d task=%zu"
 		        " launch=%.1f exch=%.1f sync=%.1f gpu_sync=%.1f\n",
