@@ -138,7 +138,8 @@ public:
     inline __device__ __host__ std::pair<bool, uint32_t> adet_lower_bound(uint32_t jast, uint32_t jbst)
     {
         uint32_t is = AdetToDetOffset[jast];
-        uint32_t ie = AdetToDetOffset[jast + 1];
+        const uint32_t i_upper = AdetToDetOffset[jast + 1];
+        uint32_t ie = i_upper;
         while (is != ie) {
             uint32_t i = (is + ie) / 2;
             if (AdetToBdetSM[i] < jbst)
@@ -146,13 +147,14 @@ public:
             else
                 ie = i;
         }
-        return {ie != AdetToDetOffset[jast + 1] && AdetToBdetSM[ie] == jbst, ie};
+        return {ie != i_upper && AdetToBdetSM[ie] == jbst, ie};
     }
 
     inline __device__ __host__ std::pair<bool, uint32_t> bdet_lower_bound(uint32_t jbst, uint32_t jast)
     {
         uint32_t is = BdetToDetOffset[jbst];
-        uint32_t ie = BdetToDetOffset[jbst + 1];
+        const uint32_t i_upper = BdetToDetOffset[jbst + 1];
+        uint32_t ie = i_upper;
         while (is != ie) {
             uint32_t i = (is + ie) / 2;
             if (BdetToAdetSM[i] < jast)
@@ -160,7 +162,7 @@ public:
             else
                 ie = i;
         }
-        return {ie != BdetToDetOffset[jbst + 1] && BdetToAdetSM[ie] == jast, ie};
+        return {ie != i_upper && BdetToAdetSM[ie] == jast, ie};
     }
 
 

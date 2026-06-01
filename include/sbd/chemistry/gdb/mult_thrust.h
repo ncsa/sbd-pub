@@ -333,12 +333,14 @@ public:
 		typename WarpReduceSum::TempStorage temp_sum;
 		ElemT thread_sum = ElemT(0);
 
-		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+		const uint32_t self_lo = exidx.SelfFromBdetOffset[ibst];
+		const uint32_t self_hi = exidx.SelfFromBdetOffset[ibst + 1];
+		const uint32_t ja_lo   = exidx.SinglesFromAdetOffset[ia];
+		const uint32_t ja_hi   = exidx.SinglesFromAdetOffset[ia + 1];
+		if (self_lo != self_hi) {
+			uint32_t jbst = exidx.SelfFromBdetSM[self_lo];
 			// single alpha excitations — strided across SUBWARP lanes
-			for (uint32_t ja = exidx.SinglesFromAdetOffset[ia] + lane;
-			              ja < exidx.SinglesFromAdetOffset[ia + 1];
-			              ja += SUBWARP) {
+			for (uint32_t ja = ja_lo + lane; ja < ja_hi; ja += SUBWARP) {
 				uint32_t jast = exidx.SinglesFromAdetSM[ja];
 				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
 				if (found_a) {
@@ -390,12 +392,14 @@ public:
 		typename WarpReduceSum::TempStorage temp_sum;
 		ElemT thread_sum = ElemT(0);
 
-		if (exidx.SelfFromBdetOffset[ibst] != exidx.SelfFromBdetOffset[ibst + 1]) {
-			uint32_t jbst = exidx.SelfFromBdetSM[exidx.SelfFromBdetOffset[ibst]];
+		const uint32_t self_lo = exidx.SelfFromBdetOffset[ibst];
+		const uint32_t self_hi = exidx.SelfFromBdetOffset[ibst + 1];
+		const uint32_t ja_lo   = exidx.DoublesFromAdetOffset[ia];
+		const uint32_t ja_hi   = exidx.DoublesFromAdetOffset[ia + 1];
+		if (self_lo != self_hi) {
+			uint32_t jbst = exidx.SelfFromBdetSM[self_lo];
 			// double alpha excitations — strided across SUBWARP lanes
-			for (uint32_t ja = exidx.DoublesFromAdetOffset[ia] + lane;
-			              ja < exidx.DoublesFromAdetOffset[ia + 1];
-			              ja += SUBWARP) {
+			for (uint32_t ja = ja_lo + lane; ja < ja_hi; ja += SUBWARP) {
 				uint32_t jast = exidx.DoublesFromAdetSM[ja];
 				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
 				if (found_a) {
@@ -452,12 +456,14 @@ public:
 		typename WarpReduceSum::TempStorage temp_sum;
 		ElemT thread_sum = ElemT(0);
 
-		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+		const uint32_t self_lo = exidx.SelfFromAdetOffset[iast];
+		const uint32_t self_hi = exidx.SelfFromAdetOffset[iast + 1];
+		const uint32_t jb_lo   = exidx.SinglesFromBdetOffset[ib];
+		const uint32_t jb_hi   = exidx.SinglesFromBdetOffset[ib + 1];
+		if (self_lo != self_hi) {
+			uint32_t jast = exidx.SelfFromAdetSM[self_lo];
 			// single beta excitations — strided across SUBWARP lanes
-			for (uint32_t jb = exidx.SinglesFromBdetOffset[ib] + lane;
-			              jb < exidx.SinglesFromBdetOffset[ib + 1];
-			              jb += SUBWARP) {
+			for (uint32_t jb = jb_lo + lane; jb < jb_hi; jb += SUBWARP) {
 				uint32_t jbst = exidx.SinglesFromBdetSM[jb];
 				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
 				if (found_b) {
@@ -509,12 +515,14 @@ public:
 		typename WarpReduceSum::TempStorage temp_sum;
 		ElemT thread_sum = ElemT(0);
 
-		if (exidx.SelfFromAdetOffset[iast] != exidx.SelfFromAdetOffset[iast + 1]) {
-			uint32_t jast = exidx.SelfFromAdetSM[exidx.SelfFromAdetOffset[iast]];
+		const uint32_t self_lo = exidx.SelfFromAdetOffset[iast];
+		const uint32_t self_hi = exidx.SelfFromAdetOffset[iast + 1];
+		const uint32_t jb_lo   = exidx.DoublesFromBdetOffset[ib];
+		const uint32_t jb_hi   = exidx.DoublesFromBdetOffset[ib + 1];
+		if (self_lo != self_hi) {
+			uint32_t jast = exidx.SelfFromAdetSM[self_lo];
 			// double beta excitations — strided across SUBWARP lanes
-			for (uint32_t jb = exidx.DoublesFromBdetOffset[ib] + lane;
-			              jb < exidx.DoublesFromBdetOffset[ib + 1];
-			              jb += SUBWARP) {
+			for (uint32_t jb = jb_lo + lane; jb < jb_hi; jb += SUBWARP) {
 				uint32_t jbst = exidx.DoublesFromBdetSM[jb];
 				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
 				if (found_b) {
@@ -599,6 +607,13 @@ public:
 		                                               : ((1u << SUBWARP) - 1u);
 		const unsigned subwarp_mask  = subwarp_lanes << (group_in_warp * SUBWARP);
 
+		// k_lo/k_hi/k_iters depend only on ibst (constant for this thread);
+		// hoist outside the ja loop so the compiler sees they are loop-invariant
+		// even though SinglesFromBdetOffset is a raw device pointer.
+		const uint32_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
+		const uint32_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
+		const uint32_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
+
 		// Outer ja loop. Inner k loop runs k_iters times *uniformly* across
 		// all SUBWARP lanes of the group (k_lane = k_lo + it*SUBWARP + lane,
 		// guarded by `in_range = k_lane < k_hi`). This keeps __ballot_sync
@@ -606,11 +621,9 @@ public:
 		// divergent-loop-exit bug in v1.
 		// adet_lower_bound returns {found, ie}; ie < AdetToDetOffset[jast+1] whenever found.
 		// (idxb - AdetToDetOffset[jast]) is in-range whenever valid.
-		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < exidx.SinglesFromAdetOffset[ia + 1]; ja++) {
+		const uint32_t ja_hi = exidx.SinglesFromAdetOffset[ia + 1];
+		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < ja_hi; ja++) {
 			uint32_t jast    = exidx.SinglesFromAdetSM[ja];
-			uint32_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
-			uint32_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
-			uint32_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
 
 			for (uint32_t it = 0; it < k_iters; it++) {
 				uint32_t k             = k_lo + it * SUBWARP + lane;
