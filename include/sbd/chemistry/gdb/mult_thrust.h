@@ -337,12 +337,14 @@ public:
 		const uint32_t self_hi = exidx.SelfFromBdetOffset[ibst + 1];
 		const uint32_t ja_lo   = exidx.SinglesFromAdetOffset[ia];
 		const uint32_t ja_hi   = exidx.SinglesFromAdetOffset[ia + 1];
-		if (self_lo != self_hi) {
+		if (self_lo != self_hi && ja_lo != ja_hi) {
 			uint32_t jbst = exidx.SelfFromBdetSM[self_lo];
+			const uint32_t bdet_lo = tidxmap.BdetToDetOffset[jbst];
+			const uint32_t bdet_hi = tidxmap.BdetToDetOffset[jbst + 1];
 			// single alpha excitations — strided across SUBWARP lanes
 			for (uint32_t ja = ja_lo + lane; ja < ja_hi; ja += SUBWARP) {
 				uint32_t jast = exidx.SinglesFromAdetSM[ja];
-				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
+				auto [found_a, idxa] = tidxmap.bdet_lower_bound(bdet_lo, bdet_hi, jast);
 				if (found_a) {
 					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
@@ -354,7 +356,7 @@ public:
 		} // if there is same beta string
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
-		if (lane == 0) this->wb[idet] += total;
+		if (lane == 0 && total != ElemT(0)) this->wb[idet] += total;
 	}
 };
 
@@ -396,12 +398,14 @@ public:
 		const uint32_t self_hi = exidx.SelfFromBdetOffset[ibst + 1];
 		const uint32_t ja_lo   = exidx.DoublesFromAdetOffset[ia];
 		const uint32_t ja_hi   = exidx.DoublesFromAdetOffset[ia + 1];
-		if (self_lo != self_hi) {
+		if (self_lo != self_hi && ja_lo != ja_hi) {
 			uint32_t jbst = exidx.SelfFromBdetSM[self_lo];
+			const uint32_t bdet_lo = tidxmap.BdetToDetOffset[jbst];
+			const uint32_t bdet_hi = tidxmap.BdetToDetOffset[jbst + 1];
 			// double alpha excitations — strided across SUBWARP lanes
 			for (uint32_t ja = ja_lo + lane; ja < ja_hi; ja += SUBWARP) {
 				uint32_t jast = exidx.DoublesFromAdetSM[ja];
-				auto [found_a, idxa] = tidxmap.bdet_lower_bound(jbst, jast);
+				auto [found_a, idxa] = tidxmap.bdet_lower_bound(bdet_lo, bdet_hi, jast);
 				if (found_a) {
 					uint32_t jdet = tidxmap.BdetToDetSM[idxa];
 					ElemT eij = this->TwoExciteFast(this->detsum + idet * this->D_size,
@@ -415,7 +419,7 @@ public:
 		} // if there is same beta string
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
-		if (lane == 0) this->wb[idet] += total;
+		if (lane == 0 && total != ElemT(0)) this->wb[idet] += total;
 	}
 };
 
@@ -460,12 +464,14 @@ public:
 		const uint32_t self_hi = exidx.SelfFromAdetOffset[iast + 1];
 		const uint32_t jb_lo   = exidx.SinglesFromBdetOffset[ib];
 		const uint32_t jb_hi   = exidx.SinglesFromBdetOffset[ib + 1];
-		if (self_lo != self_hi) {
+		if (self_lo != self_hi && jb_lo != jb_hi) {
 			uint32_t jast = exidx.SelfFromAdetSM[self_lo];
+			const uint32_t adet_lo = tidxmap.AdetToDetOffset[jast];
+			const uint32_t adet_hi = tidxmap.AdetToDetOffset[jast + 1];
 			// single beta excitations — strided across SUBWARP lanes
 			for (uint32_t jb = jb_lo + lane; jb < jb_hi; jb += SUBWARP) {
 				uint32_t jbst = exidx.SinglesFromBdetSM[jb];
-				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
+				auto [found_b, idxb] = tidxmap.adet_lower_bound(adet_lo, adet_hi, jbst);
 				if (found_b) {
 					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					ElemT eij = this->OneExcite(this->det + idet * this->D_size,
@@ -477,7 +483,7 @@ public:
 		} // if there is same beta string
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
-		if (lane == 0) this->wb[idet] += total;
+		if (lane == 0 && total != ElemT(0)) this->wb[idet] += total;
 	}
 };
 
@@ -519,12 +525,14 @@ public:
 		const uint32_t self_hi = exidx.SelfFromAdetOffset[iast + 1];
 		const uint32_t jb_lo   = exidx.DoublesFromBdetOffset[ib];
 		const uint32_t jb_hi   = exidx.DoublesFromBdetOffset[ib + 1];
-		if (self_lo != self_hi) {
+		if (self_lo != self_hi && jb_lo != jb_hi) {
 			uint32_t jast = exidx.SelfFromAdetSM[self_lo];
+			const uint32_t adet_lo = tidxmap.AdetToDetOffset[jast];
+			const uint32_t adet_hi = tidxmap.AdetToDetOffset[jast + 1];
 			// double beta excitations — strided across SUBWARP lanes
 			for (uint32_t jb = jb_lo + lane; jb < jb_hi; jb += SUBWARP) {
 				uint32_t jbst = exidx.DoublesFromBdetSM[jb];
-				auto [found_b, idxb] = tidxmap.adet_lower_bound(jast, jbst);
+				auto [found_b, idxb] = tidxmap.adet_lower_bound(adet_lo, adet_hi, jbst);
 				if (found_b) {
 					uint32_t jdet = tidxmap.AdetToDetSM[idxb];
 					ElemT eij = this->TwoExciteFast(this->detsum + idet * this->D_size,
@@ -538,7 +546,7 @@ public:
 		} // if there is same beta string
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
-		if (lane == 0) this->wb[idet] += total;
+		if (lane == 0 && total != ElemT(0)) this->wb[idet] += total;
 	}
 };
 
@@ -613,6 +621,8 @@ public:
 		const uint32_t k_lo    = exidx.SinglesFromBdetOffset[ibst];
 		const uint32_t k_hi    = exidx.SinglesFromBdetOffset[ibst + 1];
 		const uint32_t k_iters = (k_hi - k_lo + SUBWARP - 1) / SUBWARP;
+		const uint32_t ja_lo   = exidx.SinglesFromAdetOffset[ia];
+		const uint32_t ja_hi   = exidx.SinglesFromAdetOffset[ia + 1];
 
 		// Outer ja loop. Inner k loop runs k_iters times *uniformly* across
 		// all SUBWARP lanes of the group (k_lane = k_lo + it*SUBWARP + lane,
@@ -621,14 +631,15 @@ public:
 		// divergent-loop-exit bug in v1.
 		// adet_lower_bound returns {found, ie}; ie < AdetToDetOffset[jast+1] whenever found.
 		// (idxb - AdetToDetOffset[jast]) is in-range whenever valid.
-		const uint32_t ja_hi = exidx.SinglesFromAdetOffset[ia + 1];
-		for (uint32_t ja = exidx.SinglesFromAdetOffset[ia]; ja < ja_hi; ja++) {
+		if (k_lo != k_hi) for (uint32_t ja = ja_lo; ja < ja_hi; ja++) {
 			uint32_t jast    = exidx.SinglesFromAdetSM[ja];
+			const uint32_t adet_lo = tidxmap.AdetToDetOffset[jast];
+			const uint32_t adet_hi = tidxmap.AdetToDetOffset[jast + 1];
 
 			for (uint32_t it = 0; it < k_iters; it++) {
 				uint32_t k             = k_lo + it * SUBWARP + lane;
 				uint32_t jbst          = exidx.SinglesFromBdetSM[std::min(k, k_hi - 1)];
-				auto [found, idxb]     = tidxmap.adet_lower_bound(jast, jbst);
+				auto [found, idxb]     = tidxmap.adet_lower_bound(adet_lo, adet_hi, jbst);
 				bool     valid         = k < k_hi && found;
 
 				// Per-group ballot. __ballot_sync(subwarp_mask,...) zeroes
@@ -700,7 +711,7 @@ public:
 		}
 
 		ElemT total = WarpReduceSum(temp_sum).Sum(thread_sum);
-		if (lane == 0) this->wb[idet] += total;
+		if (lane == 0 && total != ElemT(0)) this->wb[idet] += total;
 	}
 };
 

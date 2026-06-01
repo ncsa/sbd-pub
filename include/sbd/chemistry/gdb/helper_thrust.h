@@ -135,10 +135,9 @@ public:
         size_bdet = idxmap.size_bdet;
     }
 
-    inline __device__ __host__ std::pair<bool, uint32_t> adet_lower_bound(uint32_t jast, uint32_t jbst)
+    inline __device__ __host__ std::pair<bool, uint32_t> adet_lower_bound(uint32_t i_lower, uint32_t i_upper, uint32_t jbst)
     {
-        uint32_t is = AdetToDetOffset[jast];
-        const uint32_t i_upper = AdetToDetOffset[jast + 1];
+        uint32_t is = i_lower;
         uint32_t ie = i_upper;
         while (is != ie) {
             uint32_t i = (is + ie) / 2;
@@ -150,10 +149,9 @@ public:
         return {ie != i_upper && AdetToBdetSM[ie] == jbst, ie};
     }
 
-    inline __device__ __host__ std::pair<bool, uint32_t> bdet_lower_bound(uint32_t jbst, uint32_t jast)
+    inline __device__ __host__ std::pair<bool, uint32_t> bdet_lower_bound(uint32_t i_lower, uint32_t i_upper, uint32_t jast)
     {
-        uint32_t is = BdetToDetOffset[jbst];
-        const uint32_t i_upper = BdetToDetOffset[jbst + 1];
+        uint32_t is = i_lower;
         uint32_t ie = i_upper;
         while (is != ie) {
             uint32_t i = (is + ie) / 2;
