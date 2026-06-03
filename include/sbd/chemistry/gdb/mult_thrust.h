@@ -856,8 +856,11 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	//   compute_stream must not read twk[b] until copy_done[b].
 	//   copy_stream must not write twk[b] until compute_done[b].
 	cudaEvent_t copy_done[2], compute_done[2];
-	cudaEventCreate(&copy_done[0]);    cudaEventCreate(&copy_done[1]);
-	cudaEventCreate(&compute_done[0]); cudaEventCreate(&compute_done[1]);
+	cudaEventCreateWithFlags(&copy_done[0],    cudaEventDisableTiming);
+	cudaEventCreateWithFlags(&copy_done[1],    cudaEventDisableTiming);
+	cudaEventCreateWithFlags(&compute_done[0], cudaEventDisableTiming);
+	cudaEventCreateWithFlags(&compute_done[1], cudaEventDisableTiming);
+	// No event pre-recording needed: CUDA treats unrecorded events as complete.
 
 	// CPU-pinned staging buffers (two per data type, one per double-buffer slot).
 	ElemT*    h_twk[2] = {nullptr, nullptr};
@@ -869,18 +872,20 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 	cudaMallocHost(&h_map[0], tidxmap_storage[0].size() * sizeof(uint32_t));
 	cudaMallocHost(&h_map[1], tidxmap_storage[1].size() * sizeof(uint32_t));
 
-	// One-time sync copy: mirror the initial active GPU ket into the CPU
-	// staging buffer so the first task can MPI_Isend from host memory.
-	// Synchronous cudaMemcpy completes before the task loop begins.
-	cudaMemcpy(h_twk[active_buf],
-	           thrust::raw_pointer_cast(twk[active_buf].data()),
-	           twk_ket_size[active_buf] * sizeof(ElemT),
-	           cudaMemcpyDeviceToHost);
-	cudaMemcpy(h_map[active_buf],
-	           thrust::raw_pointer_cast(tidxmap_storage[active_buf].data()),
-	           twk_map_size[active_buf] * sizeof(uint32_t),
-	           cudaMemcpyDeviceToHost);
-	// No event pre-recording needed: CUDA treats unrecorded events as complete.
+	// Async D→H: mirror the initial active GPU ket into the CPU staging buffer
+	// so the first MPI_Isend can go from host memory.  Both copies go on
+	// copy_stream; copy_done[active_buf] gates compute_stream's kernel launch
+	// and copy_done[recv_buf] gates the task-0 ExchangeAsyncHost call.
+	cudaMemcpyAsync(h_twk[active_buf],
+	                thrust::raw_pointer_cast(twk[active_buf].data()),
+	                twk_ket_size[active_buf] * sizeof(ElemT),
+	                cudaMemcpyDeviceToHost, copy_stream);
+	cudaMemcpyAsync(h_map[active_buf],
+	                thrust::raw_pointer_cast(tidxmap_storage[active_buf].data()),
+	                twk_map_size[active_buf] * sizeof(uint32_t),
+	                cudaMemcpyDeviceToHost, copy_stream);
+	cudaEventRecord(copy_done[active_buf], copy_stream);  // for compute_stream
+	cudaEventRecord(copy_done[recv_buf],  copy_stream);  // for MPI
 
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
@@ -928,10 +933,13 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			{ auto _t0 = _ck::now();
 			  // Ensure the cudaMemcpyAsync that READ h_twk[recv_buf] in a prior
 			  // task has completed before MPI_Irecv writes into that same buffer.
-			  // In practice copy_done[recv_buf] fires ~3ms after launch and
-			  // Sync() in the intervening task takes >> 3ms, so this is a no-op
-			  // in steady state — but the dependency must be explicit.
-			  cudaEventSynchronize(copy_done[recv_buf]);
+			  if (cudaEventQuery(copy_done[recv_buf]) == cudaErrorNotReady) {
+			    auto _tw0 = _ck::now();
+			    cudaEventSynchronize(copy_done[recv_buf]);
+			    double _tw = std::chrono::duration<double,std::milli>(_ck::now()-_tw0).count();
+			    fprintf(stderr, "event_wait_ms: rank_b=%d task=%zu event=copy_done wait=%.1f\n",
+			            mpi_rank_b, task, _tw);
+			  }
 			  // CPU-staging: send from h_twk[active] (CPU DRAM) — no HBM touch.
 			  slider.ExchangeAsyncHost(
 			      h_twk[active_buf], twk_ket_size[active_buf],
