@@ -837,19 +837,56 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
         thrust::for_each_n(thrust::device, ci, twk_ket_size[active_buf], Wb_init_kernel(wb, hii, twk[active_buf]));
 	}
 
-	// Non-blocking stream keeps mult kernels off the default stream so
-	// Cray MPICH GPU-direct DMA (which syncs the default stream) does not
-	// stall waiting for kernel completion.
+	// Non-blocking compute stream for the five mult kernels.
 	cudaStream_t compute_stream;
 	cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
+
+	// CPU-staging: separate copy stream moves received ket data from CPU
+	// pinned memory into GPU HBM asynchronously.  copy_done[b] is signalled
+	// when buffer b's GPU copy is complete; compute_stream waits on it before
+	// launching kernels that read buffer b.  This decouples the NIC DMA from
+	// GPU HBM: MPI_Isend/Irecv target CPU pinned memory, eliminating the
+	// HBM bandwidth contention that halves effective MPI throughput when GPU
+	// kernels are running.
+	cudaStream_t copy_stream;
+	cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking);
+	// copy_done[b]: fired when h_twk[b]/h_map[b] have been copied to GPU.
+	// compute_done[b]: fired when the compute_stream kernels that READ twk[b] finish.
+	// These two event pairs encode the two hazards:
+	//   compute_stream must not read twk[b] until copy_done[b].
+	//   copy_stream must not write twk[b] until compute_done[b].
+	cudaEvent_t copy_done[2], compute_done[2];
+	cudaEventCreate(&copy_done[0]);    cudaEventCreate(&copy_done[1]);
+	cudaEventCreate(&compute_done[0]); cudaEventCreate(&compute_done[1]);
+
+	// CPU-pinned staging buffers (two per data type, one per double-buffer slot).
+	ElemT*    h_twk[2] = {nullptr, nullptr};
+	uint32_t* h_map[2] = {nullptr, nullptr};
+	// twk[*].size() and tidxmap_storage[*].size() equal global_max after the
+	// pre-allocation block above.
+	cudaMallocHost(&h_twk[0], twk[0].size() * sizeof(ElemT));
+	cudaMallocHost(&h_twk[1], twk[1].size() * sizeof(ElemT));
+	cudaMallocHost(&h_map[0], tidxmap_storage[0].size() * sizeof(uint32_t));
+	cudaMallocHost(&h_map[1], tidxmap_storage[1].size() * sizeof(uint32_t));
+
+	// One-time sync copy: mirror the initial active GPU ket into the CPU
+	// staging buffer so the first task can MPI_Isend from host memory.
+	// Synchronous cudaMemcpy completes before the task loop begins.
+	cudaMemcpy(h_twk[active_buf],
+	           thrust::raw_pointer_cast(twk[active_buf].data()),
+	           twk_ket_size[active_buf] * sizeof(ElemT),
+	           cudaMemcpyDeviceToHost);
+	cudaMemcpy(h_map[active_buf],
+	           thrust::raw_pointer_cast(tidxmap_storage[active_buf].data()),
+	           twk_map_size[active_buf] * sizeof(uint32_t),
+	           cudaMemcpyDeviceToHost);
+	// No event pre-recording needed: CUDA treats unrecorded events as complete.
 
 	MpiSlider<ElemT> slider;
 	using _ck = std::chrono::steady_clock;
 	for (size_t task = 0; task < exidx.size(); task++) {
-		// H19 ordering (kernels first, then ExchangeAsync) with kernels on
-		// compute_stream.  Cray MPICH syncs the default stream before DMA;
-		// since kernels run on compute_stream the default stream is always
-		// clean when ExchangeAsync posts MPI_Isend.
+		// compute_stream may not read twk[active] until the CPU→GPU copy is done.
+		cudaStreamWaitEvent(compute_stream, copy_done[active_buf]);
 		double _t_launch, _t_exch, _t_sync, _t_gpu;
 
 		{ auto _t0 = _ck::now();
@@ -881,14 +918,30 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 
 		_t_launch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
+		// Record compute_done[active] into compute_stream — fires when this
+		// task's kernels finish reading twk[active].  The copy_stream for
+		// a future task will wait on this before writing into that buffer.
+		cudaEventRecord(compute_done[active_buf], compute_stream);
+
 		if (task < exidx.size() - 1) {
 			int slide = exidx[task].slide - exidx[task + 1].slide;
 			{ auto _t0 = _ck::now();
-			  slider.ExchangeAsync(
-			      twk[active_buf], twk_ket_size[active_buf],
-			      twk[recv_buf],
-			      tidxmap[active_buf], tidxmap_storage[active_buf], twk_map_size[active_buf],
-			      tidxmap[recv_buf], tidxmap_storage[recv_buf],
+			  // Ensure the cudaMemcpyAsync that READ h_twk[recv_buf] in a prior
+			  // task has completed before MPI_Irecv writes into that same buffer.
+			  // In practice copy_done[recv_buf] fires ~3ms after launch and
+			  // Sync() in the intervening task takes >> 3ms, so this is a no-op
+			  // in steady state — but the dependency must be explicit.
+			  cudaEventSynchronize(copy_done[recv_buf]);
+			  // CPU-staging: send from h_twk[active] (CPU DRAM) — no HBM touch.
+			  slider.ExchangeAsyncHost(
+			      h_twk[active_buf], twk_ket_size[active_buf],
+			      h_twk[recv_buf],   twk[recv_buf].size(),
+			      tidxmap[active_buf],
+			      thrust::raw_pointer_cast(tidxmap_storage[active_buf].data()),
+			      h_map[active_buf],  twk_map_size[active_buf],
+			      tidxmap[recv_buf],
+			      h_map[recv_buf],    tidxmap_storage[recv_buf].size(),
+			      thrust::raw_pointer_cast(tidxmap_storage[recv_buf].data()),
 			      slide, this->b_comm(), (int)task);
 			  _t_exch = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 		} else {
@@ -900,6 +953,20 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 			  if (slider.Sync()) {
 			    twk_ket_size[recv_buf] = slider.get_recv_size();
 			    twk_map_size[recv_buf] = slider.get_recv_size_map();
+			    // copy_stream must not write twk[recv] while a prior task's
+			    // kernels are still reading it.  Wait for those kernels' event.
+			    cudaStreamWaitEvent(copy_stream, compute_done[recv_buf]);
+			    cudaMemcpyAsync(
+			        thrust::raw_pointer_cast(twk[recv_buf].data()),
+			        h_twk[recv_buf],
+			        twk_ket_size[recv_buf] * sizeof(ElemT),
+			        cudaMemcpyHostToDevice, copy_stream);
+			    cudaMemcpyAsync(
+			        thrust::raw_pointer_cast(tidxmap_storage[recv_buf].data()),
+			        h_map[recv_buf],
+			        twk_map_size[recv_buf] * sizeof(uint32_t),
+			        cudaMemcpyHostToDevice, copy_stream);
+			    cudaEventRecord(copy_done[recv_buf], copy_stream);
 			    int t = active_buf; active_buf = recv_buf; recv_buf = t;
 			  }
 			  _t_sync = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
@@ -908,7 +975,11 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		}
 
 		{ auto _t0 = _ck::now();
-		  cudaStreamSynchronize(compute_stream);
+		  // No cudaStreamSynchronize here: all ordering is via events.
+		  // cudaEventSynchronize on the last task's compute_done ensures we
+		  // don't exit run() before the final kernels have written their output.
+		  if (task == exidx.size() - 1)
+		      cudaEventSynchronize(compute_done[active_buf]);
 		  _t_gpu = std::chrono::duration<double,std::milli>(_ck::now()-_t0).count(); }
 
 		fprintf(stderr, "mult_task_ms: rank_b=%d task=%zu"
@@ -916,6 +987,11 @@ void MultGDBThrust<ElemT>::run(	const thrust::device_vector<ElemT> &hii,
 		        mpi_rank_b, task, _t_launch, _t_exch, _t_sync, _t_gpu);
 	} // end task for loop
 
+	cudaFreeHost(h_twk[0]); cudaFreeHost(h_twk[1]);
+	cudaFreeHost(h_map[0]);  cudaFreeHost(h_map[1]);
+	cudaEventDestroy(copy_done[0]);    cudaEventDestroy(copy_done[1]);
+	cudaEventDestroy(compute_done[0]); cudaEventDestroy(compute_done[1]);
+	cudaStreamDestroy(copy_stream);
 	cudaStreamDestroy(compute_stream);
 
 	if (mpi_size_t > 1)

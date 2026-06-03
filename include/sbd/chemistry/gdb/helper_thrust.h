@@ -599,6 +599,88 @@ public:
         recv_map_base_saved = thrust::raw_pointer_cast(recv_map_storage.data());
     }
 
+    // CPU-staging variant of ExchangeAsync.
+    //
+    // MPI send/recv use CPU-pinned host pointers so the NIC reads/writes CPU
+    // DRAM (LPDDR5X) rather than GPU HBM, eliminating bandwidth contention with
+    // the compute kernels.  After Sync() the caller copies h_recv/h_recv_map to
+    // GPU via cudaMemcpyAsync on a copy_stream, then records a cudaEvent that
+    // the compute_stream waits on before launching the next task's kernels.
+    //
+    // send_gpu_base: thrust::raw_pointer_cast(tidxmap_storage[active_buf].data())
+    //   — needed to encode field offsets into the offset packet (same as
+    //   ExchangeAsync uses send_map_storage.data() for this).
+    // recv_map_gpu_base: thrust::raw_pointer_cast(tidxmap_storage[recv_buf].data())
+    //   — Sync() applies received offsets to this GPU base to fix up recv_map
+    //   field pointers.  The caller's subsequent cudaMemcpyAsync fills that GPU
+    //   storage, making the pointers valid before compute_stream uses them.
+    void ExchangeAsyncHost(
+                const ElemT*             h_send,
+                size_t                   send_ket_size,
+                ElemT*                   h_recv,
+                size_t                   max_recv_ket,
+                const DetIndexMapThrust& send_map,
+                const uint32_t*          send_gpu_base,
+                const uint32_t*          h_send_map,
+                size_t                   send_map_size,
+                DetIndexMapThrust&       recv_map,
+                uint32_t*                h_recv_map,
+                size_t                   max_recv_map,
+                uint32_t*                recv_map_gpu_base,
+                int slide,
+                MPI_Comm comm,
+                int id)
+    {
+        int mpi_rank; MPI_Comm_rank(comm, &mpi_rank);
+        int mpi_size; MPI_Comm_size(comm, &mpi_size);
+        int mpi_dest   = (mpi_size + mpi_rank + slide) % mpi_size;
+        int mpi_source = (mpi_size + mpi_rank - slide) % mpi_size;
+
+        // Offset packet encoding — identical to ExchangeAsync, using the GPU
+        // base pointer for field-offset arithmetic (layout is the same).
+        send_offset_buf[0]  = send_ket_size;
+        send_offset_buf[1]  = send_map_size;
+        send_offset_buf[2]  = (size_t)(send_map.AdetToDetOffset - send_gpu_base);
+        send_offset_buf[3]  = (size_t)(send_map.BdetToDetOffset - send_gpu_base);
+        send_offset_buf[4]  = (size_t)(send_map.AdetIndex       - send_gpu_base);
+        send_offset_buf[5]  = (size_t)(send_map.BdetIndex       - send_gpu_base);
+        send_offset_buf[6]  = (size_t)(send_map.AdetToBdetSM    - send_gpu_base);
+        send_offset_buf[7]  = (size_t)(send_map.AdetToDetSM     - send_gpu_base);
+        send_offset_buf[8]  = (size_t)(send_map.BdetToAdetSM    - send_gpu_base);
+        send_offset_buf[9]  = (size_t)(send_map.BdetToDetSM     - send_gpu_base);
+        send_offset_buf[10] = (size_t)send_map.size_adet;
+        send_offset_buf[11] = (size_t)send_map.size_bdet;
+
+        MPI_Isend(send_offset_buf.data(), 12, SBD_MPI_SIZE_T, mpi_dest,   id*4, comm, &req_size_send);
+        MPI_Irecv(recv_offset_buf.data(), 12, SBD_MPI_SIZE_T, mpi_source, id*4, comm, &req_size_recv);
+
+        send_size     = send_ket_size;
+        send_size_map = send_map_size;
+
+        // Data send/recv via host pointers — NIC reads/writes CPU DRAM only.
+        MPI_Datatype DataT = GetMpiType<ElemT>::MpiT;
+        have_req_send = (send_size != 0);
+        if (have_req_send)
+            MPI_Isend(const_cast<ElemT*>(h_send), static_cast<int>(send_size),
+                      DataT, mpi_dest, id*4+2, comm, &req_send);
+        have_req_recv = (max_recv_ket != 0);
+        if (have_req_recv)
+            MPI_Irecv(h_recv, static_cast<int>(max_recv_ket),
+                      DataT, mpi_source, id*4+2, comm, &req_recv);
+
+        have_req_send_map = (send_size_map != 0);
+        if (have_req_send_map)
+            MPI_Isend(const_cast<uint32_t*>(h_send_map), static_cast<int>(send_size_map),
+                      MPI_UINT32_T, mpi_dest, id*4+3, comm, &req_send_map);
+        have_req_recv_map = (max_recv_map != 0);
+        if (have_req_recv_map)
+            MPI_Irecv(h_recv_map, static_cast<int>(max_recv_map),
+                      MPI_UINT32_T, mpi_source, id*4+3, comm, &req_recv_map);
+
+        recv_map_ptr        = &recv_map;
+        recv_map_base_saved = recv_map_gpu_base;
+    }
+
     bool Sync(void)
     {
         // Wait for the offset message from the ring-sender.  Previously this
