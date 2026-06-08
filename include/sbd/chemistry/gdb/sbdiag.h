@@ -25,6 +25,7 @@ namespace sbd {
       double ratio = 0.0;
       double threshold = 0.01;
       size_t bit_length = 20;
+      bool timing_barriers = false;
       bool do_sort_det = false;
       bool do_redist_det = false;
     };
@@ -65,6 +66,9 @@ namespace sbd {
 	if ( std::string(argv[i]) == "--bit_length" ) {
 	  sbd_data.bit_length = std::atoi(argv[++i]);
 	}
+	if( std::string(argv[i]) == "--timing_barriers" ) {
+	  sbd_data.timing_barriers = ( std::atoi(argv[++i]) != 0 );
+	}
 	if( std::string(argv[i]) == "--do_sort_det" ) {
 	  if( std::atoi(argv[++i]) != 0 ) {
 	    sbd_data.do_sort_det = true;
@@ -94,6 +98,7 @@ namespace sbd {
       std::cout << "# tolerance: " << sbd_data.eps << std::endl;
       std::cout << "# init method: " << sbd_data.init << std::endl;
       std::cout << "# bit length: " << sbd_data.bit_length << std::endl;
+      std::cout << "# timing_barriers: " << sbd_data.timing_barriers << std::endl;
       std::cout << "# do basis sort: " << sbd_data.do_sort_det << std::endl;
       std::cout << "# do redistribution of basis: " << sbd_data.do_redist_det << std::endl;
       if( sbd_data.do_rdm != 0.0 ) {
@@ -153,6 +158,7 @@ namespace sbd {
       /**
 	 Setup system parameters from fcidump
       */
+      if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	  if( mpi_rank == 0 ) {
 	std::cout << " " << make_timestamp()
 		  << " sbd: start integral construction" << std::endl;
@@ -162,6 +168,7 @@ namespace sbd {
       sbd::oneInt<ElemT> I1;
       sbd::twoInt<ElemT> I2;
       sbd::SetupIntegrals(fcidump,L,N,I0,I1,I2);
+      if( sbd_data.timing_barriers ) MPI_Barrier(comm);
       auto time_end_model = std::chrono::high_resolution_clock::now();
       auto elapsed_model_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_model-time_start_model).count();
       double elapsed_model = 1.0e-6 * elapsed_model_count;
@@ -193,6 +200,7 @@ namespace sbd {
       int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
       int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
       int mpi_size_t; MPI_Comm_size(t_comm,&mpi_size_t);
+      if( sbd_data.timing_barriers ) MPI_Barrier(comm);
       auto time_end_helper = std::chrono::high_resolution_clock::now();
       auto elapsed_helper_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_helper-time_start_helper).count();
       double elapsed_helper = 1.0e-6 * elapsed_helper_count;
@@ -215,6 +223,7 @@ namespace sbd {
       } else {
 	sbd::LoadWavefunction(loadname,det,h_comm,b_comm,t_comm,w);
       }
+      if( sbd_data.timing_barriers ) MPI_Barrier(comm);
       auto time_end_init = std::chrono::high_resolution_clock::now();
       auto elapsed_init_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_init-time_start_init).count();
       double elapsed_init = 1.0e-6 * elapsed_init_count;
@@ -251,6 +260,7 @@ namespace sbd {
 			   idxmap,exidx,I0,I1,I2,hii,
 			   h_comm,b_comm,t_comm);
 #endif
+    if( sbd_data.timing_barriers ) MPI_Barrier(comm);
     auto time_end_mkham = std::chrono::high_resolution_clock::now();
 	auto elapsed_mkham_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_mkham-time_start_mkham).count();
 	double elapsed_mkham = 1.0e-6 * elapsed_mkham_count;
@@ -276,6 +286,7 @@ namespace sbd {
 		 h_comm,b_comm,t_comm,
 		 max_it,max_nb,eps);
 #endif
+    if( sbd_data.timing_barriers ) MPI_Barrier(comm);
     auto time_end_david = std::chrono::high_resolution_clock::now();
 	auto elapsed_david_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_david-time_start_david).count();
 	auto elapsed_diag_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_david-time_start_mkham).count();
@@ -317,6 +328,7 @@ namespace sbd {
 	InnerProduct(w,v,E,b_comm);
 	energy = GetReal(E);
 #endif
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_mult = std::chrono::high_resolution_clock::now();
 	auto elapsed_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_mult-time_start_mult).count();
 	double elapsed_mult = 1.0e-6 * elapsed_mult_count;
@@ -351,6 +363,7 @@ namespace sbd {
 		  hii,ih,jh,hij,len,slide,
 		  storage_int,storage_elem,
 		  h_comm,b_comm,t_comm);
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_mkham = std::chrono::high_resolution_clock::now();
 	auto elapsed_mkham_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_mkham-time_start_mkham).count();
 	double elapsed_mkham = 1.0e-6 * elapsed_mkham_count;
@@ -369,6 +382,7 @@ namespace sbd {
 	auto time_start_david = std::chrono::high_resolution_clock::now();
 	sbd::gdb::Davidson(hii,ih,jh,hij,len,slide,w,
 			   h_comm,b_comm,t_comm,max_it,max_nb,eps);
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_david = std::chrono::high_resolution_clock::now();
 	auto elapsed_david_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_david-time_start_david).count();
 	auto elapsed_diag_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_david-time_start_mkham).count();
@@ -397,6 +411,7 @@ namespace sbd {
 	InnerProduct(w,v,E,b_comm);
 	std::cout.precision(16);
 	energy = GetReal(E);
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_mult = std::chrono::high_resolution_clock::now();
 	auto elapsed_mult_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_mult-time_start_mult).count();
 	double elapsed_mult = 1.0e-6 * elapsed_mult_count;
@@ -435,6 +450,7 @@ namespace sbd {
 	  }
 	  MpiAllreduce(density,MPI_SUM,h_comm);
 	}
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_occd = std::chrono::high_resolution_clock::now();
 	auto elapsed_occd_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_occd-time_start_occd).count();
 	double elapsed_occd = 1.0e-6 * elapsed_occd_count;
@@ -464,6 +480,7 @@ namespace sbd {
 	  density[2*io+0] = GetReal(one_p_rdm[0][io+L*io]);
 	  density[2*io+1] = GetReal(one_p_rdm[1][io+L*io]);
 	}
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_rdm = std::chrono::high_resolution_clock::now();
 	auto elapsed_rdm_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_rdm-time_start_rdm).count();
 	double elapsed_rdm = 1.0e-6 * elapsed_rdm_count;
@@ -485,6 +502,7 @@ namespace sbd {
 	size_t n_kept = static_cast<size_t>(ratio * det.size()*mpi_size_b);
 	double truncated_weight = 0.0;
 	CarryOverDet(w,det,b_comm,n_kept,rdet,truncated_weight);
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_co = std::chrono::high_resolution_clock::now();
 	auto elapsed_co_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_co-time_start_co).count();
 	double elapsed_co = 1.0e-6 * elapsed_co_count;
@@ -505,6 +523,7 @@ namespace sbd {
 	}
 	auto time_start_save = std::chrono::high_resolution_clock::now();
 	SaveWavefunction(savename,det,h_comm,b_comm,t_comm,w);
+	if( sbd_data.timing_barriers ) MPI_Barrier(comm);
 	auto time_end_save = std::chrono::high_resolution_clock::now();
 	auto elapsed_save_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_save-time_start_save).count();
 	double elapsed_save = 1.0e-6 * elapsed_save_count;
