@@ -30,6 +30,52 @@ namespace sbd {
   
 
 
+  // Sort a[lo..hi) in less_from_back order by recursing one element at a time.
+  // Each comparison level touches exactly one size_t (no inner loop, no .size()
+  // call); for clen==1 this is a single std::sort with a bare size_t comparison.
+  void sort_from_back(std::vector<std::vector<size_t>>& a,
+                      size_t lo, size_t hi, int elem) {
+    if (hi - lo <= 1 || elem < 0) return;
+    std::sort(a.begin() + lo, a.begin() + hi,
+              [elem](const std::vector<size_t>& x,
+                     const std::vector<size_t>& y) {
+                return x[elem] < y[elem];
+              });
+    if (elem == 0) return;
+    size_t run_lo = lo;
+    for (size_t i = lo + 1; i <= hi; i++) {
+      if (i == hi || a[i][elem] != a[run_lo][elem]) {
+        if (i - run_lo > 1)
+          sort_from_back(a, run_lo, i, elem - 1);
+        run_lo = i;
+      }
+    }
+  }
+
+  // Sort idx[lo..hi) so that (a[idx[i]][elem] & Mask) is in ascending order,
+  // recursing on equal-valued runs through decreasing elements.
+  // Mask is a template parameter so the compiler specialises each instantiation:
+  // Mask=~0 eliminates the AND entirely; Mask=0x5555... is baked into code.
+  template<size_t Mask = ~size_t(0)>
+  void idx_sort_from_back(std::vector<size_t>& idx,
+                          const std::vector<std::vector<size_t>>& a,
+                          size_t lo, size_t hi, int elem) {
+    if (hi - lo <= 1 || elem < 0) return;
+    std::sort(idx.begin() + lo, idx.begin() + hi,
+              [&a, elem](size_t x, size_t y) {
+                return (a[x][elem] & Mask) < (a[y][elem] & Mask);
+              });
+    if (elem == 0) return;
+    size_t run_lo = lo;
+    for (size_t i = lo + 1; i <= hi; i++) {
+      if (i == hi || (a[idx[i]][elem] & Mask) != (a[idx[run_lo]][elem] & Mask)) {
+        if (i - run_lo > 1)
+          idx_sort_from_back<Mask>(idx, a, run_lo, i, elem - 1);
+        run_lo = i;
+      }
+    }
+  }
+
   // Equal-bra_a redistribution: partition dets so each rank owns a disjoint
   // contiguous range of alpha strings, giving equal bra_a across ranks.
   // Alpha occupation is at even bit positions (0,2,4,...) of the det bitstring,
@@ -42,53 +88,36 @@ namespace sbd {
     int mpi_rank; MPI_Comm_rank(comm, &mpi_rank);
 
     const int clen = static_cast<int>((total_bit_length + bit_length - 1) / bit_length);
+    // Alpha bits sit at even positions (0,2,4,...) of each interleaved word.
+    // Masking with ALPHA_MASK zeroes beta bits in place; the remaining even-position
+    // bits compare correctly with < because bit position order is preserved.
+    constexpr size_t ALPHA_MASK = 0x5555555555555555ULL;
 
-    // De-interleave one word: pack even-indexed bits into lower half.
-    auto deinterleave = [](size_t w) -> size_t {
-      size_t x = w & 0x5555555555555555ULL;
-      x = (x | (x >>  1)) & 0x3333333333333333ULL;
-      x = (x | (x >>  2)) & 0x0f0f0f0f0f0f0f0fULL;
-      x = (x | (x >>  4)) & 0x00ff00ff00ff00ffULL;
-      x = (x | (x >>  8)) & 0x0000ffff0000ffffULL;
-      x = (x | (x >> 16)) & 0x00000000ffffffffULL;
-      return x;
-    };
-
-    // Extract alpha key (clen packed words) from a det.
-    // Word k of the alpha key contains alpha orbitals [32k .. 32k+31].
-    auto get_alpha = [&](const std::vector<size_t>& det) -> std::vector<size_t> {
-      std::vector<size_t> a(clen);
-      for (int k = 0; k < clen; k++) a[k] = deinterleave(det[k]);
-      return a;
-    };
-
-    // Pre-compute alpha keys once to avoid redundant work in sort and lookup.
-    std::vector<std::vector<size_t>> akeys(config.size());
-    for (size_t j = 0; j < config.size(); j++) akeys[j] = get_alpha(config[j]);
-
-    // Step 1: sort local dets by (alpha_key, full_det) — alpha-primary.
+    // Step 1: sort local dets alpha-primary by masking beta bits out of each word.
+    // Det order within each alpha group is irrelevant; Step 7 re-sorts beta-primary.
     std::vector<size_t> idx(config.size());
     std::iota(idx.begin(), idx.end(), size_t(0));
-    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-      if (akeys[a] != akeys[b]) return less_from_back(akeys[a], akeys[b]);
-      return less_from_back(config[a], config[b]);
-    });
+    idx_sort_from_back<ALPHA_MASK>(idx, config, 0, idx.size(), clen - 1);
     {
-      std::vector<std::vector<size_t>> tmp_c(config.size()), tmp_a(config.size());
-      for (size_t i = 0; i < config.size(); i++) {
-        tmp_c[i] = std::move(config[idx[i]]);
-        tmp_a[i] = std::move(akeys[idx[i]]);
-      }
-      config = std::move(tmp_c);
-      akeys  = std::move(tmp_a);
+      std::vector<std::vector<size_t>> tmp(config.size());
+      for (size_t i = 0; i < config.size(); i++) tmp[i] = std::move(config[idx[i]]);
+      config = std::move(tmp);
     }
 
-    // Step 2: collect local unique alpha keys (already in sorted order).
+    // Step 2: collect local unique alpha keys from sorted config (mask on the fly).
     std::vector<std::vector<size_t>> local_alphas;
     {
       std::vector<size_t> prev(clen, ~size_t(0));
-      for (const auto& ak : akeys)
-        if (ak != prev) { local_alphas.push_back(ak); prev = ak; }
+      for (size_t j = 0; j < config.size(); j++) {
+        bool diff = false;
+        for (int k = 0; k < clen && !diff; k++)
+          diff = ((config[j][k] & ALPHA_MASK) != prev[k]);
+        if (diff) {
+          for (int k = 0; k < clen; k++)
+            prev[k] = config[j][k] & ALPHA_MASK;
+          local_alphas.emplace_back(prev);
+        }
+      }
     }
 
     // Step 3: allgather unique alpha keys → global sorted unique list.
@@ -123,13 +152,21 @@ namespace sbd {
     for (int r = 0; r < mpi_size; r++)
       alpha_start[r+1] = alpha_start[r] + chunk + (static_cast<size_t>(r) < rem ? 1 : 0);
 
-    // Step 5: for each local det compute destination rank using pre-computed akeys.
+    // Step 5: for each local det compute destination rank.
+    // all_alphas entries are already masked; apply ALPHA_MASK to config[j] inline.
     std::vector<int> dest_per_det(config.size());
     std::vector<int> sendcounts(mpi_size, 0);
     for (size_t j = 0; j < config.size(); j++) {
       size_t pos = static_cast<size_t>(
-        std::lower_bound(all_alphas.begin(), all_alphas.end(), akeys[j],
-          [](const auto& a, const auto& b) { return less_from_back(a, b); })
+        std::lower_bound(all_alphas.begin(), all_alphas.end(), config[j],
+          [clen](const std::vector<size_t>& alpha, const std::vector<size_t>& det) {
+            constexpr size_t ALPHA_MASK = 0x5555555555555555ULL;
+            for (int k = clen - 1; k >= 0; k--) {
+              if (alpha[k] < (det[k] & ALPHA_MASK)) return true;
+              if (alpha[k] > (det[k] & ALPHA_MASK)) return false;
+            }
+            return false;
+          })
         - all_alphas.begin());
       int dest = static_cast<int>(
         std::upper_bound(alpha_start.begin(), alpha_start.end(), pos)
@@ -161,12 +198,12 @@ namespace sbd {
     MPI_Alltoallv(sendbuf.data(), sendcounts_w.data(), sdispls.data(), SBD_MPI_SIZE_T,
                   recvbuf.data(), recvcounts_w.data(), rdispls.data(), SBD_MPI_SIZE_T, comm);
 
-    // Step 7: unpack and restore kernel sort order (sort_bitarray = beta-primary).
+    // Step 7: unpack and restore kernel sort order (beta-primary = less_from_back).
     size_t n_recv = static_cast<size_t>(total_recv_w) / static_cast<size_t>(clen);
     config.resize(n_recv, std::vector<size_t>(clen));
     for (size_t i = 0; i < n_recv; i++)
       for (int k = 0; k < clen; k++) config[i][k] = recvbuf[i * clen + k];
-    sort_bitarray(config);
+    sort_from_back(config, 0, config.size(), clen - 1);
   }
 
   void reordering(std::vector<std::vector<size_t>> & config,
