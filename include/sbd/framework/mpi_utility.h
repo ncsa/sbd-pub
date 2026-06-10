@@ -403,12 +403,10 @@ namespace sbd {
 
     scratch_send.resize(total_send_size);
     scratch_recv.resize(total_recv_size);
-    if( size_recv[0] != 0 ) {
-      B.resize(size_recv[0],std::vector<size_t>(size_recv[1]));
-    } else {
-      B.resize(0);
-    }
 
+    // Pack A into scratch_send before touching B.
+    // Ordering guarantee: A content is fully captured before B.resize() below,
+    // so it is safe to call with A and B aliasing the same vector (in-place slide).
     for(size_t n=0; n < size_send[0]; n++) {
       for(size_t k=0; k < size_send[1]; k++) {
         scratch_send[n*size_send[1]+k] = A[n][k];
@@ -420,6 +418,16 @@ namespace sbd {
     }
     if( total_recv_size != 0 ) {
       MPI_Irecv(scratch_recv.data(),total_recv_size,SBD_MPI_SIZE_T,mpi_source,1,comm,&req_data[1]);
+    }
+
+    // B.resize placed here — after pack (A safe) and Isend/Irecv (in flight),
+    // so construction of new vector rows overlaps with the MPI transfer.
+    // When A==B (in-place slide), B already has the right capacity if the
+    // communicator is balanced, making resize() a no-op.
+    if( size_recv[0] != 0 ) {
+      B.resize(size_recv[0],std::vector<size_t>(size_recv[1]));
+    } else {
+      B.resize(0);
     }
 
     if( total_send_size != 0 && total_recv_size != 0 ) {

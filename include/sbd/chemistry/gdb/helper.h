@@ -758,16 +758,14 @@ namespace sbd {
 	dumpExcitationLookup(exidx_task_file,exidx[task-task_begin]);
 #endif
 	if( task != task_end-1 ) {
-	  std::vector<std::vector<size_t>> send_det;
-	  std::vector<std::vector<size_t>> send_adet;
-	  std::vector<std::vector<size_t>> send_bdet;
-	  std::swap(ket_det,send_det);
-	  std::swap(ket_adet,send_adet);
-	  std::swap(ket_bdet,send_bdet);
 	  int slide = exidx[task-task_begin].slide - exidx[task+1-task_begin].slide;
-	  sbd::MpiSlideWithScratch(send_det,ket_det,slide,b_comm,det_scratch_send,det_scratch_recv);
-	  sbd::MpiSlide(send_adet,ket_adet,slide,b_comm);
-	  sbd::MpiSlide(send_bdet,ket_bdet,slide,b_comm);
+	  // In-place slide: pass ket_det/ket_adet/ket_bdet as both A and B.
+	  // Safe because MpiSlideWithScratch packs A into scratch before B.resize(),
+	  // so the existing capacity survives intact until pack is done.
+	  // When ranks hold equal det counts (balanced), B.resize() is a no-op.
+	  sbd::MpiSlideWithScratch(ket_det,ket_det,slide,b_comm,det_scratch_send,det_scratch_recv);
+	  sbd::MpiSlide(ket_adet,ket_adet,slide,b_comm);
+	  sbd::MpiSlide(ket_bdet,ket_bdet,slide,b_comm);
 #ifdef SBD_DEBUG_HELPER
 	  DetIndexMap send_idxmap;
 	  sbd::gdb::MpiSlide(send_idxmap,ket_idxmap,slide,b_comm);
