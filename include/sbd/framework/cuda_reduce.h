@@ -134,6 +134,11 @@ __global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
 template <typename Function>
 double precise_reduce_sum_with_function(Function func, size_t size)
 {
+    // A zero-length reduction sums to 0. Returning early avoids launching the
+    // reduce kernel with a zero block dimension (<<<1, 0>>>): that launch fails
+    // and leaves a pending CUDA error for the next Thrust dispatch to trip over.
+    if (size == 0) return 0.0;
+
     size_t n, nt, nb;
     nb = 1;
     nt = size;
