@@ -15,21 +15,25 @@
 
 namespace sbd {
 
+enum class det_kind { full, half };
+
 // Flat-packed container where every row has the same fixed width _elem_size.
-// Storage: std::vector<ElemT> _data of length size * (_elem_size+1).
-//   _data[i*(_elem_size+1)]               = _elem_size  (row header)
-//   _data[i*(_elem_size+1)+1 .. +_elem_size] = row i data
+// Storage: std::vector<ElemT> _data of length size * _elem_size (tightly packed).
+//   _data[i*_elem_size .. i*_elem_size+_elem_size-1] = row i data
 // Only intended for ElemT = size_t or uint32_t.
-template<typename ElemT>
+// _elem_size is a shared static per specialisation: det_vector<ElemT, Kind>
+// instances all carry the same row width.  It is set once (from 0) and never changed.
+// The Kind tag generates distinct specialisations with independent _elem_size values,
+// allowing full-det and half-det containers to coexist without aliasing.
+template<typename ElemT, det_kind Kind = det_kind::full>
 class det_vector {
     static_assert(std::is_trivially_copyable_v<ElemT>,
                   "det_vector<ElemT> requires a trivially copyable element type");
 public:
 
     // Non-owning view of a single row obtained via reinterpret_cast from the
-    // backing store.  _data[0] is the header (= elem_size); data elements are
-    // at _data[1+k] — out-of-bounds for the declared array but backed by the
-    // flat allocation (C struct-hack pattern).
+    // backing store.  _data[k] is data element k — out-of-bounds for the declared
+    // array but backed by the flat allocation (C struct-hack pattern).
     // Constructors are deleted so standalone row objects cannot be created.
     struct row {
         ElemT _data[1];
@@ -37,48 +41,46 @@ public:
         row()              = delete;
         row(const row&)    = delete;
 
-        size_t size() const noexcept { return static_cast<size_t>(_data[0]); }
+        size_t size() const noexcept { return det_vector::_elem_size; }
 
-        ElemT& operator[](size_t k) noexcept       { return _data[1 + k]; }
-        const ElemT& operator[](size_t k) const noexcept { return _data[1 + k]; }
+        ElemT& operator[](size_t k) noexcept       { return _data[k]; }
+        const ElemT& operator[](size_t k) const noexcept { return _data[k]; }
 
-        ElemT* data() noexcept             { return _data + 1; }
-        const ElemT* data() const noexcept { return _data + 1; }
+        ElemT* data() noexcept             { return _data; }
+        const ElemT* data() const noexcept { return _data; }
 
-        ElemT* begin() noexcept             { return _data + 1; }
-        ElemT* end()   noexcept             { return _data + 1 + size(); }
-        const ElemT* begin() const noexcept { return _data + 1; }
-        const ElemT* end()   const noexcept { return _data + 1 + size(); }
+        ElemT* begin() noexcept             { return _data; }
+        ElemT* end()   noexcept             { return _data + size(); }
+        const ElemT* begin() const noexcept { return _data; }
+        const ElemT* end()   const noexcept { return _data + size(); }
 
         operator std::vector<ElemT>() const {
-            return std::vector<ElemT>(_data + 1, _data + 1 + size());
+            return std::vector<ElemT>(_data, _data + size());
         }
 
         // In-place copy from vector; row size must match.
         row& operator=(const std::vector<ElemT>& v) {
             assert(v.size() == size());
-            std::memcpy(_data + 1, v.data(), size() * sizeof(ElemT));
+            std::memcpy(_data, v.data(), size() * sizeof(ElemT));
             return *this;
         }
 
         // In-place copy from another row; memcpy of full row data.
         row& operator=(const row& other) {
             if (this == &other) return *this;
-            assert(other.size() == size());
-            std::memcpy(_data + 1, other._data + 1, size() * sizeof(ElemT));
+            std::memcpy(_data, other._data, size() * sizeof(ElemT));
             return *this;
         }
 
         bool operator==(const std::vector<ElemT>& v) const noexcept {
             if (v.size() != size()) return false;
-            return std::memcmp(_data + 1, v.data(), size() * sizeof(ElemT)) == 0;
+            return std::memcmp(_data, v.data(), size() * sizeof(ElemT)) == 0;
         }
         bool operator!=(const std::vector<ElemT>& v) const noexcept {
             return !(*this == v);
         }
         bool operator==(const row& other) const noexcept {
-            if (other.size() != size()) return false;
-            return std::memcmp(_data + 1, other._data + 1, size() * sizeof(ElemT)) == 0;
+            return std::memcmp(_data, other._data, size() * sizeof(ElemT)) == 0;
         }
         bool operator!=(const row& other) const noexcept {
             return !(*this == other);
@@ -86,24 +88,24 @@ public:
         bool operator<(const std::vector<ElemT>& v) const noexcept {
             size_t n = size();
             for (size_t k = 0; k < n; k++) {
-                if (_data[1 + k] < v[k]) return true;
-                if (_data[1 + k] > v[k]) return false;
+                if (_data[k] < v[k]) return true;
+                if (_data[k] > v[k]) return false;
             }
             return false;
         }
         bool operator<(const row& other) const noexcept {
             size_t n = size();
             for (size_t k = 0; k < n; k++) {
-                if (_data[1 + k] < other._data[1 + k]) return true;
-                if (_data[1 + k] > other._data[1 + k]) return false;
+                if (_data[k] < other._data[k]) return true;
+                if (_data[k] > other._data[k]) return false;
             }
             return false;
         }
         bool operator>(const std::vector<ElemT>& v) const noexcept {
             size_t n = size();
             for (size_t k = 0; k < n; k++) {
-                if (_data[1 + k] > v[k]) return true;
-                if (_data[1 + k] < v[k]) return false;
+                if (_data[k] > v[k]) return true;
+                if (_data[k] < v[k]) return false;
             }
             return false;
         }
@@ -114,14 +116,13 @@ public:
         bool operator>=(const row& other) const noexcept { return !(*this < other); }
 
         friend void swap(row& a, row& b) noexcept {
-            assert(a.size() == b.size());
             for (size_t k = 0, n = a.size(); k < n; k++) std::swap(a[k], b[k]);
         }
     };
 
     using value_type = row;
 
-    // Random-access iterator. _ptr points to _data[0] of the current row (the header).
+    // Random-access iterator. _ptr points to _data[0] of the current row.
     struct iterator {
         using value_type        = row;
         using reference         = row&;
@@ -181,8 +182,10 @@ public:
 
     // Construct n rows, each a copy of v. Sets _elem_size from v.size().
     det_vector(size_t n, const std::vector<ElemT>& v)
-        : _elem_size(v.size()), _size(n), _data(n * stride())
+        : _size(n)
     {
+        _set_elem_size(v.size());
+        _data.resize(n * stride());
         for (size_t i = 0; i < n; i++) _init_row(i, v.data());
     }
 
@@ -191,7 +194,6 @@ public:
 
     det_vector(det_vector&& other) noexcept
         : _data(std::move(other._data)),
-          _elem_size(other._elem_size),
           _size(other._size)
     {
         other._data.clear();
@@ -200,9 +202,8 @@ public:
 
     det_vector& operator=(det_vector&& other) noexcept {
         if (this != &other) {
-            _data      = std::move(other._data);
-            _elem_size = other._elem_size;
-            _size      = other._size;
+            _data  = std::move(other._data);
+            _size  = other._size;
             other._data.clear();
             other._size = 0;
         }
@@ -214,6 +215,10 @@ public:
     size_t size()      const noexcept { return _size; }
     size_t elem_size() const noexcept { return _elem_size; }
     bool   empty()     const noexcept { return _size == 0; }
+
+    // Direct access to the flat backing buffer (_size * _elem_size elements).
+    std::vector<ElemT>&       flat()        noexcept { return _data; }
+    const std::vector<ElemT>& cflat() const noexcept { return _data; }
 
     // --- element access ---
 
@@ -243,79 +248,58 @@ public:
 
     // --- modifiers ---
 
-    // Set _size = 0; keep _data allocated so a subsequent grow avoids reallocation.
-    void clear() noexcept { _size = 0; }
+    // Set _size = 0 and release _data storage.
+    void clear() noexcept { _data.clear(); _size = 0; }
 
     // Reserve capacity for at least n rows without changing _size or initialising rows.
-    void reserve(size_t n) {
-        if (n > capacity()) _data.reserve(n * stride());
-    }
+    void reserve(size_t n) { _data.reserve(n * stride()); }
 
     size_t capacity() const noexcept {
         return (_elem_size > 0) ? (_data.capacity() / stride()) : 0;
     }
 
-    // Resize to n rows.
-    // - n <= allocated: only updates _size; headers beyond _size remain valid.
-    // - n >  allocated: extends _data and initialises only the new headers.
-    // Requires _elem_size already set.
+    // Resize to n rows. _data.size() is always exactly n * _elem_size.
+    // New rows (if any) are left uninitialised. Requires _elem_size already set.
     void resize(size_t n) {
-        if (n * stride() > _data.size()) {
-            size_t allocated = _data.size() / stride();
-            _data.resize(n * stride());
-            for (size_t i = allocated; i < n; i++) _init_row(i);
-        }
+        assert(_elem_size != 0);
+        _data.resize(n * stride());
         _size = n;
     }
 
-    // Resize to n rows, setting or changing _elem_size.
-    // If new_elem_size != _elem_size, asserts n==0 or _size==0, clears _data, updates stride.
-    // resize(0, n) is safe on a non-empty container — use it to clear and change elem_size.
+    // Resize to n rows. Sets _elem_size if not yet set (asserts match if already set).
     void resize(size_t n, size_t new_elem_size) {
-        if (new_elem_size != _elem_size) {
-            assert(n == 0 || _size == 0);
-            _elem_size = new_elem_size;
-            _data.clear();
-        }
+        _set_elem_size(new_elem_size);
         resize(n);
     }
 
     // Resize to n rows, filling new rows [_size..n) from v.
-    // Uses the same no-shrink and elem_size-change logic as the other resize overloads.
     void resize(size_t n, const std::vector<ElemT>& v) {
-        if (v.size() != _elem_size) {
-            assert(n == 0 || _size == 0);
-            _elem_size = v.size();
-            _data.clear();
-        }
-        if (n * stride() > _data.size()) {
-            _data.resize(n * stride());
-        }
-        for (size_t i = _size; i < n; i++) _init_row(i, v.data());
+        _set_elem_size(v.size());
+        size_t old_size = _size;
+        _data.resize(n * stride());
         _size = n;
+        for (size_t i = old_size; i < n; i++) _init_row(i, v.data());
     }
 
     // Replace contents with m rows each initialised to v. Sets _elem_size from v.size().
     void assign(size_t m, const std::vector<ElemT>& v) {
-        _elem_size = v.size();
+        _set_elem_size(v.size());
         _size = m;
         _data.resize(m * stride());
         for (size_t i = 0; i < m; i++) _init_row(i, v.data());
     }
 
     void push_back(const std::vector<ElemT>& v) {
-        if (_elem_size == 0) _elem_size = v.size();
-        assert(_elem_size == v.size());
+        _set_elem_size(v.size());
         _data.resize((_size + 1) * stride());
         _init_row(_size, v.data());
         ++_size;
     }
 
     void push_back(const row& r) {
-        if (_elem_size == 0) _elem_size = r.size();
-        assert(_elem_size == r.size());
+        _set_elem_size(r.size());
         _data.resize((_size + 1) * stride());
-        _init_row(_size, r._data + 1);
+        _init_row(_size, r._data);
         ++_size;
     }
 
@@ -326,12 +310,9 @@ public:
     template<typename InputIt>
     void emplace_back(InputIt first, InputIt last) {
         size_t n = static_cast<size_t>(std::distance(first, last));
-        if (_elem_size == 0) _elem_size = n;
-        assert(_elem_size == n);
+        _set_elem_size(n);
         _data.resize((_size + 1) * stride());
-        ElemT* hdr = _data.data() + _size * stride();
-        hdr[0] = static_cast<ElemT>(_elem_size);
-        std::copy(first, last, hdr + 1);
+        std::copy(first, last, _data.data() + _size * stride());
         ++_size;
     }
 
@@ -355,8 +336,7 @@ public:
         ElemT* dst = base + pos_idx * stride();
         for (auto it = first; it != last; ++it, dst += stride()) {
             const auto& src = *it;
-            dst[0] = static_cast<ElemT>(_elem_size);
-            std::copy(src.begin(), src.end(), dst + 1);
+            std::copy(src.begin(), src.end(), dst);
         }
         return iterator{base + pos_idx * stride(), stride()};
     }
@@ -371,6 +351,7 @@ public:
                          _data.data() + (pos + n) * stride(),
                          tail * stride() * sizeof(ElemT));
         _size -= n;
+        _data.resize(_size * stride());
         return iterator{_data.data() + pos * stride(), stride()};
     }
 
@@ -378,28 +359,28 @@ public:
 
 private:
     std::vector<ElemT> _data;
-    size_t _elem_size = 0;
-    size_t _size      = 0;
+    size_t _size = 0;
 
-    size_t stride() const noexcept { return _elem_size + 1; }
+    inline static size_t _elem_size = 0;
 
-    // Write header for row i; data left uninitialised.
-    void _init_row(size_t i) noexcept {
-        _data[i * stride()] = static_cast<ElemT>(_elem_size);
+    // Set _elem_size to n. No-op if already n; asserts it was 0 otherwise.
+    static void _set_elem_size(size_t n) {
+        if (_elem_size == n) return;
+        assert(_elem_size == 0);
+        _elem_size = n;
     }
 
-    // Write header + data for row i from src (length _elem_size).
+    size_t stride() const noexcept { return _elem_size; }
+
+    // Write data for row i from src (length _elem_size).
     void _init_row(size_t i, const ElemT* src) noexcept {
-        ElemT* hdr = _data.data() + i * stride();
-        hdr[0] = static_cast<ElemT>(_elem_size);
-        std::memcpy(hdr + 1, src, _elem_size * sizeof(ElemT));
+        std::memcpy(_data.data() + i * stride(), src, _elem_size * sizeof(ElemT));
     }
 };
 
-// Clear c and resize to m rows of width n.
-// clear_and_resize(c, 0, n) replaces clear_and_set_elem_size: clears and sets width.
-template<typename ElemT>
-inline void clear_and_resize(det_vector<ElemT>& c, size_t m, size_t n) {
+// Set c to m rows of width n, releasing any prior storage.
+template<typename ElemT, det_kind Kind>
+inline void clear_and_resize(det_vector<ElemT, Kind>& c, size_t m, size_t n) {
     c.clear();
     c.resize(m, n);
 }
