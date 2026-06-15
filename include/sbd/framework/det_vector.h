@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cstring>
 #include <iterator>
+#include <numeric>
 #include <vector>
 
 namespace sbd {
@@ -85,27 +86,31 @@ public:
         bool operator!=(const row& other) const noexcept {
             return !(*this == other);
         }
+        // From-back (little-endian multi-word) order: last element is most significant.
+        // Consistent with less_from_back() in bit_manipulation.h and with sbd::sort().
+        // std::lower_bound(da.begin(), da.end(), std::vector<ElemT> v) works directly
+        // after sbd::sort() because lower_bound calls *it < v → this operator.
         bool operator<(const std::vector<ElemT>& v) const noexcept {
             size_t n = size();
-            for (size_t k = 0; k < n; k++) {
-                if (_data[k] < v[k]) return true;
-                if (_data[k] > v[k]) return false;
+            for (size_t k = n; k > 0; k--) {
+                if (_data[k-1] < v[k-1]) return true;
+                if (_data[k-1] > v[k-1]) return false;
             }
             return false;
         }
         bool operator<(const row& other) const noexcept {
             size_t n = size();
-            for (size_t k = 0; k < n; k++) {
-                if (_data[k] < other._data[k]) return true;
-                if (_data[k] > other._data[k]) return false;
+            for (size_t k = n; k > 0; k--) {
+                if (_data[k-1] < other._data[k-1]) return true;
+                if (_data[k-1] > other._data[k-1]) return false;
             }
             return false;
         }
         bool operator>(const std::vector<ElemT>& v) const noexcept {
             size_t n = size();
-            for (size_t k = 0; k < n; k++) {
-                if (_data[k] > v[k]) return true;
-                if (_data[k] < v[k]) return false;
+            for (size_t k = n; k > 0; k--) {
+                if (_data[k-1] > v[k-1]) return true;
+                if (_data[k-1] < v[k-1]) return false;
             }
             return false;
         }
@@ -357,6 +362,121 @@ public:
 
     iterator erase(iterator pos) { return erase(pos, pos + 1); }
 
+    // In-place unique / sort — member functions.
+    // Called by the free-function overloads when &in == &out, and directly by callers
+    // that already have a mutable det_vector and want in-place semantics.
+
+    template<size_t Mask = ~size_t(0)>
+    void unique_from_sorted() {
+        std::vector<int> dummy;
+        detail::unique_from_sorted_impl<Mask, false>(
+            static_cast<const det_vector&>(*this), *this, dummy);
+    }
+
+    template<size_t Mask = ~size_t(0)>
+    void unique_with_counts_from_sorted(std::vector<int>& counts) {
+        detail::unique_from_sorted_impl<Mask, true>(
+            static_cast<const det_vector&>(*this), *this, counts);
+    }
+
+    template<size_t Mask = ~size_t(0)>
+    void unique_from_unsorted() {
+        int n = (int)_size, row_len = (int)_elem_size;
+        if (n == 0) return;
+        std::vector<int> idx(n);
+        std::iota(idx.begin(), idx.end(), 0);
+        if (n > 1) detail::idx_sort_det<Mask>(idx, *this, 0, n, row_len - 1);
+        // Collect unique source positions in idx[0..m-1] in one pass.
+        // idx[i-1] is always the original sorted position at i-1 because writes
+        // only go to idx[0..m-1] where m < i at the time of each write.
+        auto eq_prev = [&](int i) {
+            for (int k = row_len; k > 0; k--)
+                if (((*this)[idx[i]][k-1] & Mask) != ((*this)[idx[i-1]][k-1] & Mask))
+                    return false;
+            return true;
+        };
+        int m = 1;
+        for (int i = 1; i < n; i++)
+            if (!eq_prev(i)) idx[m++] = idx[i];
+        // Save m unique rows, shrink _data in place (reuses existing capacity),
+        // then copy back from scratch.
+        std::vector<ElemT> buf(m * _elem_size);
+        for (int j = 0; j < m; j++)
+            std::memcpy(buf.data() + j * _elem_size,
+                        _data.data() + idx[j] * _elem_size,
+                        _elem_size * sizeof(ElemT));
+        _data.resize(m * _elem_size);
+        _size = m;
+        std::memcpy(_data.data(), buf.data(), m * _elem_size * sizeof(ElemT));
+    }
+
+    template<size_t Mask = ~size_t(0)>
+    void unique_with_counts_from_unsorted(std::vector<int>& counts) {
+        int n = (int)_size, row_len = (int)_elem_size;
+        if (n == 0) { counts.clear(); return; }
+        std::vector<int> idx(n);
+        std::iota(idx.begin(), idx.end(), 0);
+        if (n > 1) detail::idx_sort_det<Mask>(idx, *this, 0, n, row_len - 1);
+        auto eq_prev = [&](int i) {
+            for (int k = row_len; k > 0; k--)
+                if (((*this)[idx[i]][k-1] & Mask) != ((*this)[idx[i-1]][k-1] & Mask))
+                    return false;
+            return true;
+        };
+        // Pass 1: count unique (read-only on idx) so counts can be sized exactly.
+        int m = 1;
+        for (int i = 1; i < n; i++) if (!eq_prev(i)) m++;
+        counts.resize(m);
+        // Pass 2: collect unique source positions in idx[0..m-1] and fill counts.
+        // idx[i-1] is always the original sorted position at i-1 because writes
+        // only go to idx[0..w-1] where w < i at the time of each write.
+        int w = 1, cw = 0, cur = 1;
+        for (int i = 1; i < n; i++) {
+            if (!eq_prev(i)) { counts[cw++] = cur; idx[w++] = idx[i]; cur = 1; }
+            else cur++;
+        }
+        counts[cw] = cur;
+        std::vector<ElemT> buf(m * _elem_size);
+        for (int j = 0; j < m; j++)
+            std::memcpy(buf.data() + j * _elem_size,
+                        _data.data() + idx[j] * _elem_size,
+                        _elem_size * sizeof(ElemT));
+        _data.resize(m * _elem_size);
+        _size = m;
+        std::memcpy(_data.data(), buf.data(), m * _elem_size * sizeof(ElemT));
+    }
+
+    // In-place sort in from-back/Mask order.
+    // Builds a sorted index permutation, then applies it via cycle following
+    // using a single row of scratch — no full-sized temporary allocation.
+    template<size_t Mask = ~size_t(0)>
+    void sort() {
+        int n       = (int)_size;
+        int row_len = (int)_elem_size;
+        if (n <= 1) return;
+        std::vector<int> idx(n);
+        std::iota(idx.begin(), idx.end(), 0);
+        detail::idx_sort_det<Mask>(idx, *this, 0, n, row_len - 1);
+        // Apply permutation in-place: follow each cycle with one row of scratch.
+        // Negate idx[j] to mark positions already placed in their final location.
+        std::vector<ElemT> buf(_elem_size);
+        ElemT* base = _data.data();
+        size_t stride = _elem_size;
+        for (int i = 0; i < n; i++) {
+            if (idx[i] < 0 || idx[i] == i) continue;
+            std::memcpy(buf.data(), base + i * stride, stride * sizeof(ElemT));
+            int j = i;
+            while (idx[j] != i) {
+                int k = idx[j];
+                std::memcpy(base + j * stride, base + k * stride, stride * sizeof(ElemT));
+                idx[j] = ~idx[j];
+                j = k;
+            }
+            std::memcpy(base + j * stride, buf.data(), stride * sizeof(ElemT));
+            idx[j] = ~idx[j];
+        }
+    }
+
 private:
     std::vector<ElemT> _data;
     size_t _size = 0;
@@ -388,6 +508,220 @@ template<typename ElemT>
 inline void clear_and_resize(std::vector<std::vector<ElemT>>& c, size_t m, size_t n) {
     c.resize(m);
     for (auto& row : c) row.resize(n);
+}
+
+// ---- sort / unique free functions ----
+//
+// sort<Mask>(in, out)                              — sort into out; delegates to member if aliased.
+// da.sort<Mask>()                                  — sort in-place (member).
+// unique_from_sorted<Mask>(in, out)                — dedup sorted input, no counts; delegates if aliased.
+// unique_with_counts_from_sorted<Mask>(in,out,cnt) — same, fills counts; delegates if aliased.
+// unique_from_unsorted<Mask>(in, out)              — sort-then-dedup, no counts; delegates if aliased.
+// unique_with_counts_from_unsorted<Mask>(in,out,c) — same, fills counts; delegates if aliased.
+// da.unique_from_sorted<Mask>()                    — dedup sorted in-place (member).
+// da.unique_with_counts_from_sorted<Mask>(counts)  — same, fills counts (member).
+// da.unique_from_unsorted<Mask>()                  — sort-then-dedup in-place (member).
+// da.unique_with_counts_from_unsorted<Mask>(counts)— same, fills counts (member).
+//
+// Mask: bitmask applied per ElemT word before comparison (default ~0 = no mask).
+//   Mask = 0x5555555555555555ULL restricts to even-bit (alpha) positions.
+//   Specialises at compile time; Mask=~0 eliminates the AND entirely.
+//
+// counts: output — counts[j] = occurrences of out[j] in in.
+//   Resized to exactly the number of unique rows; existing storage reused if
+//   capacity allows.
+//
+// Aliasing: all free functions detect &in == &out and delegate to the corresponding
+//   member function rather than silently producing wrong output.
+//   Sorted in-place member: two-pass, w<=i invariant, no temporary.
+//   Unsorted in-place member: temporary of exactly m rows (arbitrary permutation).
+
+namespace detail {
+
+// Sort idx[lo..hi) so that (a[idx[i]][elem] & Mask) is in ascending order,
+// recursing on equal-valued runs through decreasing elem (from-back ordering).
+// Mask is a template parameter: Mask=~0 is compiled as a no-op by the optimiser.
+template<size_t Mask, typename ElemT, det_kind Kind>
+void idx_sort_det(std::vector<int>& idx,
+                   const det_vector<ElemT, Kind>& a,
+                   int lo, int hi, int elem) {
+    if (hi - lo <= 1 || elem < 0) return;
+    std::sort(idx.begin() + lo, idx.begin() + hi,
+              [&a, elem](int x, int y) noexcept {
+                  return (a[x][elem] & Mask) < (a[y][elem] & Mask);
+              });
+    if (elem == 0) return;
+    int run_lo = lo;
+    for (int i = lo + 1; i <= hi; i++) {
+        if (i == hi ||
+            (a[idx[i  ]][elem] & Mask) !=
+            (a[idx[run_lo]][elem] & Mask)) {
+            if (i - run_lo > 1)
+                idx_sort_det<Mask>(idx, a, run_lo, i, elem - 1);
+            run_lo = i;
+        }
+    }
+}
+
+// Two-pass dedup of pre-sorted input.  Pass 1 counts unique rows; pass 2 writes
+// them into out sized to exactly m.  For aliased (&in==&out) the write-position
+// invariant (w <= i for sorted input) makes in-place writes safe; out is resized
+// to trim the tail only after all writes complete.
+template<size_t Mask, bool FillCounts, typename ElemT, det_kind Kind>
+void unique_from_sorted_impl(const det_vector<ElemT, Kind>& in,
+                              det_vector<ElemT, Kind>& out,
+                              std::vector<int>& counts) {
+    int n       = (int)in.size();
+    int row_len = (int)in.elem_size();
+    if (n == 0) {
+        out.clear();
+        if constexpr (FillCounts) counts.clear();
+        return;
+    }
+
+    auto eq_prev = [&](int i) {
+        for (int k = row_len; k > 0; k--)
+            if ((in[i][k-1] & Mask) != (in[i-1][k-1] & Mask)) return false;
+        return true;
+    };
+
+    // Pass 1: count unique elements.
+    int m = 1;
+    for (int i = 1; i < n; i++)
+        if (!eq_prev(i)) m++;
+
+    if constexpr (FillCounts) counts.resize(m);
+
+    // Pass 2: write unique rows.
+    // Non-aliased: resize out first then write.
+    // Aliased: write in-place (w <= i guaranteed for sorted input), resize last.
+    int w = 0, cur_count = 1;
+    if (&in != &out) {
+        out.resize(m, row_len);
+        out[0] = in[0];
+    }
+    for (int i = 1; i < n; i++) {
+        if (!eq_prev(i)) {
+            if constexpr (FillCounts) counts[w] = cur_count;
+            w++;
+            out[w] = in[i];
+            cur_count = 1;
+        } else cur_count++;
+    }
+    if constexpr (FillCounts) counts[w] = cur_count;
+    if (&in == &out) out.resize(m, row_len);
+}
+
+// Two-pass dedup of unsorted input.  Builds a sorted index permutation, then
+// counts unique rows, resizes out to exactly m, and writes.  Aliased case
+// uses a temporary of size m to avoid source/dest overlap under the permutation.
+template<size_t Mask, bool FillCounts, typename ElemT, det_kind Kind>
+void unique_from_unsorted_impl(const det_vector<ElemT, Kind>& in,
+                                det_vector<ElemT, Kind>& out,
+                                std::vector<int>& counts) {
+    int n       = (int)in.size();
+    int row_len = (int)in.elem_size();
+    if (n == 0) {
+        out.clear();
+        if constexpr (FillCounts) counts.clear();
+        return;
+    }
+
+    // Build sorted index permutation.
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    if (n > 1) idx_sort_det<Mask>(idx, in, 0, n, row_len - 1);
+
+    auto eq_prev = [&](int i) {
+        for (int k = row_len; k > 0; k--)
+            if ((in[idx[i]][k-1] & Mask) != (in[idx[i-1]][k-1] & Mask)) return false;
+        return true;
+    };
+
+    // Pass 1: count unique elements.
+    int m = 1;
+    for (int i = 1; i < n; i++)
+        if (!eq_prev(i)) m++;
+
+    if constexpr (FillCounts) counts.resize(m);
+
+    // Pass 2: write unique rows via sorted permutation.
+    auto write_to = [&](det_vector<ElemT, Kind>& dst) {
+        dst.resize(m, row_len);
+        int w = 0, cur_count = 1;
+        dst[0] = in[idx[0]];
+        for (int i = 1; i < n; i++) {
+            if (!eq_prev(i)) {
+                if constexpr (FillCounts) counts[w] = cur_count;
+                w++;
+                dst[w] = in[idx[i]];
+                cur_count = 1;
+            } else cur_count++;
+        }
+        if constexpr (FillCounts) counts[w] = cur_count;
+    };
+
+    if (&in == &out) {
+        det_vector<ElemT, Kind> tmp(0, (size_t)row_len);
+        write_to(tmp);
+        out = std::move(tmp);
+    } else {
+        write_to(out);
+    }
+}
+
+} // namespace detail
+
+// sort: aliased (&in == &out) delegates to the in-place member function.
+template<size_t Mask = ~size_t(0), typename ElemT, det_kind Kind>
+void sort(const det_vector<ElemT, Kind>& in, det_vector<ElemT, Kind>& out) {
+    if (&in == &out) { out.template sort<Mask>(); return; }
+    int n       = (int)in.size();
+    int row_len = (int)in.elem_size();
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    if (n > 1)
+        detail::idx_sort_det<Mask>(idx, in, 0, n, row_len - 1);
+    out.resize(n, row_len);
+    for (int i = 0; i < n; i++) out[i] = in[idx[i]];
+}
+
+// unique_from_sorted: precondition — in is sorted in from-back/Mask order.
+// Aliased (&in == &out) delegates to the in-place member function.
+template<size_t Mask = ~size_t(0), typename ElemT, det_kind Kind>
+void unique_from_sorted(const det_vector<ElemT, Kind>& in, det_vector<ElemT, Kind>& out) {
+    if (&in == &out) { out.template unique_from_sorted<Mask>(); return; }
+    std::vector<int> dummy;
+    detail::unique_from_sorted_impl<Mask, false>(in, out, dummy);
+}
+
+// unique_with_counts_from_sorted: counts[j] = occurrences of out[j] in in.
+// Aliased (&in == &out) delegates to the in-place member function.
+template<size_t Mask = ~size_t(0), typename ElemT, det_kind Kind>
+void unique_with_counts_from_sorted(const det_vector<ElemT, Kind>& in,
+                                     det_vector<ElemT, Kind>& out,
+                                     std::vector<int>& counts) {
+    if (&in == &out) { out.template unique_with_counts_from_sorted<Mask>(counts); return; }
+    detail::unique_from_sorted_impl<Mask, true>(in, out, counts);
+}
+
+// unique_from_unsorted: no precondition on sort order; sorts internally.
+// Aliased (&in == &out) delegates to the in-place member function.
+template<size_t Mask = ~size_t(0), typename ElemT, det_kind Kind>
+void unique_from_unsorted(const det_vector<ElemT, Kind>& in, det_vector<ElemT, Kind>& out) {
+    if (&in == &out) { out.template unique_from_unsorted<Mask>(); return; }
+    std::vector<int> dummy;
+    detail::unique_from_unsorted_impl<Mask, false>(in, out, dummy);
+}
+
+// unique_with_counts_from_unsorted: counts[j] = occurrences of out[j] in in.
+// Aliased (&in == &out) delegates to the in-place member function.
+template<size_t Mask = ~size_t(0), typename ElemT, det_kind Kind>
+void unique_with_counts_from_unsorted(const det_vector<ElemT, Kind>& in,
+                                       det_vector<ElemT, Kind>& out,
+                                       std::vector<int>& counts) {
+    if (&in == &out) { out.template unique_with_counts_from_unsorted<Mask>(counts); return; }
+    detail::unique_from_unsorted_impl<Mask, true>(in, out, counts);
 }
 
 } // namespace sbd
