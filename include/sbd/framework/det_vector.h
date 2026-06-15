@@ -119,6 +119,13 @@ public:
         bool operator>(const row& other) const noexcept { return other < *this; }
         bool operator<=(const row& other) const noexcept { return !(other < *this); }
         bool operator>=(const row& other) const noexcept { return !(*this < other); }
+        // Reversed-argument overloads so vector op row works via ADL.
+        friend bool operator==(const std::vector<ElemT>& v, const row& r) noexcept { return r == v; }
+        friend bool operator!=(const std::vector<ElemT>& v, const row& r) noexcept { return r != v; }
+        friend bool operator< (const std::vector<ElemT>& v, const row& r) noexcept { return r >  v; }
+        friend bool operator> (const std::vector<ElemT>& v, const row& r) noexcept { return r <  v; }
+        friend bool operator<=(const std::vector<ElemT>& v, const row& r) noexcept { return r >= v; }
+        friend bool operator>=(const std::vector<ElemT>& v, const row& r) noexcept { return r <= v; }
 
         friend void swap(row& a, row& b) noexcept {
             for (size_t k = 0, n = a.size(); k < n; k++) std::swap(a[k], b[k]);
