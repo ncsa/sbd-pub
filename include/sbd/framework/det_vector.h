@@ -44,6 +44,10 @@ public:
 
         size_t size() const noexcept { return det_vector::_elem_size; }
 
+        // No-op: row width is fixed by det_vector::_elem_size.  Exists so that
+        // generic 2D-container code (e.g. for (auto& r : c) r.resize(n)) compiles.
+        void resize(size_t n) { assert(n == size()); (void)n; }
+
         ElemT& operator[](size_t k) noexcept       { return _data[k]; }
         const ElemT& operator[](size_t k) const noexcept { return _data[k]; }
 
@@ -190,7 +194,7 @@ public:
     // --- construction ---
 
     det_vector() = default;
-    det_vector(size_t n, size_t elem_size) { resize(n, elem_size); }
+    explicit det_vector(size_t n) { resize(n); }
 
     // Construct n rows, each a copy of v. Sets _elem_size from v.size().
     det_vector(size_t n, const std::vector<ElemT>& v)
@@ -276,21 +280,6 @@ public:
         assert(_elem_size != 0);
         _data.resize(n * stride());
         _size = n;
-    }
-
-    // Resize to n rows. Sets _elem_size if not yet set (asserts match if already set).
-    void resize(size_t n, size_t new_elem_size) {
-        _set_elem_size(new_elem_size);
-        resize(n);
-    }
-
-    // Resize to n rows, filling new rows [_size..n) from v.
-    void resize(size_t n, const std::vector<ElemT>& v) {
-        _set_elem_size(v.size());
-        size_t old_size = _size;
-        _data.resize(n * stride());
-        _size = n;
-        for (size_t i = old_size; i < n; i++) _init_row(i, v.data());
     }
 
     // Replace contents with m rows each initialised to v. Sets _elem_size from v.size().
@@ -484,6 +473,10 @@ public:
         }
     }
 
+    // Call once at startup with the known row width before any container is used.
+    // No-op on repeated calls with the same value; asserts if called with a different value.
+    static void init_elem_size(size_t n) { _set_elem_size(n); }
+
 private:
     std::vector<ElemT> _data;
     size_t _size = 0;
@@ -504,18 +497,6 @@ private:
         std::memcpy(_data.data() + i * stride(), src, _elem_size * sizeof(ElemT));
     }
 };
-
-// Set c to m rows of width n, releasing any prior storage.
-template<typename ElemT, det_kind Kind>
-inline void clear_and_resize(det_vector<ElemT, Kind>& c, size_t m, size_t n) {
-    c.clear();
-    c.resize(m, n);
-}
-template<typename ElemT>
-inline void clear_and_resize(std::vector<std::vector<ElemT>>& c, size_t m, size_t n) {
-    c.resize(m);
-    for (auto& row : c) row.resize(n);
-}
 
 // ---- sort / unique free functions ----
 //
