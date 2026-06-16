@@ -329,7 +329,8 @@ void GenerateExcitation(const std::vector<std::vector<size_t>> &adets,
 			int task_comm_size,
 			MPI_Comm & h_comm,
 			MPI_Comm & b_comm,
-			MPI_Comm & t_comm) {
+			MPI_Comm & t_comm,
+			MPI_Comm & a_comm) {
 
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
@@ -358,6 +359,9 @@ void GenerateExcitation(const std::vector<std::vector<size_t>> &adets,
     int b_comm_color = mpi_rank_area / basis_comm_size;
     MPI_Comm_split(basis_area_comm,t_comm_color,mpi_rank,&t_comm);
     MPI_Comm_split(basis_area_comm,b_comm_color,mpi_rank,&b_comm);
+
+    int a_comm_color = t_comm_color;
+    MPI_Comm_split(comm,a_comm_color,mpi_rank,&a_comm);
 
     MPI_Comm_free(&basis_area_comm);
   }
