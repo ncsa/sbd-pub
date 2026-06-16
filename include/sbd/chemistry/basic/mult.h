@@ -34,10 +34,11 @@ protected:
     ncclComm_t a_nccl_comm_;
 #endif
 public:
-    MultBase() {}
+    MultBase() : a_comm_(MPI_COMM_SELF) {}
 
     MultBase(uint32_t bit_length, size_t norbs, MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm)
-        : bit_length_(bit_length), norbs_(norbs), h_comm_(h_comm), b_comm_(b_comm), t_comm_(t_comm)
+        : bit_length_(bit_length), norbs_(norbs), h_comm_(h_comm), b_comm_(b_comm), t_comm_(t_comm),
+          a_comm_(MPI_COMM_SELF)
     {
         D_size_ = (2 * norbs + bit_length - 1) / bit_length;
         D_half_size_ = (norbs + bit_length - 1) / bit_length;
