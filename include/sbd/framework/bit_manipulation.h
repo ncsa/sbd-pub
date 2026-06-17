@@ -953,7 +953,7 @@ namespace sbd {
 	a_max_order += bit_length_a;
       }
       b[i] = v_a & maxbit_b;
-      v_a = v_a >> bit_length_b;
+      v_a = (bit_length_b >= 64) ? 0 : (v_a >> bit_length_b);
       min_order += bit_length_b;
       b_max_order += bit_length_b;
     }
@@ -997,7 +997,7 @@ namespace sbd {
 	  a_max_order += bit_length_a;
 	}
 	b[k][i] = (v_a & maxbit_b);
-	v_a = (v_a >> bit_length_b);
+	v_a = (bit_length_b >= 64) ? 0 : (v_a >> bit_length_b);
 	min_order += bit_length_b;
 	b_max_order += bit_length_b;
       }
