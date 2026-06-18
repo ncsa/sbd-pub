@@ -3,13 +3,13 @@ This directory has input data for the H2O molecule using the cc-pvdz basis set. 
 
 | threshold|A bitstrings| Determinants| Energy(Ha) |
 |----------|------------|-------------|------------|
-|   1.0e-3 |     275    |    7.56e4   | -76.2359376|
-|   1.0e-4 |    1543    |    2.38e6   | -76.2429495|
-|   1.0e-5 |    5514    |    3.04e7   | -76.2437261|
-|   1.0e-6 |   13822    |    1.91e8   | -76.2437670|
-|   1.0e-7 |   25062    |    6.28e8   | -76.2437678|
-|   1.0e-8 |   39028    |    1.52e9   |   t.b.d.   |
-|    FCI   |   42504    |    1.81e9   | -76.2437768|
+|   1.0e-3 |     275    |    7.56e4   |-76.23594663|
+|   1.0e-4 |    1543    |    2.38e6   |-76.24295848|
+|   1.0e-5 |    5514    |    3.04e7   |-76.24373504|
+|   1.0e-6 |   13822    |    1.91e8   |-76.24377593|
+|   1.0e-7 |   25062    |    6.28e8   |-76.24377678|
+|   1.0e-8 |   39028    |    1.52e9   |-76.24377680|
+|    FCI   |   42504    |    1.81e9   |-76.24377680|
 
 
-The computational work increases faster than linear in the number of determinants because the number of non-zero entries in each row of the Hamiltonian matrix increases somewhat as the number of bitstrings increases.  Our measurements suggest an approximate scaling of compute time of ~(determinants)^1.23.  The bitstring files corresponding to the table entries are included : threshold = 1.0e-4  => h2o-1em4-alpha.txt, etc.  The input file h2o-1em4-alpha.txt has 1543 alpha bitstrings resulting in 2.38e6 determinants, yielding an energy ~0.8 mHa higher than the pyscf FCI result.  This input file is a good choice for single-node tests.
+The computational work increases faster than linear in the number of determinants because the number of non-zero entries in each row of the Hamiltonian matrix increases somewhat as the number of bitstrings increases.  Our measurements suggest an approximate scaling of compute time of ~(determinants)^1.23.  The bitstring files corresponding to the table entries are included : threshold = 1.0e-4  => 1em4-alpha.txt, etc.  The input file 1em4-alpha.txt has 1543 alpha bitstrings resulting in 2.38e6 determinants, yielding an energy ~0.8 mHa higher than the pyscf FCI result.  This input file is a good choice for single-node tests.

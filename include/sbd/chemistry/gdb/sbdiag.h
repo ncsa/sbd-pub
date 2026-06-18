@@ -336,7 +336,6 @@ namespace sbd {
 		    << " sbd: start diagonalization" << std::endl;
 	  std::cout << " " << make_timestamp()
 		    << " sbd: start make Hamiltonian" << std::endl;
-
 	}
 	auto time_start_mkham = std::chrono::high_resolution_clock::now();
 	std::vector<ElemT> hii;
@@ -626,7 +625,6 @@ namespace sbd {
       diag(comm,sbd_data,fcidump,det,loadname,savename,
 	   energy,density,rdet,one_p_rdm,two_p_rdm);
     }
-
   } // end namespace gdb
 } // end namespace sbd
 

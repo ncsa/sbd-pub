@@ -2,13 +2,15 @@
 SBD_PATH=../..
 
 # mpi c++ compiler
-CCCOM=mpicxx
+# Set MPICC environment variable to override (e.g., export MPICC=/custom/path/to/mpicxx)
+# If your system's default mpicxx is found automatically, you can use: CCCOM=mpicxx
+CCCOM=$(if $(MPICC),$(MPICC),$(HOME)/openmpi/bin/mpicxx)
 
-# flags for build: include path to openmp. The following is the case using homebrew's llvm on Mac
-CCFLAGS= -std=c++17 -stdlib=libc++ -fopenmp -I/opt/homebrew/opt/llvm/include -O3
+CCFLAGS= -std=c++17 -fopenmp -O3
 
-# flags for linking: include link to lapack and blas. The following s the case using homebrew's openblas on Mac
-SYSLIB= -L/opt/homebrew/opt/openblas/lib -llapack -lblas
+# flags for linking: include link to lapack and blas.
+# If BLAS/LAPACK are found automatically by your compiler, you may not need explicit library names
+SYSLIB= -llapack -lblas -fopenmp
 
 ### Example for the Fugaku
 # SBD_PATH=../../
