@@ -563,7 +563,7 @@ namespace sbd {
 			  hb_cutoff,hb_batch_size,
 			  rdet,b_comm,comm);
 	auto time_end_hb = std::chrono::high_resolution_clock::now();
-	auto elapsed_hb_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_wt-time_start_wt).count();
+	auto elapsed_hb_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_hb-time_start_hb).count();
 	double elapsed_hb = 1.0e-6 * elapsed_hb_count;
 	if( mpi_rank == 0 ) {
 	  std::cout << " " << make_timestamp()
