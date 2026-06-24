@@ -22,8 +22,12 @@ namespace sbd {
       int init = 0;
       int do_shuffle = 0;
       int do_rdm = 0;
+      int carryover_type = 0;
       double ratio = 0.0;
       double threshold = 0.01;
+      double heatbath_cutoff = 1.0e-4;
+      double heatbath_truncation = 0.0;
+      size_t heatbath_batch_size = 200000000;
       size_t bit_length = 20;
       bool do_sort_det = false;
       bool do_redist_det = false;
@@ -32,6 +36,9 @@ namespace sbd {
     SBD generate_sbd_data(int argc, char * argv[]) {
       SBD sbd_data;
       for(int i=0; i < argc; i++) {
+	if ( std::string(argv[i]) == "--init" ) {
+	  sbd_data.init = std::atoi(argv[++i]);
+	}
 	if ( std::string(argv[i]) == "--b_comm_size" ) {
 	  sbd_data.b_comm_size = std::atoi(argv[++i]);
 	}
@@ -50,11 +57,23 @@ namespace sbd {
 	if ( std::string(argv[i]) == "--tolerance" ) {
 	  sbd_data.eps = std::atof(argv[++i]);
 	}
+	if ( std::string(argv[i]) == "--carryover_type" ) {
+	  sbd_data.carryover_type = std::atoi(argv[++i]);
+	}
 	if ( std::string(argv[i]) == "--carryover_ratio" ) {
 	  sbd_data.ratio = std::atof(argv[++i]);
 	}
 	if ( std::string(argv[i]) == "--carryover_threshold" ) {
 	  sbd_data.threshold = std::atof(argv[++i]);
+	}
+	if ( std::string(argv[i]) == "--heatbath_cutoff" ) {
+	  sbd_data.heatbath_cutoff = std::atof(argv[++i]);
+	}
+	if ( std::string(argv[i]) == "--heatbath_truncation" ) {
+	  sbd_data.heatbath_truncation = std::atof(argv[++i]);
+	}
+	if ( std::string(argv[i]) == "--heatbath_batch_size" ) {
+	  sbd_data.heatbath_batch_size = std::atoi(argv[++i]);
 	}
 	if ( std::string(argv[i]) == "--shuffle" ) {
 	  sbd_data.do_shuffle = std::atoi(argv[++i]);
@@ -99,7 +118,16 @@ namespace sbd {
       if( sbd_data.do_rdm != 0.0 ) {
 	std::cout << "# do rdm: " << sbd_data.do_rdm << std::endl;
       }
-      std::cout << "# carryover ratio: " << sbd_data.ratio << std::endl;
+      if( sbd_data.carryover_type == 0 ) {
+	std::cout << "# carryover type: none" << std::endl;
+      } else  if( sbd_data.carryover_type == 1 ) {
+	std::cout << "# carryover type: weight truncation" << std::endl;
+	std::cout << "# carryover ratio: " << sbd_data.ratio << std::endl;
+      } else if ( sbd_data.carryover_type == 2 ) {
+	std::cout << "# carryover type: heatbath expansion" << std::endl;
+	std::cout << "# heatbath truncation: " << sbd_data.heatbath_truncation << std::endl;
+	std::cout << "# heatbath cutoff: " << sbd_data.heatbath_cutoff << std::endl;
+      }
     }
 
     /**
@@ -140,7 +168,7 @@ namespace sbd {
 #ifdef SBD_THRUST
 	  method &= 1;
 #endif
-	  int max_it = sbd_data.max_it;
+      int max_it = sbd_data.max_it;
       int max_nb = sbd_data.max_nb;
       double eps = sbd_data.eps;
       double max_time = sbd_data.max_time;
@@ -149,6 +177,10 @@ namespace sbd {
       int do_rdm = sbd_data.do_rdm;
       double ratio = sbd_data.ratio;
       double threshold = sbd_data.threshold;
+      int co_type = sbd_data.carryover_type;
+      double hb_truncation = sbd_data.heatbath_truncation;
+      double hb_cutoff = sbd_data.heatbath_cutoff;
+      size_t hb_batch_size = sbd_data.heatbath_batch_size;
       size_t bit_length = sbd_data.bit_length;
       /**
 	 Setup system parameters from fcidump
@@ -476,22 +508,67 @@ namespace sbd {
       /**
 	 Carryover selection
       */
-      if( ratio != 0.0 ) {
-	if( mpi_rank == 0 ) {
-	  std::cout << " " << make_timestamp()
-		    << " sbd: start carryover selection" << std::endl;
+      if( co_type == 1 ) {
+	if( ratio != 0.0 ) {
+	  if( mpi_rank == 0 ) {
+	    std::cout << " " << make_timestamp()
+		      << " sbd: start carryover selection" << std::endl;
+	  }
+	  auto time_start_co = std::chrono::high_resolution_clock::now();
+	  size_t n_kept = static_cast<size_t>(ratio * det.size()*mpi_size_b);
+	  double truncated_weight = 0.0;
+	  CarryOverDet(w,det,b_comm,n_kept,rdet,truncated_weight);
+	  auto time_end_co = std::chrono::high_resolution_clock::now();
+	  auto elapsed_co_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_co-time_start_co).count();
+	  double elapsed_co = 1.0e-6 * elapsed_co_count;
+	  if( mpi_rank == 0 ) {
+	    std::cout << " " << make_timestamp()
+		      << " sbd: end carryover selection [Elapsed time "
+		      << elapsed_co << " (sec)]" << std::endl;
+	  }
 	}
-	auto time_start_co = std::chrono::high_resolution_clock::now();
-	size_t n_kept = static_cast<size_t>(ratio * det.size()*mpi_size_b);
-	double truncated_weight = 0.0;
-	CarryOverDet(w,det,b_comm,n_kept,rdet,truncated_weight);
-	auto time_end_co = std::chrono::high_resolution_clock::now();
-	auto elapsed_co_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_co-time_start_co).count();
-	double elapsed_co = 1.0e-6 * elapsed_co_count;
+      } else if ( co_type == 2 ) {
 	if( mpi_rank == 0 ) {
 	  std::cout << " " << make_timestamp()
-		    << " sbd: end carryover selection [Elapsed time "
-		    << elapsed_co << " (sec)]" << std::endl;
+		    << " sbd: start weight truncation" << std::endl;
+	}
+	auto time_start_wt = std::chrono::high_resolution_clock::now();
+	std::vector<ElemT> cw;
+	std::vector<std::vector<size_t>> cdet;
+	WeightTruncation(w,det,hb_truncation,cw,cdet);
+	auto time_end_wt = std::chrono::high_resolution_clock::now();
+	auto elapsed_wt_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_wt-time_start_wt).count();
+	double elapsed_wt = 1.0e-6 * elapsed_wt_count;
+	if( mpi_rank == 0 ) {
+	  std::cout << " " << make_timestamp()
+		    << " sbd: end weight truncation [Elapsed time "
+		    << elapsed_wt << " (sec)]" << std::endl;
+	  std::cout << " " << make_timestamp()
+		    << " sbd: start redistribution of wavefunction data" << std::endl;
+	}
+	auto time_start_rd = std::chrono::high_resolution_clock::now();
+	redistribution_bitarray(cdet,cw,b_comm);
+	auto time_end_rd = std::chrono::high_resolution_clock::now();
+	auto elapsed_rd_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_rd-time_start_rd).count();
+	double elapsed_rd = 1.0e-6 * elapsed_rd_count;
+	if( mpi_rank == 0 ) {
+	  std::cout << " " << make_timestamp()
+		    << " sbd: end redistribution of wavefunction data [Elapsed time "
+		    << elapsed_rd << " (sec)]" << std::endl;
+	  std::cout << " " << make_timestamp()
+		    << " sbd: start heatbath expansion" << std::endl;
+	}
+	auto time_start_hb = std::chrono::high_resolution_clock::now();
+	HeatbathExpansion(cdet,cw,bit_length,static_cast<size_t>(L),I0,I1,I2,
+			  hb_cutoff,hb_batch_size,
+			  rdet,b_comm,comm);
+	auto time_end_hb = std::chrono::high_resolution_clock::now();
+	auto elapsed_hb_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_wt-time_start_wt).count();
+	double elapsed_hb = 1.0e-6 * elapsed_hb_count;
+	if( mpi_rank == 0 ) {
+	  std::cout << " " << make_timestamp()
+		    << " sbd: end heatbath expansion [Elapsed time "
+		    << elapsed_hb << " (sec)]" << std::endl;
 	}
       }
 

@@ -216,15 +216,24 @@ int main(int argc, char * argv[]) {
     std::cout << std::endl;
   }
   if( carryovername != std::string("") ) {
-    if( mpi_rank_h == 0 ) {
-      if( mpi_rank_t == 0 ) {
-	std::string filename = sbd::carryoverfilename(carryovername,mpi_rank_b);
-	std::ofstream ofs(filename);
-	for(size_t k=0; k < codet.size(); k++) {
-	  ofs << sbd::makestring(codet[k],sbd_data.bit_length,static_cast<size_t>(L));
+    if( sbd_data.carryover_type == 1 ) {
+      if( mpi_rank_h == 0 ) {
+	if( mpi_rank_t == 0 ) {
+	  std::string filename = sbd::carryoverfilename(carryovername,mpi_rank_b);
+	  std::ofstream ofs(filename);
+	  for(size_t k=0; k < codet.size(); k++) {
+	    ofs << sbd::makestring(codet[k],sbd_data.bit_length,2*static_cast<size_t>(L)) << "\n";
+	  }
+	  ofs.close();
 	}
-	ofs.close();
       }
+    } else if ( sbd_data.carryover_type == 2 ) {
+      std::string filename = sbd::carryoverfilename(carryovername,mpi_rank);
+      std::ofstream ofs(filename);
+      for(size_t k=0; k < codet.size(); k++) {
+	ofs << sbd::makestring(codet[k],sbd_data.bit_length,2*static_cast<size_t>(L)) << "\n";
+      }
+      ofs.close();
     }
   }
   if( one_p_rdm.size() != 0 ) {

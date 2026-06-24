@@ -18,6 +18,10 @@
 #include <iostream>
 #include <fstream>
 
+#include <cassert>
+#include <cstddef>
+#include <numeric>
+#include <vector>
 
 #include "mpi.h"
 
@@ -1220,6 +1224,575 @@ namespace sbd {
     }
 
 
+  }
+
+  inline bool equal_bitarray_from_back(const std::vector<size_t> &a,
+                                     const std::vector<size_t> &b) {
+    return !less_from_back(a, b) && !less_from_back(b, a);
+  }
+
+  inline void sort_unique_local_bitarray(std::vector<std::vector<size_t>> &dets) {
+    std::sort(dets.begin(), dets.end(), less_from_back);
+    auto last = std::unique(dets.begin(), dets.end(),
+			    equal_bitarray_from_back);
+    dets.erase(last, dets.end());
+  }
+
+  inline int destination_by_splitters(
+    const std::vector<size_t> &det,
+    const std::vector<std::vector<size_t>> &splitters) {
+    auto it = std::upper_bound(splitters.begin(), splitters.end(), det,
+			       less_from_back);
+    return static_cast<int>(it - splitters.begin());
+  }
+
+  void sort_global_bitarray(std::vector<std::vector<size_t>> &dets,
+                          MPI_Comm comm) {
+    int mpi_rank = 0;
+    int mpi_size = 1;
+    MPI_Comm_rank(comm, &mpi_rank);
+    MPI_Comm_size(comm, &mpi_size);
+    sort_unique_local_bitarray(dets);
+    size_t local_num_words = 0;
+    if (!dets.empty()) {
+      local_num_words = dets[0].size();
+#ifndef NDEBUG
+      for (const auto &det : dets) {
+	assert(det.size() == local_num_words);
+      }
+#endif
+    }
+    
+    size_t num_words = 0;
+    MPI_Allreduce(&local_num_words, &num_words, 1,
+		  SBD_MPI_SIZE_T, MPI_MAX, comm);
+    
+    if (num_words == 0) {
+      dets.clear();
+      return;
+    }
+    
+    if (mpi_size == 1) {
+      return;
+    }
+    
+    const size_t local_n = dets.size();
+    
+    /*
+     * Sample selection.
+     * Oversampling factor = 4.
+     */
+    
+    const size_t oversample = 4;
+    const size_t max_samples =
+      std::min(local_n, oversample * static_cast<size_t>(mpi_size - 1));
+    std::vector<size_t> local_samples_flat;
+    local_samples_flat.reserve(max_samples * num_words);
+    if (max_samples > 0) {
+      for (size_t s = 0; s < max_samples; ++s) {
+	size_t idx = ((s + 1) * local_n) / (max_samples + 1);
+	if (idx >= local_n) idx = local_n - 1;
+	local_samples_flat.insert(local_samples_flat.end(),
+				  dets[idx].begin(), dets[idx].end());
+      }
+    }
+    
+    int local_sample_count = static_cast<int>(max_samples);
+    std::vector<int> sample_counts;
+    if (mpi_rank == 0) {
+      sample_counts.resize(mpi_size);
+    }
+    
+    MPI_Gather(&local_sample_count, 1, MPI_INT,
+	       sample_counts.data(), 1, MPI_INT,
+	       0, comm);
+    
+    std::vector<int> sample_word_counts;
+    std::vector<int> sample_word_displs;
+    std::vector<size_t> all_samples_flat;
+    
+    if (mpi_rank == 0) {
+      sample_word_counts.resize(mpi_size);
+      sample_word_displs.resize(mpi_size);
+      int total_sample_words = 0;
+      for (int r = 0; r < mpi_size; ++r) {
+	sample_word_counts[r] =
+          static_cast<int>(static_cast<size_t>(sample_counts[r]) * num_words);
+	sample_word_displs[r] = total_sample_words;
+	total_sample_words += sample_word_counts[r];
+      }
+      all_samples_flat.resize(total_sample_words);
+    }
+    
+    MPI_Gatherv(local_samples_flat.data(),
+		static_cast<int>(local_samples_flat.size()),
+		SBD_MPI_SIZE_T,
+		all_samples_flat.data(),
+		sample_word_counts.data(),
+		sample_word_displs.data(),
+		SBD_MPI_SIZE_T,
+		0, comm);
+    
+    std::vector<std::vector<size_t>> splitters;
+    
+    if (mpi_rank == 0) {
+      
+      const size_t total_samples =
+        all_samples_flat.size() / num_words;
+      
+      std::vector<std::vector<size_t>> all_samples(total_samples,
+						   std::vector<size_t>(num_words));
+      
+      for (size_t i = 0; i < total_samples; ++i) {
+	std::copy(all_samples_flat.begin() + i * num_words,
+		  all_samples_flat.begin() + (i + 1) * num_words,
+		  all_samples[i].begin());
+      }
+      
+      sort_unique_local_bitarray(all_samples);
+      const size_t ns = all_samples.size();
+      const size_t nsplit =
+        std::min(static_cast<size_t>(mpi_size - 1), ns);
+      
+      splitters.resize(nsplit, std::vector<size_t>(num_words));
+      for (size_t s = 0; s < nsplit; ++s) {
+	size_t idx = ((s + 1) * ns) / mpi_size;
+	if (idx >= ns) idx = ns - 1;
+	splitters[s] = all_samples[idx];
+      }
+      sort_unique_local_bitarray(splitters);
+    }
+    
+    int nsplitters = 0;
+    if (mpi_rank == 0) {
+      nsplitters = static_cast<int>(splitters.size());
+    }
+    
+    MPI_Bcast(&nsplitters, 1, MPI_INT, 0, comm);
+    std::vector<size_t> splitters_flat(
+		  static_cast<size_t>(nsplitters) * num_words);
+    if (mpi_rank == 0) {
+      for (int i = 0; i < nsplitters; ++i) {
+	std::copy(splitters[i].begin(), splitters[i].end(),
+		  splitters_flat.begin() + static_cast<size_t>(i) * num_words);
+      }
+    }
+    
+    MPI_Bcast(splitters_flat.data(),
+	      static_cast<int>(splitters_flat.size()),
+	      SBD_MPI_SIZE_T,
+	      0, comm);
+    
+    if (mpi_rank != 0) {
+      splitters.resize(nsplitters, std::vector<size_t>(num_words));
+      for (int i = 0; i < nsplitters; ++i) {
+	std::copy(splitters_flat.begin() + static_cast<size_t>(i) * num_words,
+		  splitters_flat.begin() + static_cast<size_t>(i + 1) * num_words,
+		  splitters[i].begin());
+      }
+    }
+    
+    /*
+      
+     * Bucket assignment.
+     
+     */
+    
+    std::vector<int> send_counts_det(mpi_size, 0);
+    
+    for (const auto &det : dets) {
+      int dest = destination_by_splitters(det, splitters);
+      if (dest >= mpi_size) dest = mpi_size - 1;
+      ++send_counts_det[dest];
+    }
+    
+    std::vector<int> send_counts_words(mpi_size, 0);
+    std::vector<int> recv_counts_words(mpi_size, 0);
+    std::vector<int> send_displs_words(mpi_size, 0);
+    std::vector<int> recv_displs_words(mpi_size, 0);
+    
+    for (int r = 0; r < mpi_size; ++r) {
+      send_counts_words[r] =
+        static_cast<int>(static_cast<size_t>(send_counts_det[r]) * num_words);
+    }
+    
+    MPI_Alltoall(send_counts_words.data(), 1, MPI_INT,
+		 recv_counts_words.data(), 1, MPI_INT,
+		 comm);
+    
+    for (int r = 1; r < mpi_size; ++r) {
+      send_displs_words[r] = send_displs_words[r - 1] + send_counts_words[r - 1];
+      recv_displs_words[r] = recv_displs_words[r - 1] + recv_counts_words[r - 1];
+    }
+    
+    const int total_send_words =
+      std::accumulate(send_counts_words.begin(), send_counts_words.end(), 0);
+    
+    const int total_recv_words =
+      std::accumulate(recv_counts_words.begin(), recv_counts_words.end(), 0);
+    
+    std::vector<size_t> sendbuf(total_send_words);
+    std::vector<size_t> recvbuf(total_recv_words);
+    std::vector<int> current_displs = send_displs_words;
+    
+    for (const auto &det : dets) {
+      int dest = destination_by_splitters(det, splitters);
+      if (dest >= mpi_size) dest = mpi_size - 1;
+      int pos = current_displs[dest];
+      std::copy(det.begin(), det.end(), sendbuf.begin() + pos);
+      current_displs[dest] += static_cast<int>(num_words);
+    }
+    
+    MPI_Alltoallv(sendbuf.data(),
+		  send_counts_words.data(),
+		  send_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  recvbuf.data(),
+		  recv_counts_words.data(),
+		  recv_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  comm);
+    
+    const size_t recv_n = recvbuf.size() / num_words;
+    
+    dets.clear();
+    dets.resize(recv_n, std::vector<size_t>(num_words));
+    
+    for (size_t i = 0; i < recv_n; ++i) {
+      std::copy(recvbuf.begin() + i * num_words,
+		recvbuf.begin() + (i + 1) * num_words,
+		dets[i].begin());
+    }
+    sort_unique_local_bitarray(dets);
+  }
+
+  inline size_t balanced_begin(const size_t global_n,
+			       const int mpi_size,
+			       const int rank) {
+    const size_t q = global_n / static_cast<size_t>(mpi_size);
+    const size_t r = global_n % static_cast<size_t>(mpi_size);
+    return q * static_cast<size_t>(rank)
+           + std::min(static_cast<size_t>(rank), r);
+  }
+
+  inline size_t balanced_end(const size_t global_n,
+                           const int mpi_size,
+                           const int rank) {
+    return balanced_begin(global_n, mpi_size, rank + 1);
+  }
+
+  void redistribution_bitarray(std::vector<std::vector<size_t>> &dets,
+			       MPI_Comm comm) {
+
+    int mpi_rank = 0;
+    int mpi_size = 1;
+    MPI_Comm_rank(comm, &mpi_rank);
+    MPI_Comm_size(comm, &mpi_size);
+    
+    const size_t local_n = dets.size();
+    size_t local_num_words = 0;
+    if (!dets.empty()) {
+      local_num_words = dets[0].size();
+#ifndef NDEBUG
+      for (const auto &det : dets) {
+	assert(det.size() == local_num_words);
+      }
+#endif
+    }
+    
+    size_t num_words = 0;
+    
+    MPI_Allreduce(&local_num_words, &num_words, 1,
+		  SBD_MPI_SIZE_T, MPI_MAX, comm);
+    
+    if (num_words == 0) {
+      dets.clear();
+      return;
+    }
+    
+    std::vector<size_t> all_local_n(mpi_size, 0);
+    MPI_Allgather(&local_n, 1, SBD_MPI_SIZE_T,
+		  all_local_n.data(), 1, SBD_MPI_SIZE_T,
+		  comm);
+    
+    size_t global_n = 0;
+    for (size_t n : all_local_n) {
+      global_n += n;
+    }
+    
+    if (global_n == 0) {
+      dets.clear();
+      return;
+    }
+
+    size_t local_begin = 0;
+    for (int r = 0; r < mpi_rank; ++r) {
+      local_begin += all_local_n[r];
+    }
+
+    const size_t local_end = local_begin + local_n;
+    std::vector<int> send_counts_words(mpi_size, 0);
+    std::vector<int> recv_counts_words(mpi_size, 0);
+    std::vector<int> send_displs_words(mpi_size, 0);
+    std::vector<int> recv_displs_words(mpi_size, 0);
+    for (int dest = 0; dest < mpi_size; ++dest) {
+      const size_t target_begin = balanced_begin(global_n, mpi_size, dest);
+      const size_t target_end   = balanced_end(global_n, mpi_size, dest);
+      const size_t overlap_begin = std::max(local_begin, target_begin);
+      const size_t overlap_end   = std::min(local_end, target_end);
+      if (overlap_begin < overlap_end) {
+	const size_t nsend_det = overlap_end - overlap_begin;
+	send_counts_words[dest] =
+          static_cast<int>(nsend_det * num_words);
+      }
+    }
+
+    MPI_Alltoall(send_counts_words.data(), 1, MPI_INT,
+		 recv_counts_words.data(), 1, MPI_INT,
+		 comm);
+
+    for (int r = 1; r < mpi_size; ++r) {
+      send_displs_words[r] =
+        send_displs_words[r - 1] + send_counts_words[r - 1];
+      recv_displs_words[r] =
+        recv_displs_words[r - 1] + recv_counts_words[r - 1];
+    }
+
+    const int total_send_words =
+      std::accumulate(send_counts_words.begin(),
+		      send_counts_words.end(), 0);
+
+    const int total_recv_words =
+      std::accumulate(recv_counts_words.begin(),
+		      recv_counts_words.end(), 0);
+
+    std::vector<size_t> sendbuf(total_send_words);
+    std::vector<size_t> recvbuf(total_recv_words);
+
+    for (int dest = 0; dest < mpi_size; ++dest) {
+      const size_t target_begin = balanced_begin(global_n, mpi_size, dest);
+      const size_t target_end   = balanced_end(global_n, mpi_size, dest);
+      const size_t overlap_begin = std::max(local_begin, target_begin);
+      const size_t overlap_end   = std::min(local_end, target_end);
+      if (overlap_begin >= overlap_end) continue;
+      const size_t local_offset = overlap_begin - local_begin;
+      const size_t nsend_det = overlap_end - overlap_begin;
+      size_t *ptr = sendbuf.data() + send_displs_words[dest];
+      for (size_t i = 0; i < nsend_det; ++i) {
+	const auto &det = dets[local_offset + i];
+	std::copy(det.begin(), det.end(), ptr + i * num_words);
+      }
+    }
+
+    MPI_Alltoallv(sendbuf.data(),
+		  send_counts_words.data(),
+		  send_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  recvbuf.data(),
+		  recv_counts_words.data(),
+		  recv_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  comm);
+
+    const size_t new_local_n =
+      static_cast<size_t>(total_recv_words) / num_words;
+
+    std::vector<std::vector<size_t>> new_dets(
+      new_local_n, std::vector<size_t>(num_words));
+
+    for (size_t i = 0; i < new_local_n; ++i) {
+      std::copy(recvbuf.begin() + i * num_words,
+		recvbuf.begin() + (i + 1) * num_words,
+		new_dets[i].begin());
+    }
+    dets.swap(new_dets);
+  }
+
+  template <typename ElemT>
+  void redistribution_bitarray(std::vector<std::vector<size_t>> &dets,
+			       std::vector<ElemT> &w,
+			       MPI_Comm comm) {
+    assert(dets.size() == w.size());
+
+    int mpi_rank = 0;
+    int mpi_size = 1;
+    MPI_Comm_rank(comm, &mpi_rank);
+    MPI_Comm_size(comm, &mpi_size);
+
+    const size_t local_n = dets.size();
+    
+    size_t local_num_words = 0;
+    if (!dets.empty()) {
+      local_num_words = dets[0].size();
+#ifndef NDEBUG
+      for (const auto &det : dets) {
+	assert(det.size() == local_num_words);
+      }
+#endif
+    }
+
+    size_t num_words = 0;
+    MPI_Allreduce(&local_num_words, &num_words, 1,
+		  SBD_MPI_SIZE_T, MPI_MAX, comm);
+
+    if (num_words == 0) {
+      dets.clear();
+      w.clear();
+      return;
+    }
+
+    std::vector<size_t> all_local_n(mpi_size, 0);
+    MPI_Allgather(&local_n, 1, SBD_MPI_SIZE_T,
+		  all_local_n.data(), 1, SBD_MPI_SIZE_T,
+		  comm);
+    
+    size_t global_n = 0;
+    for (size_t n : all_local_n) {
+      global_n += n;
+    }
+    
+    if (global_n == 0) {
+      dets.clear();
+      w.clear();
+      return;
+    }
+    
+    size_t local_begin = 0;
+    for (int r = 0; r < mpi_rank; ++r) {
+      local_begin += all_local_n[r];
+    }
+    const size_t local_end = local_begin + local_n;
+    
+    std::vector<int> send_counts_det(mpi_size, 0);
+    std::vector<int> recv_counts_det(mpi_size, 0);
+    std::vector<int> send_displs_det(mpi_size, 0);
+    std::vector<int> recv_displs_det(mpi_size, 0);
+    
+    for (int dest = 0; dest < mpi_size; ++dest) {
+      const size_t target_begin = balanced_begin(global_n, mpi_size, dest);
+      const size_t target_end   = balanced_end(global_n, mpi_size, dest);
+      
+      const size_t overlap_begin = std::max(local_begin, target_begin);
+      const size_t overlap_end   = std::min(local_end, target_end);
+      
+      if (overlap_begin < overlap_end) {
+	send_counts_det[dest] =
+          static_cast<int>(overlap_end - overlap_begin);
+      }
+    }
+    
+    MPI_Alltoall(send_counts_det.data(), 1, MPI_INT,
+		 recv_counts_det.data(), 1, MPI_INT,
+		 comm);
+    
+    for (int r = 1; r < mpi_size; ++r) {
+      send_displs_det[r] =
+        send_displs_det[r - 1] + send_counts_det[r - 1];
+      recv_displs_det[r] =
+        recv_displs_det[r - 1] + recv_counts_det[r - 1];
+    }
+    
+    const int total_send_det =
+      std::accumulate(send_counts_det.begin(),
+                      send_counts_det.end(), 0);
+    
+    const int total_recv_det =
+      std::accumulate(recv_counts_det.begin(),
+                      recv_counts_det.end(), 0);
+    
+    std::vector<int> send_counts_words(mpi_size, 0);
+    std::vector<int> recv_counts_words(mpi_size, 0);
+    std::vector<int> send_displs_words(mpi_size, 0);
+    std::vector<int> recv_displs_words(mpi_size, 0);
+    
+    for (int r = 0; r < mpi_size; ++r) {
+      send_counts_words[r] =
+        static_cast<int>(static_cast<size_t>(send_counts_det[r]) * num_words);
+      recv_counts_words[r] =
+        static_cast<int>(static_cast<size_t>(recv_counts_det[r]) * num_words);
+    }
+    
+    for (int r = 1; r < mpi_size; ++r) {
+      send_displs_words[r] =
+        send_displs_words[r - 1] + send_counts_words[r - 1];
+      recv_displs_words[r] =
+        recv_displs_words[r - 1] + recv_counts_words[r - 1];
+    }
+    
+    const int total_send_words =
+      std::accumulate(send_counts_words.begin(),
+                      send_counts_words.end(), 0);
+    
+    const int total_recv_words =
+      std::accumulate(recv_counts_words.begin(),
+                      recv_counts_words.end(), 0);
+    
+    std::vector<size_t> sendbuf_det(total_send_words);
+    std::vector<size_t> recvbuf_det(total_recv_words);
+    
+    std::vector<ElemT> sendbuf_w(total_send_det);
+    std::vector<ElemT> recvbuf_w(total_recv_det);
+    
+    for (int dest = 0; dest < mpi_size; ++dest) {
+      const size_t target_begin = balanced_begin(global_n, mpi_size, dest);
+      const size_t target_end   = balanced_end(global_n, mpi_size, dest);
+      
+      const size_t overlap_begin = std::max(local_begin, target_begin);
+      const size_t overlap_end   = std::min(local_end, target_end);
+      
+      if (overlap_begin >= overlap_end) continue;
+      
+      const size_t local_offset = overlap_begin - local_begin;
+      const size_t nsend_det = overlap_end - overlap_begin;
+      
+      size_t *ptr_det =
+        sendbuf_det.data() + send_displs_words[dest];
+      
+      ElemT *ptr_w =
+        sendbuf_w.data() + send_displs_det[dest];
+      
+      for (size_t i = 0; i < nsend_det; ++i) {
+	const auto &det = dets[local_offset + i];
+	
+	std::copy(det.begin(), det.end(),
+		  ptr_det + i * num_words);
+	
+	ptr_w[i] = w[local_offset + i];
+      }
+    }
+
+    MPI_Alltoallv(sendbuf_det.data(),
+		  send_counts_words.data(),
+		  send_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  recvbuf_det.data(),
+		  recv_counts_words.data(),
+		  recv_displs_words.data(),
+		  SBD_MPI_SIZE_T,
+		  comm);
+    
+    MPI_Alltoallv(sendbuf_w.data(),
+		  send_counts_det.data(),
+		  send_displs_det.data(),
+		  GetMpiType<ElemT>::MpiT,
+		  recvbuf_w.data(),
+		  recv_counts_det.data(),
+		  recv_displs_det.data(),
+		  GetMpiType<ElemT>::MpiT,
+		  comm);
+    
+    const size_t new_local_n = static_cast<size_t>(total_recv_det);
+    
+    std::vector<std::vector<size_t>> new_dets(
+	 new_local_n, std::vector<size_t>(num_words));
+
+    for (size_t i = 0; i < new_local_n; ++i) {
+      std::copy(recvbuf_det.begin() + i * num_words,
+		recvbuf_det.begin() + (i + 1) * num_words,
+		new_dets[i].begin());
+    }
+    dets.swap(new_dets);
+    w.swap(recvbuf_w);
   }
 
 
