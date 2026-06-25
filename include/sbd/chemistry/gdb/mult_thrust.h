@@ -193,6 +193,15 @@ void MultGDBThrust<ElemT>::Init(
     this->norbs_ = norbs_in;
     this->D_size_ = (2 * norbs_in + bit_length_in - 1) / bit_length_in;
 
+#ifdef SBD_USE_32BIT_PARITY
+    printf("[%s,%d] 32-bit version of parity used (bit_length = %zu)\n",
+           __FILE__, __LINE__, bit_length_in);
+    if (bit_length_in > 32) {
+        printf("[ERROR] bit_length is too large for 32-bit version\n");
+        exit(-1);
+    }
+#endif
+
     this->h_comm_ = h_comm_in;
     this->b_comm_ = b_comm_in;
     this->t_comm_ = t_comm_in;
