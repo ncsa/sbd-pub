@@ -28,6 +28,7 @@ namespace sbd {
       bool timing_barriers = false;
       bool do_sort_det = false;
       bool do_redist_det = false;
+      bool do_redist_alpha_eq = true;
     };
 
     SBD generate_sbd_data(int argc, char * argv[]) {
@@ -79,6 +80,9 @@ namespace sbd {
 	    sbd_data.do_redist_det = true;
 	  }
 	}
+	if( std::string(argv[i]) == "--do_redist_alpha_eq" ) {
+	  sbd_data.do_redist_alpha_eq = ( std::atoi(argv[++i]) != 0 );
+	}
       }
       return sbd_data;
     }
@@ -101,6 +105,7 @@ namespace sbd {
       std::cout << "# timing_barriers: " << sbd_data.timing_barriers << std::endl;
       std::cout << "# do basis sort: " << sbd_data.do_sort_det << std::endl;
       std::cout << "# do redistribution of basis: " << sbd_data.do_redist_det << std::endl;
+      std::cout << "# do equal-bra_a redistribution: " << sbd_data.do_redist_alpha_eq << std::endl;
       if( sbd_data.do_rdm != 0.0 ) {
 	std::cout << "# do rdm: " << sbd_data.do_rdm << std::endl;
       }
@@ -628,6 +633,8 @@ namespace sbd {
 	    reordering(det,bit_length,2*L,b_comm);
 	  } else if ( sbd_data.do_redist_det ) {
 	    redistribution(det,bit_length,2*L,b_comm);
+	  } else if ( sbd_data.do_redist_alpha_eq ) {
+	    redistribution_equal_bra_a(det,bit_length,2*L,b_comm);
 	  }
 	}
 	MpiBcast(det,0,t_comm);
