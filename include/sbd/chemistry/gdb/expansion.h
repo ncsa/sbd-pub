@@ -696,7 +696,7 @@ namespace sbd {
       int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
       int mpi_size_b; MPI_Comm_size(b_comm,&mpi_size_b);
       MPI_Comm x_comm;
-      int mpi_color_x = mpi_rank / mpi_size_b;
+      int mpi_color_x = mpi_rank_b;
       MPI_Comm_split(comm,mpi_color_x,mpi_rank,&x_comm);
       int mpi_rank_x; MPI_Comm_rank(x_comm,&mpi_rank_x);
       int mpi_size_x; MPI_Comm_size(x_comm,&mpi_size_x);
