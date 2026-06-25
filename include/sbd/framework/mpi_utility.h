@@ -367,20 +367,22 @@ namespace sbd {
 
   
 
-  template <>
-  void MpiSlide(const std::vector<std::vector<size_t>> & A,
-		std::vector<std::vector<size_t>> & B,
-		int slide,
-		MPI_Comm comm) {
+  // MpiSlide for vector<vector<size_t>> with caller-supplied flat scratch buffers.
+  // When the same scratch vectors are reused across calls, resize() is a no-op
+  // on subsequent calls of equal size, avoiding repeated zero-initialization.
+  void MpiSlideWithScratch(const std::vector<std::vector<size_t>> & A,
+                            std::vector<std::vector<size_t>> & B,
+                            int slide,
+                            MPI_Comm comm,
+                            std::vector<size_t>& scratch_send,
+                            std::vector<size_t>& scratch_recv) {
     int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
     int mpi_size; MPI_Comm_size(comm,&mpi_size);
     int mpi_dest   = (mpi_size+mpi_rank+slide) % mpi_size;
     int mpi_source = (mpi_size+mpi_rank-slide) % mpi_size;
-    
+
     std::vector<MPI_Request> req_size(2);
     std::vector<MPI_Status> sta_size(2);
-
-    // We first check the size
     std::vector<size_t> size_send(2);
     std::vector<size_t> size_recv(2);
     size_send[0] = A.size();
@@ -399,27 +401,35 @@ namespace sbd {
     std::vector<MPI_Request> req_data(2);
     std::vector<MPI_Status> sta_data(2);
 
-    std::vector<size_t> data_send(total_send_size);
-    std::vector<size_t> data_recv(total_recv_size);
+    scratch_send.resize(total_send_size);
+    scratch_recv.resize(total_recv_size);
+
+    // Pack A into scratch_send before touching B.
+    // Ordering guarantee: A content is fully captured before B.resize() below,
+    // so it is safe to call with A and B aliasing the same vector (in-place slide).
+    for(size_t n=0; n < size_send[0]; n++) {
+      for(size_t k=0; k < size_send[1]; k++) {
+        scratch_send[n*size_send[1]+k] = A[n][k];
+      }
+    }
+
+    if( total_send_size != 0 ) {
+      MPI_Isend(scratch_send.data(),total_send_size,SBD_MPI_SIZE_T,mpi_dest,1,comm,&req_data[0]);
+    }
+    if( total_recv_size != 0 ) {
+      MPI_Irecv(scratch_recv.data(),total_recv_size,SBD_MPI_SIZE_T,mpi_source,1,comm,&req_data[1]);
+    }
+
+    // B.resize placed here — after pack (A safe) and Isend/Irecv (in flight),
+    // so construction of new vector rows overlaps with the MPI transfer.
+    // When A==B (in-place slide), B already has the right capacity if the
+    // communicator is balanced, making resize() a no-op.
     if( size_recv[0] != 0 ) {
       B.resize(size_recv[0],std::vector<size_t>(size_recv[1]));
     } else {
       B.resize(0);
     }
 
-    for(size_t n=0; n < size_send[0]; n++) {
-      for(size_t k=0; k < size_send[1]; k++) {
-	data_send[n*size_send[1]+k] = A[n][k];
-      }
-    }
-
-    if( total_send_size != 0 ) {
-      MPI_Isend(data_send.data(),total_send_size,SBD_MPI_SIZE_T,mpi_dest,1,comm,&req_data[0]);
-    }
-    if( total_recv_size != 0 ) {
-      MPI_Irecv(data_recv.data(),total_recv_size,SBD_MPI_SIZE_T,mpi_source,1,comm,&req_data[1]);
-    }
-    
     if( total_send_size != 0 && total_recv_size != 0 ) {
       MPI_Waitall(2,req_data.data(),sta_data.data());
     } else if ( total_send_size != 0 && total_recv_size == 0 ) {
@@ -430,10 +440,18 @@ namespace sbd {
 
     for(size_t n=0; n < size_recv[0]; n++) {
       for(size_t k=0; k < size_recv[1]; k++) {
-	B[n][k] = data_recv[n*size_recv[1]+k];
+        B[n][k] = scratch_recv[n*size_recv[1]+k];
       }
     }
-    
+  }
+
+  template <>
+  void MpiSlide(const std::vector<std::vector<size_t>> & A,
+		std::vector<std::vector<size_t>> & B,
+		int slide,
+		MPI_Comm comm) {
+    std::vector<size_t> scratch_send, scratch_recv;
+    MpiSlideWithScratch(A, B, slide, comm, scratch_send, scratch_recv);
   }
 
 
