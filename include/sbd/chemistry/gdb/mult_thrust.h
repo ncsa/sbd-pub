@@ -220,10 +220,15 @@ void MultGDBThrust<ElemT>::Init(
         exidx.push_back(ExcitationLookupThrust(exidx_storage[task], CrAn_storage[task], exidx_in[task]));
     }
 
-    // copyin dets
-    dets_.resize(this->D_size_ * dets_in.size());
-    for (int i = 0; i < dets_in.size(); i++) {
-        thrust::copy_n(dets_in[i].begin(), this->D_size_, dets_.begin() + i * this->D_size_);
+    // copyin dets — stage into contiguous CPU buffer, then one GPU upload
+    const int D_size = this->D_size_;
+    const int n_dets = (int)dets_in.size();
+    dets_.resize(D_size * n_dets);
+    {
+        std::vector<size_t> flat(D_size * n_dets);
+        for (int i = 0; i < n_dets; i++)
+            std::copy_n(dets_in[i].data(), D_size, flat.data() + i * D_size);
+        thrust::copy_n(flat.begin(), flat.size(), dets_.begin());
     }
 
     // compute detsums_: inclusive prefix parity of each determinant's bit string.
