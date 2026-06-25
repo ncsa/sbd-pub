@@ -388,6 +388,26 @@ namespace sbd {
     a.erase(std::unique(a.begin(),a.end()),a.end());
   }
 
+  // Generic sort_from_back: works on any RowType with operator[] returning size_t.
+  // Instantiate with size_t* for pointer-into-flat-array rows (swaps 8 bytes, not 24).
+  template<typename RowType>
+  void sort_from_back_t(std::vector<RowType>& rows, size_t lo, size_t hi, int elem) {
+    if (hi - lo <= 1 || elem < 0) return;
+    std::sort(rows.begin() + lo, rows.begin() + hi,
+              [elem](const RowType& x, const RowType& y) {
+                return x[elem] < y[elem];
+              });
+    if (elem == 0) return;
+    size_t run_lo = lo;
+    for (size_t i = lo + 1; i <= hi; i++) {
+      if (i == hi || rows[i][elem] != rows[run_lo][elem]) {
+        if (i - run_lo > 1)
+          sort_from_back_t(rows, run_lo, i, elem - 1);
+        run_lo = i;
+      }
+    }
+  }
+
   /**
      Function to redistribute the bit string on each mpi processes.
      @param[in/out] config: set of bit strings to be redistributed
@@ -953,7 +973,7 @@ namespace sbd {
 	a_max_order += bit_length_a;
       }
       b[i] = v_a & maxbit_b;
-      v_a = v_a >> bit_length_b;
+      v_a = (bit_length_b >= 64) ? 0 : (v_a >> bit_length_b);
       min_order += bit_length_b;
       b_max_order += bit_length_b;
     }
@@ -997,7 +1017,7 @@ namespace sbd {
 	  a_max_order += bit_length_a;
 	}
 	b[k][i] = (v_a & maxbit_b);
-	v_a = (v_a >> bit_length_b);
+	v_a = (bit_length_b >= 64) ? 0 : (v_a >> bit_length_b);
 	min_order += bit_length_b;
 	b_max_order += bit_length_b;
       }

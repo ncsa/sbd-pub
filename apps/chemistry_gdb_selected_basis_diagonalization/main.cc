@@ -153,6 +153,8 @@ int main(int argc, char * argv[]) {
 	sbd::reordering(det,bit_length,2*L,b_comm);
       } else if ( sbd_data.do_redist_det ) {
 	sbd::redistribution(det,bit_length,2*L,b_comm);
+      } else if ( sbd_data.do_redist_alpha_eq ) {
+	sbd::redistribution_equal_bra_a(det,bit_length,2*L,b_comm);
       }
     }
     sbd::MpiBcast(det,0,t_comm);

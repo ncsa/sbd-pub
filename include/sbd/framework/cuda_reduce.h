@@ -138,6 +138,7 @@ double precise_reduce_sum_with_function(Function func, size_t size)
     // reduce kernel with a zero block dimension (<<<1, 0>>>): that launch fails
     // and leaves a pending CUDA error for the next Thrust dispatch to trip over.
     if (size == 0) return 0.0;
+    SBD_NVTX_RANGE_COLOR("precise_reduce_sum_with_function", __LINE__);
 
     size_t n, nt, nb;
     nb = 1;
