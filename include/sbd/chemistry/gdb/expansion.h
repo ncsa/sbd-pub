@@ -78,7 +78,7 @@ namespace sbd {
  
   namespace gdb {
 
-    void single_from_hdet(const std::vector<size_t> & hdet,
+    void singles_from_hdet(const std::vector<size_t> & hdet,
 			  size_t bit_length,
 			  size_t norb,
 			  size_t num_one,
@@ -105,7 +105,7 @@ namespace sbd {
       }
     }
 
-    void double_from_hdet(const std::vector<size_t> & hdet,
+    void doubles_from_hdet(const std::vector<size_t> & hdet,
 			  size_t bit_length,
 			  size_t norb,
 			  size_t num_one,
@@ -142,6 +142,48 @@ namespace sbd {
       }
     }
 
+    void single_from_hdet(const std::vector<int> & open,
+			  const std::vector<int> & closed,
+			  size_t norb,
+			  size_t num_one,
+			  int spin,
+			  std::vector<int> & cran) {
+      size_t num_ex = num_one * (norb - num_one);
+      cran.resize(2*num_ex);
+      size_t ex_count = 0;
+      for(size_t i=0; i < num_one; i++) {
+	for(size_t j=0; j < norb-num_one; j++) {
+	  cran[2*ex_count+0] = 2*closed[i]+spin;
+	  cran[2*ex_count+1] = 2*open[j]+spin;
+	  ex_count++;
+	}
+      }
+    }
+
+    void double_from_hdet(const std::vector<int> & open,
+			  const std::vector<int> & closed,
+			  size_t norb,
+			  size_t num_one,
+			  int spin,
+			  std::vector<int> & cran) {
+      size_t num_ex = num_one * (num_one-1) * (norb - num_one) * (norb - num_one - 1) / 4;
+      cran.resize(4*num_ex);
+      size_t ex_count = 0;
+      for(size_t i=0; i < num_one; i++) {
+	for(size_t j=i+1; j < num_one; j++) {
+	  for(size_t k=0; k < norb-num_one; k++) {
+	    for(size_t l=k+1; l < norb-num_one; l++) {
+	      cran[4*ex_count+0] = 2*closed[i]+spin;
+	      cran[4*ex_count+1] = 2*closed[j]+spin;
+	      cran[4*ex_count+2] = 2*open[k]+spin;
+	      cran[4*ex_count+3] = 2*open[l]+spin;
+	      ex_count++;
+	    }
+	  }
+	}
+      }
+    }
+    
     void makeHeatbathLookup(const std::vector<std::vector<size_t>> & hdet,
 			    size_t bit_length,
 			    size_t norb,
@@ -165,10 +207,10 @@ namespace sbd {
 	std::vector<int> closed(num_one);
 	for(size_t ih=thread_num; ih < hdet.size(); ih=ih+num_threads) {
 	  int nc = getOpenClosed(hdet[ih],bit_length,norb,open,closed);
-	  sbd::gdb::single_from_hdet(hdet[ih],bit_length,norb,num_one,spin,open,closed,
-				     edet_single[ih],cran_single[ih]);
-	  sbd::gdb::double_from_hdet(hdet[ih],bit_length,norb,num_one,spin,open,closed,
-				     edet_double[ih],cran_double[ih]);
+	  sbd::gdb::singles_from_hdet(hdet[ih],bit_length,norb,num_one,spin,open,closed,
+				      edet_single[ih],cran_single[ih]);
+	  sbd::gdb::doubles_from_hdet(hdet[ih],bit_length,norb,num_one,spin,open,closed,
+				      edet_double[ih],cran_double[ih]);
 	}
       }
     }
@@ -178,20 +220,20 @@ namespace sbd {
        @note results includes the original determinants
      */
     template <typename ElemT, typename RealT>
-    void local_heatbath_expansion(const std::vector<std::vector<size_t>> & det,
-				  const std::vector<std::vector<size_t>> & adet,
-				  const std::vector<std::vector<size_t>> & bdet,
-				  const std::vector<size_t> & adet_count,
-				  const std::vector<size_t> & bdet_count,
-				  const std::vector<ElemT> & w,
-				  size_t bit_length,
-				  size_t norb,
-				  const ElemT & I0,
-				  const oneInt<ElemT> & I1,
-				  const twoInt<ElemT> & I2,
-				  RealT cutoff,
-				  size_t max_batch_size,
-				  std::vector<std::vector<size_t>> & edet) {
+    void local_heatbath_expansion_lookup(const std::vector<std::vector<size_t>> & det,
+					 const std::vector<std::vector<size_t>> & adet,
+					 const std::vector<std::vector<size_t>> & bdet,
+					 const std::vector<size_t> & adet_count,
+					 const std::vector<size_t> & bdet_count,
+					 const std::vector<ElemT> & w,
+					 size_t bit_length,
+					 size_t norb,
+					 const ElemT & I0,
+					 const oneInt<ElemT> & I1,
+					 const twoInt<ElemT> & I2,
+					 RealT cutoff,
+					 size_t max_batch_size,
+					 std::vector<std::vector<size_t>> & edet) {
 
       DetIndexMap idxmap;
       makeDetIndexMap(det,adet,bdet,adet_count,bdet_count,
@@ -387,6 +429,251 @@ namespace sbd {
     }
 
     /**
+    @brief 
+    */
+    template <typename ElemT, typename RealT>
+    void local_heatbath_expansion(const std::vector<std::vector<size_t>> & det,
+				  const std::vector<ElemT> & w,
+				  size_t bit_length,
+				  size_t norb,
+				  const ElemT & I0,
+				  const oneInt<ElemT> & I1,
+				  const twoInt<ElemT> & I2,
+				  RealT cutoff,
+				  size_t max_batch_size,
+				  std::vector<std::vector<size_t>> & edet) {
+
+      if( det.size() == static_cast<size_t>(0) ) return;
+      
+      std::vector<std::vector<size_t>> adet;
+      std::vector<std::vector<size_t>> bdet;
+      std::vector<size_t> adet_count;
+      std::vector<size_t> bdet_count;
+      getHalfDets(det,bit_length,norb,adet,bdet,adet_count,bdet_count);
+      DetIndexMap idxmap;
+      makeDetIndexMap(det,adet,bdet,adet_count,bdet_count,bit_length,norb,idxmap);
+
+      size_t num_threads = 1;
+#pragma omp parallel
+      {
+	num_threads = omp_get_num_threads();
+      }
+      
+      size_t num_one_a = static_cast<size_t>(bitcount(adet[0],bit_length,norb));
+      size_t num_one_b = static_cast<size_t>(bitcount(bdet[0],bit_length,norb));
+      size_t num_ex_single_a = (norb - num_one_a) * num_one_a;
+      size_t num_ex_single_b = (norb - num_one_b) * num_one_b;
+      size_t num_ex_double_aa = (norb - num_one_a)*(norb - num_one_a - 1)
+	* num_one_a * (num_one_a - 1) / 4;
+      size_t num_ex_double_bb = (norb - num_one_b)*(norb - num_one_b - 1)
+	* num_one_b * (num_one_b - 1) / 4;
+      size_t num_ex_double_ab = (norb - num_one_a) * (norb - num_one_b)
+	* num_one_a * num_one_b;
+
+      size_t max_candidates_per_det =
+          num_ex_single_a + num_ex_single_b
+        + num_ex_double_aa + num_ex_double_bb + num_ex_double_ab;
+
+      const size_t effective_max_batch_size =
+          (max_batch_size == 0) ? det.size() * max_candidates_per_det
+                                : max_batch_size;
+      const size_t local_batch_size =
+          std::max<size_t>(1, effective_max_batch_size / num_threads);
+      edet = det;
+      std::vector<size_t> adet_to_det_offset(idxmap.AdetToDetLen.size() + 1, 0);
+      for(size_t ia = 0; ia < idxmap.AdetToDetLen.size(); ++ia) {
+	adet_to_det_offset[ia + 1] = adet_to_det_offset[ia] + idxmap.AdetToDetLen[ia];
+      }
+      const size_t num_adet_det_pairs = adet_to_det_offset.back();
+
+      // make LookUps
+#pragma omp parallel
+      {
+	size_t thread_id = 0;
+	size_t num_threads_in_parallel = 1;
+#ifdef _OPENMP
+	thread_id = omp_get_thread_num();
+	num_threads_in_parallel = omp_get_num_threads();
+#endif
+
+	const size_t pair_begin = num_adet_det_pairs * thread_id / num_threads_in_parallel;
+	const size_t pair_end   = num_adet_det_pairs * (thread_id + 1) / num_threads_in_parallel;
+
+	std::vector<std::vector<size_t>> candidates;
+	candidates.reserve(local_batch_size);
+
+	auto flush_candidates = [&]() {
+	  if (candidates.empty()) {
+	    return;
+	  }
+#pragma omp critical(sbd_gdb_heatbath_append_candidates)
+	  {
+	    append_candidates_unique(edet, candidates);
+	  }
+	  candidates.clear();
+	  candidates.reserve(local_batch_size);
+	};
+
+	auto push_candidate = [&](const std::vector<size_t>& candidate) {
+	  candidates.push_back(candidate);
+	  if (candidates.size() >= local_batch_size) {
+	    flush_candidates();
+	  }
+	};
+
+	auto cdet = det[0];
+
+	if(pair_begin < pair_end) {
+	  size_t ia = static_cast<size_t>(
+	    std::upper_bound(adet_to_det_offset.begin(),
+	                     adet_to_det_offset.end(),
+	                     pair_begin) - adet_to_det_offset.begin() - 1);
+	  size_t ib = pair_begin - adet_to_det_offset[ia];
+
+	  size_t iast_prev = ia;
+	  size_t ibst_prev = idxmap.AdetToBdetSM[ia][ib];
+
+	  std::vector<int> aorb_single(2*num_ex_single_a);
+	  std::vector<int> borb_single(2*num_ex_single_b);
+	  std::vector<int> aorb_double(2*num_ex_double_aa);
+	  std::vector<int> borb_double(2*num_ex_double_bb);
+	  std::vector<int> adet_open(norb-num_one_a);
+	  std::vector<int> adet_closed(num_one_a);
+	  std::vector<int> bdet_open(norb-num_one_b);
+	  std::vector<int> bdet_closed(num_one_b);
+	  
+	  int nc_a = getOpenClosed(adet[iast_prev],bit_length,norb,adet_open,adet_closed);
+	  int nc_b = getOpenClosed(bdet[ibst_prev],bit_length,norb,bdet_open,bdet_closed);
+	  single_from_hdet(adet_open,adet_closed,norb,num_one_a,0,aorb_single);
+	  single_from_hdet(bdet_open,bdet_closed,norb,num_one_b,1,borb_single);
+	  double_from_hdet(adet_open,adet_closed,norb,num_one_a,0,aorb_double);
+	  double_from_hdet(bdet_open,bdet_closed,norb,num_one_b,1,borb_double);
+
+	  for(size_t ipair = pair_begin; ipair < pair_end; ++ipair) {
+	    size_t iast = ia;
+	    size_t ibst = idxmap.AdetToBdetSM[ia][ib];
+	    size_t idet = idxmap.AdetToDetSM[ia][ib];
+
+	    if( iast != iast_prev ) {
+	      int nc = getOpenClosed(adet[iast],bit_length,norb,adet_open,adet_closed);
+	      single_from_hdet(adet_open,adet_closed,norb,num_one_a,0,aorb_single);
+	      double_from_hdet(adet_open,adet_closed,norb,num_one_a,0,aorb_double);
+	    }
+
+	    if( ibst != ibst_prev ) {
+	      int nc = getOpenClosed(bdet[ibst],bit_length,norb,bdet_open,bdet_closed);
+	      single_from_hdet(bdet_open,bdet_closed,norb,num_one_b,1,borb_single);
+	      double_from_hdet(bdet_open,bdet_closed,norb,num_one_b,1,borb_double);
+	    }
+
+	    // single alpha excitations
+	    for(size_t ja=0; ja < num_ex_single_a; ja++) {
+	      ElemT hij = OneExcite(det[idet],bit_length,
+				    aorb_single[2*ja+0],
+				    aorb_single[2*ja+1],
+				    I1,I2);
+	      RealT hijc = std::abs( hij * w[idet] );
+	      if( hijc > cutoff ) {
+		cdet = det[idet];
+		setocc(cdet,bit_length,aorb_single[2*ja+1],true);
+		setocc(cdet,bit_length,aorb_single[2*ja+0],false);
+		push_candidate(cdet);
+	      }
+	    }
+
+	    // double alpha excitations
+	    for(size_t ja=0; ja < num_ex_double_aa; ja++) {
+	      ElemT hij = TwoExcite(det[idet],bit_length,
+				    aorb_double[4*ja+0],
+				    aorb_double[4*ja+1],
+				    aorb_double[4*ja+2],
+				    aorb_double[4*ja+3],
+				    I1,I2);
+	      RealT hijc = std::abs( hij * w[idet] );
+	      if( hijc > cutoff ) {
+		cdet = det[idet];
+		setocc(cdet,bit_length,aorb_double[4*ja+3],true);
+		setocc(cdet,bit_length,aorb_double[4*ja+1],false);
+		setocc(cdet,bit_length,aorb_double[4*ja+2],true);
+		setocc(cdet,bit_length,aorb_double[4*ja+0],false);
+		push_candidate(cdet);
+	      }
+	    }
+
+	    // single-alpha * single-beta two-particle excitations excitations
+	    for(size_t ja=0; ja < num_ex_single_a; ja++) {
+	      for(size_t jb=0; jb < num_ex_single_b; jb++) {
+		ElemT hij = TwoExcite(det[idet],bit_length,
+				      aorb_single[2*ja+0],
+				      borb_single[2*jb+0],
+				      aorb_single[2*ja+1],
+				      borb_single[2*jb+1],
+				      I1,I2);
+		RealT hijc = std::abs( hij * w[idet] );
+		if( hijc > cutoff ) {
+		  cdet = det[idet];
+		  setocc(cdet,bit_length,aorb_single[2*ja+1],true);
+		  setocc(cdet,bit_length,aorb_single[2*ja+0],false);
+		  setocc(cdet,bit_length,borb_single[2*jb+1],true);
+		  setocc(cdet,bit_length,borb_single[2*jb+0],false);
+		  push_candidate(cdet);
+		}
+	      }
+	    }
+
+	    // single beta excitations
+	    for(size_t jb=0; jb < num_ex_single_b; jb++) {
+	      ElemT hij = OneExcite(det[idet],bit_length,
+				    borb_single[2*jb+0],
+				    borb_single[2*jb+1],
+				    I1,I2);
+	      RealT hijc = std::abs( hij * w[idet] );
+	      if( hijc > cutoff ) {
+		cdet = det[idet];
+		setocc(cdet,bit_length,borb_single[2*jb+1],true);
+		setocc(cdet,bit_length,borb_single[2*jb+0],false);
+		push_candidate(cdet);
+	      }
+	    }
+
+	    // double beta excitations
+	    for(size_t jb=0; jb < num_ex_double_bb; jb++) {
+	      ElemT hij = TwoExcite(det[idet],bit_length,
+				    borb_double[4*jb+0],
+				    borb_double[4*jb+1],
+				    borb_double[4*jb+2],
+				    borb_double[4*jb+3],
+				    I1,I2);
+	      RealT hijc = std::abs( hij * w[idet] );
+	      if( hijc > cutoff ) {
+		cdet = det[idet];
+		setocc(cdet,bit_length,borb_double[4*jb+3],true);
+		setocc(cdet,bit_length,borb_double[4*jb+1],false);
+		setocc(cdet,bit_length,borb_double[4*jb+2],true);
+		setocc(cdet,bit_length,borb_double[4*jb+0],false);
+		push_candidate(cdet);
+	      }
+	    }
+
+	    iast_prev = iast;
+	    ibst_prev = ibst;
+
+	    ++ib;
+	    if(ib == idxmap.AdetToDetLen[ia]) {
+	      ++ia;
+	      ib = 0;
+	      while(ia < idxmap.AdetToDetLen.size() && idxmap.AdetToDetLen[ia] == 0) {
+		++ia;
+	      }
+	    }
+	  }
+	}
+
+	flush_candidates();
+      }
+    }
+
+    /**
        @brief Global heatbah expansion
      */
     template <typename ElemT, typename RealT>
@@ -397,6 +684,7 @@ namespace sbd {
 			   const ElemT & I0,
 			   const oneInt<ElemT> & I1,
 			   const twoInt<ElemT> & I2,
+			   int type,
 			   RealT cutoff,
 			   size_t max_batch_size,
 			   std::vector<std::vector<size_t>> & edet,
@@ -420,15 +708,19 @@ namespace sbd {
       std::vector<std::vector<size_t>> xdet(det.begin()+i_begin,det.begin()+i_end);
       edet.clear();
 
-      std::vector<std::vector<size_t>> adet;
-      std::vector<std::vector<size_t>> bdet;
-      std::vector<size_t> adet_count;
-      std::vector<size_t> bdet_count;
-
-      getHalfDets(xdet,bit_length,norb,
-		  adet,bdet,adet_count,bdet_count);
-      local_heatbath_expansion(xdet,adet,bdet,adet_count,bdet_count,w,
-			       bit_length,norb,I0,I1,I2,cutoff,max_batch_size,edet);
+      if( type == 0 ) {
+	local_heatbath_expansion(xdet,w,bit_length,norb,I0,I1,I2,cutoff,max_batch_size,edet);
+      } else if( type == 1 ) {
+	std::vector<std::vector<size_t>> adet;
+	std::vector<std::vector<size_t>> bdet;
+	std::vector<size_t> adet_count;
+	std::vector<size_t> bdet_count;
+	getHalfDets(xdet,bit_length,norb,
+		    adet,bdet,adet_count,bdet_count);
+	local_heatbath_expansion_lookup(xdet,adet,bdet,adet_count,bdet_count,w,
+					bit_length,norb,I0,I1,I2,cutoff,max_batch_size,edet);
+      }
+      
       sort_global_bitarray(edet,comm);
       redistribution_bitarray(edet,comm);
 

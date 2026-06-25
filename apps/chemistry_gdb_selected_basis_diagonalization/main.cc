@@ -227,7 +227,7 @@ int main(int argc, char * argv[]) {
 	  ofs.close();
 	}
       }
-    } else if ( sbd_data.carryover_type == 2 ) {
+    } else if ( sbd_data.carryover_type == 2 || sbd_data.carryover_type == 3 ) {
       std::string filename = sbd::carryoverfilename(carryovername,mpi_rank);
       std::ofstream ofs(filename);
       for(size_t k=0; k < codet.size(); k++) {
