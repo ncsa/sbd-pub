@@ -163,12 +163,12 @@ namespace sbd {
     void diag(const MPI_Comm & comm,
 	      const SBD & sbd_data,
 	      const sbd::FCIDump & fcidump,
-	      const std::vector<std::vector<size_t>> & det,
+	      const sbd::det_vector<size_t> & det,
 	      const std::string & loadname,
 	      const std::string & savename,
 	      double & energy,
 	      std::vector<double> & density,
-	      std::vector<std::vector<size_t>> & rdet,
+	      sbd::det_vector<size_t> & rdet,
 	      std::vector<std::vector<ElemT>> & one_p_rdm,
 	      std::vector<std::vector<ElemT>> & two_p_rdm) {
       int mpi_master = 0;
@@ -645,7 +645,7 @@ namespace sbd {
 	      const std::string & savename,
 	      double & energy,
 	      std::vector<double> & density,
-	      std::vector<std::vector<size_t>> & rdet,
+	      sbd::det_vector<size_t> & rdet,
 	      std::vector<std::vector<ElemT>> & one_p_rdm,
 	      std::vector<std::vector<ElemT>> & two_p_rdm) {
       int mpi_master = 0;
@@ -695,6 +695,8 @@ namespace sbd {
       int b_comm_size = sbd_data.b_comm_size;
       int h_comm_size = mpi_size / (t_comm_size*b_comm_size);
       size_t bit_length = sbd_data.bit_length;
+      det_vector<size_t>::init_elem_size((2*L + bit_length - 1) / bit_length);
+      det_vector<size_t, det_kind::half>::init_elem_size((L + bit_length - 1) / bit_length);
       MPI_Comm h_comm;
       MPI_Comm b_comm;
       MPI_Comm t_comm;
@@ -706,7 +708,7 @@ namespace sbd {
       int mpi_rank_b; MPI_Comm_rank(b_comm,&mpi_rank_b);
       int mpi_size_t; MPI_Comm_size(t_comm,&mpi_size_t);
       int mpi_rank_t; MPI_Comm_rank(t_comm,&mpi_rank_t);
-      std::vector<std::vector<size_t>> det;
+      det_vector<size_t> det;
       if( mpi_rank_h == 0 ) {
 	if( mpi_rank_t == 0 ) {
 	  load_basis_from_files(detfiles,det,bit_length,2*L,b_comm);
