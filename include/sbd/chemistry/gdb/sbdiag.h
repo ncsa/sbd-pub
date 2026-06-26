@@ -29,6 +29,7 @@ namespace sbd {
       double heatbath_truncation = 0.0;
       size_t heatbath_batch_size = 200000000;
       size_t bit_length = 20;
+      size_t seed = 1729;
       bool timing_barriers = false;
       bool do_sort_det = false;
       bool do_redist_det = false;
@@ -40,6 +41,9 @@ namespace sbd {
       for(int i=0; i < argc; i++) {
 	if ( std::string(argv[i]) == "--init" ) {
 	  sbd_data.init = std::atoi(argv[++i]);
+	}
+	if ( std::string(argv[i]) == "--seed" ) {
+	  sbd_data.seed = std::atoi(argv[++i]);
 	}
 	if ( std::string(argv[i]) == "--b_comm_size" ) {
 	  sbd_data.b_comm_size = std::atoi(argv[++i]);
@@ -120,6 +124,7 @@ namespace sbd {
       std::cout << "# block size: " << sbd_data.max_nb << std::endl;
       std::cout << "# tolerance: " << sbd_data.eps << std::endl;
       std::cout << "# init method: " << sbd_data.init << std::endl;
+      std::cout << "# seed for initialization: " << sbd_data.seed << std::endl;
       std::cout << "# bit length: " << sbd_data.bit_length << std::endl;
       std::cout << "# timing_barriers: " << sbd_data.timing_barriers << std::endl;
       std::cout << "# do basis sort: " << sbd_data.do_sort_det << std::endl;
@@ -183,6 +188,7 @@ namespace sbd {
       double eps = sbd_data.eps;
       double max_time = sbd_data.max_time;
       int init = sbd_data.init;
+      size_t seed = sbd_data.seed;
       int do_shuffle = sbd_data.do_shuffle;
       int do_rdm = sbd_data.do_rdm;
       double ratio = sbd_data.ratio;
@@ -256,7 +262,7 @@ namespace sbd {
       auto time_start_init = std::chrono::high_resolution_clock::now();
       std::vector<ElemT> w;
       if( loadname.empty() ) {
-	sbd::gdb::BasisInitVector(w,det,h_comm,b_comm,t_comm,init);
+	sbd::gdb::BasisInitVector(w,det,h_comm,b_comm,t_comm,init,seed);
       } else {
 	sbd::LoadWavefunction(loadname,det,h_comm,b_comm,t_comm,w);
       }
