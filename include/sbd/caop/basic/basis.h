@@ -5,6 +5,7 @@
 #ifndef SBD_CAOP_BASIC_BASIS_H
 #define SBD_CAOP_BASIC_BASIS_H
 
+#include <numeric>
 #include <sys/stat.h>
 #include <iomanip>
 
