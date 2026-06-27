@@ -14,6 +14,9 @@
 #define _MAX_THD 1024
 namespace sbd {
 
+// ---------------------------------------------------------------------------
+// First-pass kernel: user-supplied functor, one value per thread.
+// ---------------------------------------------------------------------------
 template <typename kernel_t>
 __global__ void dev_precise_reduce_with_function(double *pReduceBuffer, kernel_t func, size_t count)
 {
@@ -34,7 +37,7 @@ __global__ void dev_precise_reduce_with_function(double *pReduceBuffer, kernel_t
         c += __shfl_xor(c, j, 64);
         v = __shfl_xor(sum, j, 64) - c;
         t = sum + v;
-        c = (t - sum) - v;
+        { double bb = t - sum; double aa = t - bb; c = (sum - aa) + (v - bb); }
         sum = t;
     }
 
@@ -60,7 +63,7 @@ __global__ void dev_precise_reduce_with_function(double *pReduceBuffer, kernel_t
                 c += __shfl_xor(c, j, 64);
                 v = __shfl_xor(sum, j, 64) - c;
                 t = sum + v;
-                c = (t - sum) - v;
+                { double bb = t - sum; double aa = t - bb; c = (sum - aa) + (v - bb); }
                 sum = t;
             }
         }
@@ -72,7 +75,12 @@ __global__ void dev_precise_reduce_with_function(double *pReduceBuffer, kernel_t
     }
 }
 
-__global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
+// ---------------------------------------------------------------------------
+// Race-free two-pointer second-pass kernel (1-component).
+// Reads (sum, c) pairs from in[i*2 + 0..1]; writes per block to out[b*2 + 0..1].
+// 'in' and 'out' must not alias.  count = number of pairs in 'in'.
+// ---------------------------------------------------------------------------
+__global__ void dev_precise_reduce_step(const double* in, double* out, size_t count)
 {
     __shared__ double cache[_MAX_THD * 2 / _WS];
     double sum, t, v;
@@ -83,8 +91,8 @@ __global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
     if (i >= count)
         sum = 0.0;
     else{
-        sum = pReduceBuffer[i*2];
-        c = pReduceBuffer[i*2 + 1];
+        sum = in[i*2];
+        c = in[i*2 + 1];
     }
 
     // reduce in warp
@@ -93,7 +101,7 @@ __global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
         c += __shfl_xor(c, j, 64);
         v = __shfl_xor(sum, j, 64) - c;
         t = sum + v;
-        c = (t - sum) - v;
+        { double bb = t - sum; double aa = t - bb; c = (sum - aa) + (v - bb); }
         sum = t;
     }
 
@@ -119,52 +127,77 @@ __global__ void dev_precise_reduce(double *pReduceBuffer, size_t count)
                 c += __shfl_xor(c, j, 64);
                 v = __shfl_xor(sum, j, 64) - c;
                 t = sum + v;
-                c = (t - sum) - v;
+                { double bb = t - sum; double aa = t - bb; c = (sum - aa) + (v - bb); }
                 sum = t;
             }
         }
     }
 
     if (threadIdx.x == 0) {
-        pReduceBuffer[blockIdx.x * 2] = sum;
-        pReduceBuffer[blockIdx.x * 2 + 1] = c;
+        out[blockIdx.x * 2] = sum;
+        out[blockIdx.x * 2 + 1] = c;
     }
 }
 
+// ---------------------------------------------------------------------------
+// Persistent device + pinned-host buffers.  Grow-only, never freed.
+// ---------------------------------------------------------------------------
+namespace detail {
+    static double*  g_dev_buf  = nullptr;
+    static size_t   g_dev_cap  = 0;
+    static double*  g_host_buf = nullptr;
+
+    inline double* ensure_reduce_buf(size_t n_doubles) {
+        if (n_doubles > g_dev_cap) {
+            hipFree(g_dev_buf);
+            hipMalloc(&g_dev_buf, n_doubles * sizeof(double));
+            g_dev_cap = n_doubles;
+        }
+        if (!g_host_buf) {
+            hipHostMalloc(&g_host_buf, 8 * sizeof(double), 0);
+        }
+        return g_dev_buf;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Updated precise_reduce_sum_with_function: persistent buffer, race-free step
+// kernel, single async D→H copy.
+// ---------------------------------------------------------------------------
 template <typename Function>
 double precise_reduce_sum_with_function(Function func, size_t size)
 {
-    size_t n, nt, nb;
-    nb = 1;
-    nt = size;
+    if (size == 0) return 0.0;
 
+    size_t nt = size, nb = 1;
     if (nt > _MAX_THD) {
         nb = (nt + _MAX_THD - 1) / _MAX_THD;
         nt = _MAX_THD;
     }
-    double* buf;
-    hipMalloc(&buf, nb * 2 * sizeof(double));
 
-    dev_precise_reduce_with_function<Function>
-                <<<nb, nt>>>(buf, func, size);
+    double* buf = detail::ensure_reduce_buf(3 * nb + 8);
+
+    size_t src_off = 0;
+    size_t dst_off = nb * 2;
+
+    dev_precise_reduce_with_function<Function><<<nb, nt>>>(buf, func, size);
+
     while (nb > 1) {
-        n = nb;
-        nt = nb;
-        nb = 1;
+        size_t n = nb;
+        nt = nb; nb = 1;
         if (nt > _MAX_THD) {
             nb = (nt + _MAX_THD - 1) / _MAX_THD;
             nt = _MAX_THD;
         }
-        dev_precise_reduce<<<nb, nt>>>(buf, n);
+        dev_precise_reduce_step<<<nb, nt>>>(buf + src_off, buf + dst_off, n);
+        src_off  = dst_off;
+        dst_off += nb * 2;
     }
 
-    double ret;
-    hipMemcpy(&ret, buf, sizeof(double), hipMemcpyDeviceToHost);
-    double c;
-    hipMemcpy(&c, buf+1, sizeof(double), hipMemcpyDeviceToHost);
-    hipFree(buf);
-
-    return ret;
+    hipMemcpyAsync(detail::g_host_buf, buf + src_off, 2 * sizeof(double),
+                   hipMemcpyDeviceToHost, 0);
+    hipStreamSynchronize(0);
+    return detail::g_host_buf[0];
 }
 
 
