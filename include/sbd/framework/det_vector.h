@@ -18,6 +18,19 @@ namespace sbd {
 
 enum class det_kind { full, half };
 
+// Forward declaration so detail function declarations below can name det_vector.
+template<typename ElemT, det_kind Kind>
+class det_vector;
+
+namespace detail {
+template<size_t Mask, typename ElemT, det_kind Kind>
+void idx_sort_det(std::vector<int>&, const det_vector<ElemT, Kind>&, int, int, int);
+template<size_t Mask, bool FillCounts, typename ElemT, det_kind Kind>
+void unique_from_sorted_impl(const det_vector<ElemT, Kind>&, det_vector<ElemT, Kind>&, std::vector<int>&);
+template<size_t Mask, bool FillCounts, typename ElemT, det_kind Kind>
+void unique_from_unsorted_impl(const det_vector<ElemT, Kind>&, det_vector<ElemT, Kind>&, std::vector<int>&);
+} // namespace detail
+
 // Flat-packed container where every row has the same fixed width _elem_size.
 // Storage: std::vector<ElemT> _data of length size * _elem_size (tightly packed).
 //   _data[i*_elem_size .. i*_elem_size+_elem_size-1] = row i data
@@ -205,6 +218,18 @@ public:
         for (size_t i = 0; i < n; i++) _init_row(i, v.data());
     }
 
+    template<typename InputIt>
+    det_vector(InputIt first, InputIt last) {
+        if (first == last) return;
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        _set_elem_size(first->size());
+        _data.resize(n * stride());
+        _size = n;
+        size_t i = 0;
+        for (auto it = first; it != last; ++it, ++i)
+            std::copy(it->begin(), it->end(), _data.data() + i * stride());
+    }
+
     det_vector(const det_vector&) = default;
     det_vector& operator=(const det_vector&) = default;
 
@@ -280,6 +305,19 @@ public:
         assert(_elem_size != 0);
         _data.resize(n * stride());
         _size = n;
+    }
+
+    void resize(size_t n, const std::vector<ElemT>& v) {
+        _set_elem_size(v.size());
+        size_t old_size = _size;
+        _data.resize(n * stride());
+        _size = n;
+        for (size_t i = old_size; i < n; ++i) _init_row(i, v.data());
+    }
+
+    void swap(det_vector& other) noexcept {
+        _data.swap(other._data);
+        std::swap(_size, other._size);
     }
 
     // Replace contents with m rows each initialised to v. Sets _elem_size from v.size().
