@@ -562,7 +562,7 @@ namespace sbd {
 	}
 	auto time_start_wt = std::chrono::high_resolution_clock::now();
 	std::vector<ElemT> cw;
-	std::vector<std::vector<size_t>> cdet;
+	sbd::det_vector<size_t> cdet;
 	WeightTruncation(w,det,hb_truncation,cw,cdet);
 	auto time_end_wt = std::chrono::high_resolution_clock::now();
 	auto elapsed_wt_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_wt-time_start_wt).count();

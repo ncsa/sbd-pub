@@ -67,12 +67,12 @@ namespace sbd {
       sort_bitarray(rdet);
     }
 
-    template <typename ElemT, typename RealT>
+    template <typename ElemT, typename RealT, typename InDetsContainer, typename OutDetsContainer>
     void WeightTruncation(const std::vector<ElemT> & w,
-			  const std::vector<std::vector<size_t>> & det,
+			  const InDetsContainer & det,
 			  RealT threshold,
 			  std::vector<ElemT> & rw,
-			  std::vector<std::vector<size_t>> & rdet) {
+			  OutDetsContainer & rdet) {
 
       const size_t n = det.size();
 

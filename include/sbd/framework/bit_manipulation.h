@@ -1276,22 +1276,22 @@ namespace sbd {
     return !less_from_back(a, b) && !less_from_back(b, a);
   }
 
-  inline void sort_unique_local_bitarray(std::vector<std::vector<size_t>> &dets) {
-    std::sort(dets.begin(), dets.end(), less_from_back);
-    auto last = std::unique(dets.begin(), dets.end(),
-			    equal_bitarray_from_back);
-    dets.erase(last, dets.end());
+  template<typename DetsContainer>
+  void sort_unique_local_bitarray(DetsContainer& dets) {
+    sort_bitarray(dets);
   }
 
   inline int destination_by_splitters(
     const std::vector<size_t> &det,
     const std::vector<std::vector<size_t>> &splitters) {
     auto it = std::upper_bound(splitters.begin(), splitters.end(), det,
-			       less_from_back);
+			       [](const std::vector<size_t>& a, const std::vector<size_t>& b) {
+				 return less_from_back(a, b); });
     return static_cast<int>(it - splitters.begin());
   }
 
-  void sort_global_bitarray(std::vector<std::vector<size_t>> &dets,
+  template<typename DetsContainer>
+  void sort_global_bitarray(DetsContainer &dets,
                           MPI_Comm comm) {
     int mpi_rank = 0;
     int mpi_size = 1;
@@ -1499,10 +1499,10 @@ namespace sbd {
 		  comm);
     
     const size_t recv_n = recvbuf.size() / num_words;
-    
+
     dets.clear();
     dets.resize(recv_n, std::vector<size_t>(num_words));
-    
+
     for (size_t i = 0; i < recv_n; ++i) {
       std::copy(recvbuf.begin() + i * num_words,
 		recvbuf.begin() + (i + 1) * num_words,
@@ -1526,14 +1526,15 @@ namespace sbd {
     return balanced_begin(global_n, mpi_size, rank + 1);
   }
 
-  void redistribution_bitarray(std::vector<std::vector<size_t>> &dets,
+  template<typename DetsContainer>
+  void redistribution_bitarray(DetsContainer &dets,
 			       MPI_Comm comm) {
 
     int mpi_rank = 0;
     int mpi_size = 1;
     MPI_Comm_rank(comm, &mpi_rank);
     MPI_Comm_size(comm, &mpi_size);
-    
+
     const size_t local_n = dets.size();
     size_t local_num_words = 0;
     if (!dets.empty()) {
@@ -1642,8 +1643,7 @@ namespace sbd {
     const size_t new_local_n =
       static_cast<size_t>(total_recv_words) / num_words;
 
-    std::vector<std::vector<size_t>> new_dets(
-      new_local_n, std::vector<size_t>(num_words));
+    DetsContainer new_dets(new_local_n, std::vector<size_t>(num_words));
 
     for (size_t i = 0; i < new_local_n; ++i) {
       std::copy(recvbuf.begin() + i * num_words,
@@ -1653,8 +1653,8 @@ namespace sbd {
     dets.swap(new_dets);
   }
 
-  template <typename ElemT>
-  void redistribution_bitarray(std::vector<std::vector<size_t>> &dets,
+  template <typename ElemT, typename DetsContainer>
+  void redistribution_bitarray(DetsContainer &dets,
 			       std::vector<ElemT> &w,
 			       MPI_Comm comm) {
     assert(dets.size() == w.size());
@@ -1828,8 +1828,7 @@ namespace sbd {
     
     const size_t new_local_n = static_cast<size_t>(total_recv_det);
     
-    std::vector<std::vector<size_t>> new_dets(
-	 new_local_n, std::vector<size_t>(num_words));
+    DetsContainer new_dets(new_local_n, std::vector<size_t>(num_words));
 
     for (size_t i = 0; i < new_local_n; ++i) {
       std::copy(recvbuf_det.begin() + i * num_words,
