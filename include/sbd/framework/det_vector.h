@@ -8,10 +8,10 @@
 #define SBD_FRAMEWORK_DET_VECTOR_H
 
 #include <algorithm>
-#include <cassert>
 #include <cstring>
 #include <iterator>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace sbd {
@@ -59,7 +59,10 @@ public:
 
         // No-op: row width is fixed by det_vector::_elem_size.  Exists so that
         // generic 2D-container code (e.g. for (auto& r : c) r.resize(n)) compiles.
-        void resize(size_t n) { assert(n == size()); (void)n; }
+        void resize(size_t n) {
+            if (n != size())
+                throw std::length_error("det_vector::row: resize to wrong size");
+        }
 
         ElemT& operator[](size_t k) noexcept       { return _data[k]; }
         const ElemT& operator[](size_t k) const noexcept { return _data[k]; }
@@ -78,7 +81,8 @@ public:
 
         // In-place copy from vector; row size must match.
         row& operator=(const std::vector<ElemT>& v) {
-            assert(v.size() == size());
+            if (v.size() != size())
+                throw std::length_error("det_vector::row: vector size mismatch");
             std::memcpy(_data, v.data(), size() * sizeof(ElemT));
             return *this;
         }
@@ -152,6 +156,8 @@ public:
     using value_type = row;
 
     // Random-access iterator. _ptr points to _data[0] of the current row.
+    // Stride is taken directly from det_vector::_elem_size (shared static) so
+    // the iterator carries only one pointer word.
     struct iterator {
         using value_type        = row;
         using reference         = row&;
@@ -160,37 +166,37 @@ public:
         using pointer           = row*;
 
         ElemT*  _ptr;
-        size_t  _stride;
 
         row& operator*()  const noexcept {
             return *reinterpret_cast<row*>(_ptr);
         }
         row& operator[](difference_type n) const noexcept {
             return *reinterpret_cast<row*>(
-                _ptr + n * static_cast<difference_type>(_stride));
+                _ptr + n * static_cast<difference_type>(_elem_size));
         }
         row* operator->() const noexcept {
             return reinterpret_cast<row*>(_ptr);
         }
 
-        iterator& operator++() noexcept { _ptr += _stride; return *this; }
-        iterator  operator++(int) noexcept { auto t = *this; _ptr += _stride; return t; }
-        iterator& operator--() noexcept { _ptr -= _stride; return *this; }
-        iterator  operator--(int) noexcept { auto t = *this; _ptr -= _stride; return t; }
+        iterator& operator++() noexcept { _ptr += _elem_size; return *this; }
+        iterator  operator++(int) noexcept { auto t = *this; _ptr += _elem_size; return t; }
+        iterator& operator--() noexcept { _ptr -= _elem_size; return *this; }
+        iterator  operator--(int) noexcept { auto t = *this; _ptr -= _elem_size; return t; }
         iterator& operator+=(difference_type n) noexcept {
-            _ptr += n * static_cast<difference_type>(_stride); return *this;
+            _ptr += n * static_cast<difference_type>(_elem_size); return *this;
         }
         iterator& operator-=(difference_type n) noexcept {
-            _ptr -= n * static_cast<difference_type>(_stride); return *this;
+            _ptr -= n * static_cast<difference_type>(_elem_size); return *this;
         }
         iterator operator+(difference_type n) const noexcept {
-            return {_ptr + n * static_cast<difference_type>(_stride), _stride};
+            return {_ptr + n * static_cast<difference_type>(_elem_size)};
         }
         iterator operator-(difference_type n) const noexcept {
-            return {_ptr - n * static_cast<difference_type>(_stride), _stride};
+            return {_ptr - n * static_cast<difference_type>(_elem_size)};
         }
         difference_type operator-(const iterator& o) const noexcept {
-            return (_ptr - o._ptr) / static_cast<difference_type>(_stride);
+            auto diff = _ptr - o._ptr;
+            return diff == 0 ? 0 : diff / static_cast<difference_type>(_elem_size);
         }
         friend iterator operator+(difference_type n, const iterator& it) noexcept {
             return it + n;
@@ -218,6 +224,16 @@ public:
         for (size_t i = 0; i < n; i++) _init_row(i, v.data());
     }
 
+    // Specialization for det_vector::iterator: rows are already guaranteed to be
+    // the right width so a single memcpy of the flat backing store suffices.
+    det_vector(iterator first, iterator last) {
+        if (first == last) return;
+        size_t n = static_cast<size_t>(last - first);
+        _data.resize(n * _elem_size);
+        _size = n;
+        std::memcpy(_data.data(), first._ptr, n * _elem_size * sizeof(ElemT));
+    }
+
     template<typename InputIt>
     det_vector(InputIt first, InputIt last) {
         if (first == last) return;
@@ -226,8 +242,11 @@ public:
         _data.resize(n * stride());
         _size = n;
         size_t i = 0;
-        for (auto it = first; it != last; ++it, ++i)
+        for (auto it = first; it != last; ++it, ++i) {
+            if (it->size() != _elem_size)
+                throw std::length_error("det_vector: row size mismatch in range constructor");
             std::copy(it->begin(), it->end(), _data.data() + i * stride());
+        }
     }
 
     det_vector(const det_vector&) = default;
@@ -273,18 +292,18 @@ public:
     // --- iterators ---
 
     iterator begin() noexcept {
-        return iterator{_data.data(), stride()};
+        return iterator{_data.data()};
     }
     iterator end() noexcept {
-        return iterator{_data.data() + _size * stride(), stride()};
+        return iterator{_data.data() + _size * stride()};
     }
     // const begin/end return the same iterator type; row& from a const det_vector
     // is the pragmatic research-code tradeoff (no separate const_iterator).
     iterator begin() const {
-        return iterator{const_cast<ElemT*>(_data.data()), stride()};
+        return iterator{const_cast<ElemT*>(_data.data())};
     }
     iterator end() const {
-        return iterator{const_cast<ElemT*>(_data.data()) + _size * stride(), stride()};
+        return iterator{const_cast<ElemT*>(_data.data()) + _size * stride()};
     }
 
     // --- modifiers ---
@@ -300,9 +319,10 @@ public:
     }
 
     // Resize to n rows. _data.size() is always exactly n * _elem_size.
-    // New rows (if any) are left uninitialised. Requires _elem_size already set.
+    // New rows (if any) are left uninitialised. Requires _elem_size already set when n > 0.
     void resize(size_t n) {
-        assert(_elem_size != 0);
+        if (n > 0 && _elem_size == 0)
+            throw std::length_error("det_vector: elem_size not set");
         _data.resize(n * stride());
         _size = n;
     }
@@ -326,6 +346,30 @@ public:
         _size = m;
         _data.resize(m * stride());
         for (size_t i = 0; i < m; i++) _init_row(i, v.data());
+    }
+
+    // Specialization for det_vector::iterator: single memcpy, no per-row check needed.
+    void assign(iterator first, iterator last) {
+        size_t n = static_cast<size_t>(last - first);
+        _data.resize(n * _elem_size);
+        _size = n;
+        if (n > 0) std::memcpy(_data.data(), first._ptr, n * _elem_size * sizeof(ElemT));
+    }
+
+    // Replace contents from [first, last). Sets _elem_size from first row, checks all rows.
+    template<typename InputIt>
+    void assign(InputIt first, InputIt last) {
+        if (first == last) { _data.clear(); _size = 0; return; }
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        _set_elem_size(first->size());
+        _data.resize(n * stride());
+        _size = n;
+        size_t i = 0;
+        for (auto it = first; it != last; ++it, ++i) {
+            if (it->size() != _elem_size)
+                throw std::length_error("det_vector: row size mismatch in assign");
+            std::copy(it->begin(), it->end(), _data.data() + i * stride());
+        }
     }
 
     void push_back(const std::vector<ElemT>& v) {
@@ -377,7 +421,7 @@ public:
             const auto& src = *it;
             std::copy(src.begin(), src.end(), dst);
         }
-        return iterator{base + pos_idx * stride(), stride()};
+        return iterator{base + pos_idx * stride()};
     }
 
     iterator erase(iterator first, iterator last) {
@@ -391,7 +435,7 @@ public:
                          tail * stride() * sizeof(ElemT));
         _size -= n;
         _data.resize(_size * stride());
-        return iterator{_data.data() + pos * stride(), stride()};
+        return iterator{_data.data() + pos * stride()};
     }
 
     iterator erase(iterator pos) { return erase(pos, pos + 1); }
@@ -521,10 +565,11 @@ private:
 
     inline static size_t _elem_size = 0;
 
-    // Set _elem_size to n. No-op if already n; asserts it was 0 otherwise.
+    // Set _elem_size to n. No-op if already n; throws if non-zero and different.
     static void _set_elem_size(size_t n) {
         if (_elem_size == n) return;
-        assert(_elem_size == 0);
+        if (_elem_size != 0)
+            throw std::length_error("det_vector: elem_size mismatch");
         _elem_size = n;
     }
 
