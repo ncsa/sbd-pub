@@ -46,6 +46,25 @@ static_assert(SBD_TPB_MIN_BLOCKS_PER_SM >= 1 &&
               SBD_TPB_MIN_BLOCKS_PER_SM <= 32,
               "SBD_TPB_MIN_BLOCKS_PER_SM must be in [1, 32]");
 
+// Beta-fast loop ordering for MultSingleAlpha and MultDoubleAlpha (default since
+// 2026-08-20, track-ag Phase 2; validated −4.5% Davidson on GH200 at h2o 1em5 r=4).
+//
+// j = i / braBetaCount  [alpha excitation outer, SLOW]
+// k = i mod braBetaCount [beta det index inner, FAST]
+//
+// Adjacent threads share the same alpha excitation pair (ia, ja) and have
+// consecutive beta indices (ib, ib+1, …) → braIdx = ia*braBetaSize + k increments
+// by 1 across the warp → fully coalesced writes to Wb, sequential det_I reads
+// (same ia row, walking ib), coalesced T reads (same ja row, walking jb=ib).
+// Index arrays (SinglesFromAlphaBraIndex[j] etc.) use j only → broadcast from L1.
+//
+// atomicAdd is retained: two different j values may produce the same ia
+// (multiple ket alpha-dets connecting to the same bra alpha-det), causing
+// cross-block braIdx collisions. Intra-block collisions are impossible.
+//
+// Original non-default ordering (k outer, j inner) was non-coalesced with stride
+// ~braBetaSize between adjacent threads. Replaced unconditionally.
+
 namespace sbd
 {
 
@@ -622,8 +641,11 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-        size_t k = i / helper.size_single_alpha;
-        size_t j = i - k * helper.size_single_alpha;
+        // Beta-fast: j (alpha excitation) outer, k (beta det) inner.
+        // Adjacent threads → consecutive braIdx → coalesced Wb writes and det_I reads.
+        size_t braBetaCount = helper.braBetaEnd - helper.braBetaStart;
+        size_t j = i / braBetaCount;
+        size_t k = i - j * braBetaCount;
 
         size_t ia = helper.SinglesFromAlphaBraIndex[j];
         size_t ja = helper.SinglesFromAlphaKetIndex[j];
@@ -665,8 +687,10 @@ public:
     // kernel entry point
     __device__ __host__ void operator()(size_t i)
     {
-        size_t k = i / helper.size_double_alpha;
-        size_t j = i - k * helper.size_double_alpha;
+        // Beta-fast: j (alpha excitation pair) outer, k (beta det) inner.
+        size_t braBetaCount = helper.braBetaEnd - helper.braBetaStart;
+        size_t j = i / braBetaCount;
+        size_t k = i - j * braBetaCount;
 
         size_t ia = helper.DoublesFromAlphaBraIndex[j];
         size_t ja = helper.DoublesFromAlphaKetIndex[j];
