@@ -19,8 +19,91 @@
 // per thread DetI, DetJ storage size (1GB max)
 #define MAX_DET_SIZE 134217728
 
+// TPB GPU kernel tuning (mirrors GDB's SBD_MULT_BLOCK_SIZE / SBD_MULT_MIN_BLOCKS_PER_SM).
+// SBD_TPB_BLOCK_SIZE: threads per block for tpb_for_each_n_kernel.
+// SBD_TPB_MIN_BLOCKS_PER_SM: minBlocksPerMultiprocessor hint to __launch_bounds__ —
+//   controls the register budget.
+//   threads/SM = SBD_TPB_BLOCK_SIZE × SBD_TPB_MIN_BLOCKS_PER_SM
+//   regs/thread ≈ 65536 / threads/SM (H100: 65536 regs/SM, 2048 threads/SM max)
+// Feasible combinations on H100 (BS × MBPSM ≤ 2048):
+//   BS=64, mbpsm=32 → 2048 t/SM (100% occ); 32 regs/thread  ← default
+//   BS=64, mbpsm=24 → 1536 t/SM (75% occ);  42 regs/thread
+//   BS=128, mbpsm=16 → 2048 t/SM (100% occ); 32 regs/thread
+// Sweep lbsweep3 (2026-09-17) found no occupancy breakpoint across all feasible
+// cells — performance is flat, kernel is not register-limited.
+#ifndef SBD_TPB_BLOCK_SIZE
+  #define SBD_TPB_BLOCK_SIZE 64
+#endif
+static_assert(SBD_TPB_BLOCK_SIZE == 32 ||
+              SBD_TPB_BLOCK_SIZE == 64 ||
+              SBD_TPB_BLOCK_SIZE == 128,
+              "SBD_TPB_BLOCK_SIZE must be 32, 64, or 128");
+
+#ifndef SBD_TPB_MIN_BLOCKS_PER_SM
+  #define SBD_TPB_MIN_BLOCKS_PER_SM 32
+#endif
+static_assert(SBD_TPB_MIN_BLOCKS_PER_SM >= 1 &&
+              SBD_TPB_MIN_BLOCKS_PER_SM <= 32,
+              "SBD_TPB_MIN_BLOCKS_PER_SM must be in [1, 32]");
+
 namespace sbd
 {
+
+// Custom blocksize-tunable launcher for TPB Mult kernels. Replaces
+// thrust::for_each_n at run()-level call sites so that:
+//   (a) __launch_bounds__ is applied to the __global__ entry point (the only
+//       place the compiler honours it; on __device__ __host__ operator() it is
+//       silently ignored by nvc++), and
+//   (b) grid dimensions are computed in size_t, avoiding the 32-bit Thrust
+//       overflow that causes cudaErrorInvalidConfiguration at ~10^9 det-pairs.
+// Mirrors sbd::gdb::mult_for_each_n_kernel / launch_mult_for_each_n in
+// include/sbd/chemistry/gdb/mult_thrust.h.
+// BlockSize and MinBlocksPerSM are read from Functor::BlockSize /
+// Functor::MinBlocksPerSM (static constexpr int members on MultKernelBase).
+//
+// rank / size_h / chunk: used only when SBD_USE_RANK_DISTRIBUTION is defined.
+//   rank  — MPI rank index within the h communicator
+//   size_h — total ranks in the h communicator
+//   chunk  — per-rank work count (= n passed to launch_tpb_for_each_n)
+//   offset — base index for this chunk (host iterates over chunks when n > INT_MAX*BS)
+template <typename Functor>
+__global__ __launch_bounds__(Functor::BlockSize, Functor::MinBlocksPerSM)
+void tpb_for_each_n_kernel(size_t n, Functor functor,
+    size_t rank, size_t size_h, size_t chunk, size_t offset)
+{
+    const size_t i = static_cast<size_t>(blockIdx.x) * Functor::BlockSize + threadIdx.x + offset;
+    if (i >= n) return;
+#ifdef SBD_USE_RANK_DISTRIBUTION
+#  ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
+    // Contiguous block distribution
+    functor(i + chunk * rank);
+#  else
+    // Cyclic (strided) distribution
+    functor(rank + size_h * i);
+#  endif
+#else
+    functor(i);
+#endif
+}
+
+template <typename Functor>
+inline void launch_tpb_for_each_n(size_t n, Functor functor,
+    size_t rank = 0, size_t size_h = 1, size_t chunk = 0,
+    cudaStream_t stream = 0)
+{
+    if (n == 0) return;
+    constexpr size_t BS = Functor::BlockSize;
+    // When n > INT_MAX*BS, split into sequential per-chunk kernel calls so each
+    // launch fits within CUDA's 2^31-1 grid-x limit while keeping fully
+    // sequential (non-strided) memory access within each chunk.
+    constexpr size_t MAX_GRID = (size_t)INT_MAX;
+    for (size_t offset = 0; offset < n; offset += MAX_GRID * BS) {
+        const size_t this_n = std::min(n - offset, MAX_GRID * BS);
+        const size_t grid = (this_n + BS - 1) / BS;
+        tpb_for_each_n_kernel<Functor><<<grid, BS, 0, stream>>>(n, functor, rank, size_h, chunk, offset);
+    }
+    cudaStreamSynchronize(stream);
+}
 
 template <typename ElemT>
 class MultTPBThrust : public MultBase<ElemT> {
@@ -288,6 +371,10 @@ protected:
     size_t* bdets;
     size_t* det_I;
 public:
+    // Read by tpb_for_each_n_kernel's __launch_bounds__ and grid calculation.
+    static constexpr int BlockSize = SBD_TPB_BLOCK_SIZE;
+    static constexpr int MinBlocksPerSM = SBD_TPB_MIN_BLOCKS_PER_SM;
+
     MultKernelBase() {}
 
     MultKernelBase( const thrust::device_vector<ElemT>& v_wb,
@@ -372,8 +459,7 @@ void MultTPBThrust<ElemT>::UpdateDet(size_t task)
         ket_bdets_end = helper[task].ketBetaEnd;
 
         DetFromAlphaBetaKernel det_kernel(helper[task], *this, update_I);
-        auto det_ci = thrust::counting_iterator<size_t>(0);
-        thrust::for_each_n(thrust::device, det_ci, adets_size * bdets_size, det_kernel);
+        launch_tpb_for_each_n(adets_size * bdets_size, det_kernel);
     }
 }
 
@@ -1307,7 +1393,6 @@ void MultTPBThrust<ElemT>::run(
 #ifndef SBD_USE_RANK_DISTRIBUTION
                 MultSingleAlpha single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cis = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
@@ -1320,21 +1405,11 @@ void MultTPBThrust<ElemT>::run(
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #endif
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cis = thrust::make_transform_iterator(
-                    thrust::counting_iterator<size_t>(0),
-                    [=] __host__ __device__ (size_t t) {
-#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-                        // Contiguous block distribution
-                        return t + (size * mpi_rank_h);
-#else
-                        // Cyclic (strided) distribution
-                        return mpi_rank_h + (mpi_size_h * t);
-#endif
-                    });
 #endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
-                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                    SBD_NVTX_RANGE_COLOR("mult_kernel", __LINE__);
+                    launch_tpb_for_each_n(size, single_kernel,
+                        (size_t)mpi_rank_h, (size_t)mpi_size_h, size);
                 }
 
                 // DoubleAlpha
@@ -1342,7 +1417,6 @@ void MultTPBThrust<ElemT>::run(
 #ifndef SBD_USE_RANK_DISTRIBUTION
                 MultDoubleAlpha double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cid = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
@@ -1355,21 +1429,11 @@ void MultTPBThrust<ElemT>::run(
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #endif
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cid = thrust::make_transform_iterator(
-                    thrust::counting_iterator<size_t>(0),
-                    [=] __host__ __device__ (size_t t) {
-#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-                        // Contiguous block distribution
-                        return t + (size * mpi_rank_h);
-#else
-                        // Cyclic (strided) distribution
-                        return mpi_rank_h + (mpi_size_h * t);
-#endif
-                    });
 #endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
-                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                    SBD_NVTX_RANGE_COLOR("mult_kernel", __LINE__);
+                    launch_tpb_for_each_n(size, double_kernel,
+                        (size_t)mpi_rank_h, (size_t)mpi_size_h, size);
                 }
             } else if(helper[task].taskType == 1) {
                 // SingleBeta
@@ -1377,7 +1441,6 @@ void MultTPBThrust<ElemT>::run(
 #ifndef SBD_USE_RANK_DISTRIBUTION
                 MultSingleBeta single_kernel(helper[task], Wb, T[active_T], *this);
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cis = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
@@ -1390,21 +1453,11 @@ void MultTPBThrust<ElemT>::run(
                     single_kernel(helper[task], Wb, T[active_T], *this);
 #endif
                 single_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cis = thrust::make_transform_iterator(
-                    thrust::counting_iterator<size_t>(0),
-                    [=] __host__ __device__ (size_t t) {
-#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-                        // Contiguous block distribution
-                        return t + (size * mpi_rank_h);
-#else
-                        // Cyclic (strided) distribution
-                        return mpi_rank_h + (mpi_size_h * t);
-#endif
-                    });
 #endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
-                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, cis, size, single_kernel);
+                    SBD_NVTX_RANGE_COLOR("mult_kernel", __LINE__);
+                    launch_tpb_for_each_n(size, single_kernel,
+                        (size_t)mpi_rank_h, (size_t)mpi_size_h, size);
                 }
 
                 // DoubleBeta
@@ -1412,7 +1465,6 @@ void MultTPBThrust<ElemT>::run(
 #ifndef SBD_USE_RANK_DISTRIBUTION
                 MultDoubleBeta double_kernel(helper[task], Wb, T[active_T], *this);
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cid = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
@@ -1425,21 +1477,11 @@ void MultTPBThrust<ElemT>::run(
                     double_kernel(helper[task], Wb, T[active_T], *this);
 #endif
                 double_kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto cid = thrust::make_transform_iterator(
-                    thrust::counting_iterator<size_t>(0),
-                    [=] __host__ __device__ (size_t t) {
-#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-                        // Contiguous block distribution
-                        return t + (size * mpi_rank_h);
-#else
-                        // Cyclic (strided) distribution
-                        return mpi_rank_h + (mpi_size_h * t);
-#endif
-                    });
 #endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
-                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, cid, size, double_kernel);
+                    SBD_NVTX_RANGE_COLOR("mult_kernel", __LINE__);
+                    launch_tpb_for_each_n(size, double_kernel,
+                        (size_t)mpi_rank_h, (size_t)mpi_size_h, size);
                 }
             } else {
                 //
@@ -1447,7 +1489,6 @@ void MultTPBThrust<ElemT>::run(
 #ifndef SBD_USE_RANK_DISTRIBUTION
                 MultAlphaBeta kernel(helper[task], Wb, T[active_T], *this);
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto ci = thrust::counting_iterator<size_t>(0);
 #else // #ifndef SBD_USE_RANK_DISTRIBUTION
                 size = (size + mpi_size_h - 1) / mpi_size_h;
 #ifndef SBD_USE_VECTORIZATION
@@ -1458,21 +1499,11 @@ void MultTPBThrust<ElemT>::run(
                 MultAlphaBeta_Vec<ElemT, VecLen> kernel(helper[task], Wb, T[active_T], *this);
 #endif
                 kernel.set_mpi_size(mpi_rank_h, mpi_size_h);
-                auto ci = thrust::make_transform_iterator(
-                    thrust::counting_iterator<size_t>(0),
-                    [=] __host__ __device__ (size_t t) {
-#ifdef SBD_USE_BLOCK_RANK_DISTRIBUTION
-                        // Contiguous block distribution
-                        return t + (size * mpi_rank_h);
-#else
-                        // Cyclic (strided) distribution
-                        return mpi_rank_h + (mpi_size_h * t);
-#endif
-                    });
 #endif // #ifndef SBD_USE_RANK_DISTRIBUTION
                 {
-                    SBD_NVTX_RANGE_COLOR("thrust::for_each_n", __LINE__);
-                    thrust::for_each_n(thrust::device, ci, size, kernel);
+                    SBD_NVTX_RANGE_COLOR("mult_kernel", __LINE__);
+                    launch_tpb_for_each_n(size, kernel,
+                        (size_t)mpi_rank_h, (size_t)mpi_size_h, size);
                 }
             }
         } else {
