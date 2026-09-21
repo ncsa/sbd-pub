@@ -50,6 +50,7 @@ namespace sbd {
 	  bool use_precalculated_dets = true;
 	  int max_memory_gb_for_determinants = -1;
 	  bool thrust_collapse_loops = true;
+	  bool cpu_subspace = false;
 #endif
 	};
 
@@ -126,6 +127,10 @@ namespace sbd {
 	}
 	if( std::string(argv[i]) == "--thrust_collapse_loops" ) {
 	  sbd_data.thrust_collapse_loops = std::atoi(argv[i+1]) == 1;
+	  i++;
+	}
+	if( std::string(argv[i]) == "--cpu_subspace" ) {
+	  sbd_data.cpu_subspace = std::atoi(argv[i+1]) == 1;
 	  i++;
 	}
 #endif
@@ -443,8 +448,12 @@ namespace sbd {
 #ifdef SBD_THRUST
 	if( method == 0 ) {
             SBD_NVTX_RANGE_COLOR("Davidson", __LINE__);
-            sbd::Davidson(hii, W, device_mult,
-                          max_it,max_nb,eps,max_time);
+            if (sbd_data.cpu_subspace)
+                sbd::DavidsonCPUSubspace(hii, W, device_mult,
+                                         max_it,max_nb,eps,max_time);
+            else
+                sbd::Davidson(hii, W, device_mult,
+                              max_it,max_nb,eps,max_time);
 	} else {
             SBD_NVTX_RANGE_COLOR("Lanczos", __LINE__);
             sbd::Lanczos(hii, W, device_mult,
