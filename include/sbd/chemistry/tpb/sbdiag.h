@@ -12,6 +12,7 @@
 #endif
 
 #include "sbd/framework/nvtx.h"
+#include <omp.h>
 
 #ifdef USE_OMP_OFFLOAD
 #include "../basic/omp_offload.h"
@@ -50,7 +51,7 @@ namespace sbd {
 	  bool use_precalculated_dets = true;
 	  int max_memory_gb_for_determinants = -1;
 	  bool thrust_collapse_loops = true;
-	  bool cpu_subspace = false;
+	  bool cpu_subspace = true;
 #endif
 	};
 
@@ -170,6 +171,16 @@ namespace sbd {
       int mpi_master = 0;
       int mpi_rank; MPI_Comm_rank(comm,&mpi_rank);
       int mpi_size; MPI_Comm_size(comm,&mpi_size);
+
+#ifdef SBD_THRUST
+      if (sbd_data.cpu_subspace && omp_get_max_threads() == 1) {
+          if (mpi_rank == mpi_master)
+              std::cerr << "Error: cpu_subspace requires OpenMP threads > 1, "
+                           "but omp_get_max_threads() == 1. Set OMP_NUM_THREADS.\n";
+          MPI_Abort(comm, 1);
+      }
+#endif
+
       int task_comm_size = sbd_data.task_comm_size;
       int adet_comm_size = sbd_data.adet_comm_size;
       int bdet_comm_size = sbd_data.bdet_comm_size;
