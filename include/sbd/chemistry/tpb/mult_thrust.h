@@ -157,6 +157,18 @@ public:
     int max_memory_gb_for_determinants;
     size_t adet_comm_size;
     size_t bdet_comm_size;
+    // Persistent slide buffers: sized once per first run() call via MPI_Allreduce(MAX),
+    // then reused across Davidson iterations so ExchangeAsync never calls cudaMalloc
+    // inside the multiplication loop (mirrors GDB's twk[] pre-allocation pattern).
+    // slide_buf_ready guards the collective pre-allocation (fires exactly once, collectively).
+    // ExchangeAsync calls B.resize(recv_size) to set the logical size for downstream kernels;
+    // with a pre-allocated buffer this is a cudaMalloc no-op (capacity >= global_max >= recv_size)
+    // but it does shrink size() to recv_size.  Using size() < Wk.size() as the guard was
+    // therefore not collectively safe: asymmetric recv_sizes caused the allreduce to fire on
+    // different ranks in different Davidson iterations, producing an MPI type mismatch.
+    bool slide_buf_ready = false;
+    thrust::device_vector<ElemT> slide_buf[2];
+    Mpi2dSlider<ElemT> slide_mpi2d;
 
     MultTPBThrust() {}
 
@@ -1317,11 +1329,22 @@ void MultTPBThrust<ElemT>::run(
     get_mpi_range(bdet_comm_size,0,bdet_min,bdet_max);
     size_t max_det_size = (adet_max-adet_min)*(bdet_max-bdet_min);
 
-    thrust::device_vector<ElemT> T[2];
+    auto& T = slide_buf;
     int active_T = 0;
     int recv_T = 1;
     size_t task_sent = 0;
-    Mpi2dSlider<ElemT> mpi2dslider;
+    // Pre-allocate both slide buffers to global max on first use so every subsequent
+    // B.resize(recv_size) inside ExchangeAsync is a cudaMalloc no-op (capacity already
+    // >= recv_size).  recv_size == Wk.size() for the uniform dense W case, but
+    // MPI_Allreduce guards against any asymmetry.
+    if (mpi_size_b > 1 && helper.size() != 0 && !slide_buf_ready) {
+        size_t local_T_size = Wk.size();
+        size_t global_max_T_size;
+        MPI_Allreduce(&local_T_size, &global_max_T_size, 1, SBD_MPI_SIZE_T, MPI_MAX, this->b_comm_);
+        T[0].resize(global_max_T_size);
+        T[1].resize(global_max_T_size);
+        slide_buf_ready = true;
+    }
 
     auto time_copy_start = std::chrono::high_resolution_clock::now();
     if (helper.size() != 0) {
@@ -1366,7 +1389,7 @@ void MultTPBThrust<ElemT>::run(
         if (task_sent == task) {
             if (task_sent != 0) {
                 auto time_slid_start = std::chrono::high_resolution_clock::now();
-                if (mpi2dslider.Sync(this->b_comm_)) {
+                if (slide_mpi2d.Sync(this->b_comm_)) {
                     int t = active_T;
                     active_T = recv_T;
                     recv_T = t;
@@ -1395,7 +1418,7 @@ void MultTPBThrust<ElemT>::run(
 #endif
                     int adetslide = helper[extask].adetShift - helper[extask + 1].adetShift;
                     int bdetslide = helper[extask].bdetShift - helper[extask + 1].bdetShift;
-                    mpi2dslider.ExchangeAsync(T[active_T], T[recv_T], adet_comm_size, bdet_comm_size, adetslide, bdetslide, this->b_comm_, extask);
+                    slide_mpi2d.ExchangeAsync(T[active_T], T[recv_T], adet_comm_size, bdet_comm_size, adetslide, bdetslide, this->b_comm_, extask);
                     task_sent = extask + 1;
                     break;
                 }
