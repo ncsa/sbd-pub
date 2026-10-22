@@ -533,6 +533,7 @@ struct CrossTables {
     std::vector<thrust::device_vector<int>> bucket_ids;
     std::vector<size_t> bucket_smem;
     double flops = 0.0;
+    size_t total_chunks = 0;
 };
 
 inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
@@ -635,6 +636,7 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
     }
     for (size_t a = 0; a < na; a++) ksum += Kp[a];
     x.flops = 2.0 * 64 * 64 * static_cast<double>(cbase[x.nbt]) * ksum;
+    x.total_chunks = cbase[x.nbt];
 }
 
 } // namespace factored
@@ -706,6 +708,10 @@ public:
         factored::BuildSpinTiles(ta_, sa_, I0);
         factored::BuildSpinTiles(tb_, sb_, 0.0);
         factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
+        std::printf(" factored_mult: %zu alpha x %zu beta strings; same-spin entries %lld / %lld; "
+                    "cross term %.1f rs rows per 64-wide beta tile, %.3e flop per multiplication\n",
+                    na_, nb_, static_cast<long long>(sa_.hptr[na_]), static_cast<long long>(sb_.hptr[nb_]),
+                    64.0 * cross_.total_chunks / cross_.nbt, cross_.flops);
 
         std::vector<unsigned long long> xa(sa_.x.begin(), sa_.x.end()), xb(sb_.x.begin(), sb_.x.end());
         xa_ = xa;
