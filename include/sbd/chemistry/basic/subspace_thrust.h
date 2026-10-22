@@ -76,11 +76,23 @@ struct HostSubspace {
             MPI_Abort(comm, 1);
         }
     }
-    // zero-filled like resize, but by all threads (parallel first touch)
+    // Zero-filled like resize, but by all threads (parallel first touch). Where the GPU can access
+    // pageable memory (GH200), the pages are also told to stay in CPU memory: otherwise each GPU
+    // access (the staging copies) migrates them toward the GPU and the next OpenMP pass runs over
+    // NVLink-C2C. Measured on 8 GB vectors, cold and alternating CPU and GPU access: staging copy in
+    // 1.25 -> 0.089 s, out 0.39 -> 0.061 s, an OpenMP axpy after it 0.253 -> 0.064 s.
     template <typename T> static void allocate(vector<T>& v, size_t n)
     {
         v.resize(n);
         T* p = v.data();
+        int dev = 0, pageable = 0;
+        if (n > 0 && cudaGetDevice(&dev) == cudaSuccess &&
+            cudaDeviceGetAttribute(&pageable, cudaDevAttrPageableMemoryAccess, dev) == cudaSuccess &&
+            pageable) {
+            if (cudaMemAdvise(p, n * sizeof(T), cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId) != cudaSuccess ||
+                cudaMemAdvise(p, n * sizeof(T), cudaMemAdviseSetAccessedBy, dev) != cudaSuccess)
+                (void)cudaGetLastError();  // advice is only a hint
+        }
 #pragma omp parallel for schedule(static)
         for (size_t i = 0; i < n; i++) p[i] = T(0);
     }
@@ -137,17 +149,18 @@ public:
         run(C, HC);
     }
     void add(Vector& C, Vector& HC) {
-        thrust::copy(HC.begin(), HC.end(), HC_dev_.begin());
+        cudaMemcpy(raw_ptr(HC_dev_), HC.data(), HC.size() * sizeof(ElemT), cudaMemcpyDefault);
         run(C, HC);
     }
 private:
     void run(Vector& C, Vector& HC) {
-        thrust::copy(C.begin(), C.end(), C_dev_.begin());
+        // cudaMemcpy, not thrust::copy: thrust's host <-> device path ran at ~31 GB/s on 8 GB vectors
+        cudaMemcpy(raw_ptr(C_dev_), C.data(), C.size() * sizeof(ElemT), cudaMemcpyDefault);
         {
             SBD_NVTX_RANGE_COLOR("mult.run", __LINE__);
             mult_.run(hii_, C_dev_, HC_dev_);
         }
-        thrust::copy(HC_dev_.begin(), HC_dev_.end(), HC.begin());
+        cudaMemcpy(HC.data(), raw_ptr(HC_dev_), HC.size() * sizeof(ElemT), cudaMemcpyDefault);
     }
 };
 
