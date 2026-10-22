@@ -27,7 +27,8 @@ electrons below i) on the way in and on the way out; the vectors outside stay in
 Inside, the strings of each spin are ordered by their bit-reversed value, which keeps the beta
 tiles of the cross term compact; the same passes apply that permutation.
 
-Limits of this version: one MPI rank, real coefficients, at most 64 orbitals.
+Limits of this version: the alpha strings split over the ranks (bdet_comm_size, task_comm_size
+and h_comm of size 1), real coefficients, at most 64 orbitals.
 */
 #ifndef SBD_CHEMISTRY_TPB_MULT_FACTORED_THRUST_H
 #define SBD_CHEMISTRY_TPB_MULT_FACTORED_THRUST_H
@@ -100,7 +101,7 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
             const int* __restrict__ krow, const int* __restrict__ aidx,
             const long long* __restrict__ goff, const unsigned* __restrict__ gent,
             const int* __restrict__ cbase, const int* __restrict__ rlist, long long nb,
-            double* sigma)
+            long long a0, double* sigma)  // sigma holds this rank's bras a0.. (rows a - a0)
 {
     extern __shared__ double sm[];
     const int bt = blockIdx.x;
@@ -134,7 +135,7 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
     }
     if (nch > 0) fm_load_v_tile(ring, Vs, rl_s, vr_s, K, 0, m, kh);
 
-    double* srow = sigma + a * nb;
+    double* srow = sigma + (a - a0) * nb;
     for (int c = 0; c < nch; c++) {
         double acc[4][4][2];
 #pragma unroll
@@ -206,9 +207,11 @@ __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, lon
 
 /**
    Same-spin products with a sparse, symmetric string Hamiltonian stored as nonzero TR x 64 tiles of
-   (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb.
-     mode 0: sigma[I rows, chunk] = H_a[I rows, :] C[:, chunk]       (writes sigma; I over alpha)
-     mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta)
+   (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb; sigma holds
+   only the alpha rows [rlo, rhi) of this rank (row a at a - rlo).
+     mode 0: sigma[I rows, chunk] = H_a[I rows, :] C[:, chunk]       (writes sigma; I over alpha,
+             blockIdx.x + Ibase, rows outside [rlo, rhi) dropped)
+     mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta, chunks of [rlo, rhi))
    One block per (tile row I, 64-wide chunk); blockIdx.x = I runs fastest, so the blocks in flight
    share one slice of C, which stays in L2. Each nonzero tile's 64 x 64 slice of C arrives in a
    two-stage cp.async ring; thread (row, half) owns one output row and 32 output columns in
@@ -218,15 +221,15 @@ static __global__ void __launch_bounds__(2 * SBD_FM_TR, 2)  // 2 blocks per SM: 
 spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
                const int* __restrict__ tj, const int* __restrict__ rp,
                const unsigned char* __restrict__ ec, const double* __restrict__ ev,
-               long long na, long long nb, int mode)
+               long long na, long long nb, long long rlo, long long rhi, int Ibase, int mode)
 {
     extern __shared__ double smem[];  // two stages of 64 x LDC doubles
-    const int I = blockIdx.x, ch = blockIdx.y;
+    const int I = blockIdx.x + Ibase, ch = blockIdx.y;
     const int tid = threadIdx.x;
     const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
     const long long nrow = mode == 0 ? na : nb;   // rows and columns of this H
-    const long long nchk = mode == 0 ? nb : na;   // extent of the chunked index
-    const long long y0 = (long long)ch * 64;
+    const long long nchk = mode == 0 ? nb : rhi;  // end of the chunked index
+    const long long y0 = (mode == 0 ? 0 : rlo) + (long long)ch * 64;
     const int t0 = trp[I], t1 = trp[I + 1];
     double acc[32];
 #pragma unroll
@@ -258,44 +261,63 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
         __syncthreads();  // stage st free for the load two tiles ahead
     }
     const long long R = (long long)I * SBD_FM_TR + row;
-    if (R >= nrow) return;
+    if (R >= nrow || (mode == 0 && (R < rlo || R >= rhi))) return;
 #pragma unroll
     for (int k = 0; k < 32; k++) {
         const long long y = y0 + half * 32 + k;
         if (y < nchk) {
-            if (mode == 0) sigma[R * nb + y] = acc[k];
-            else sigma[y * nb + R] += acc[k];
+            if (mode == 0) sigma[(R - rlo) * nb + y] = acc[k];
+            else sigma[(y - rlo) * nb + R] += acc[k];
         }
     }
 }
 
 // Between sbd's layout and the engine's: the engine orders the strings of each spin by their
-// bit-reversed value (see Init) and its determinants alpha string then beta string, so element
-// (a', b') of an engine vector is P(a, b) times element (pa[a'], pb[b']) of an sbd vector, with
-// P(a, b) = (-1)^(sum over i in a of the beta electrons below i) from sbd's interleaved spins.
-//   scatter == 0: out[a', b'] = P in[pa[a'], pb[b']]   (sbd -> engine)
-//   scatter == 1: out[pa[a'], pb[b']] = P in[a', b']   (engine -> sbd)
-static __global__ void phase_permute(const unsigned long long* __restrict__ xa,
-                                     const unsigned long long* __restrict__ xb,
-                                     const int* __restrict__ pa, const int* __restrict__ pb,
-                                     long long na, long long nb, const double* __restrict__ in,
-                                     double* __restrict__ out, int scatter)
+// bit-reversed value (alpha within each rank's block, see Init) and its determinants alpha string
+// then beta string, so element (a', b') of an engine vector is P(a, b) times element (pa[a'], pb[b'])
+// of an sbd vector, with P(a, b) = (-1)^(sum over i in a of the beta electrons below i) from sbd's
+// interleaved spins.
+__device__ __forceinline__ int fm_phase(unsigned long long A, unsigned long long B)
+{
+    int s = 0;
+    while (A) {
+        const int o = __ffsll((long long)A) - 1;
+        A &= A - 1;
+        s += __popcll(B & ((1ull << o) - 1));
+    }
+    return s & 1;
+}
+
+// T[a', b'] = P Cg[gofs[a'], pb[b']] for all engine rows; Cg is the gathered sbd vector, its row for
+// engine row a' at gofs[a'] (rank blocks padded to the same length)
+static __global__ void gather_phase(const unsigned long long* __restrict__ xa,
+                                    const unsigned long long* __restrict__ xb,
+                                    const long long* __restrict__ gofs, const int* __restrict__ pb,
+                                    long long na, long long nb, const double* __restrict__ Cg,
+                                    double* __restrict__ T)
 {
     const long long n = na * nb;
     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
          i += (long long)gridDim.x * blockDim.x) {
         const long long a = i / nb, b = i - a * nb;
-        unsigned long long A = xa[a];
-        const unsigned long long B = xb[b];
-        int s = 0;
-        while (A) {
-            const int o = __ffsll((long long)A) - 1;
-            A &= A - 1;
-            s += __popcll(B & ((1ull << o) - 1));
-        }
-        const long long e = (long long)pa[a] * nb + pb[b];
-        if (scatter) out[e] = (s & 1) ? -in[i] : in[i];
-        else out[i] = (s & 1) ? -in[e] : in[e];
+        const double v = Cg[gofs[a] * nb + pb[b]];
+        T[i] = fm_phase(xa[a], xb[b]) ? -v : v;
+    }
+}
+
+// W[pa[a'] - a0, pb[b']] = P S[a' - a0, b'] for this rank's engine rows a0 <= a' < a1
+static __global__ void scatter_phase(const unsigned long long* __restrict__ xa,
+                                     const unsigned long long* __restrict__ xb,
+                                     const int* __restrict__ pa, const int* __restrict__ pb,
+                                     long long a0, long long a1, long long nb,
+                                     const double* __restrict__ S, double* __restrict__ W)
+{
+    const long long n = (a1 - a0) * nb;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += (long long)gridDim.x * blockDim.x) {
+        const long long r = i / nb, b = i - r * nb, a = a0 + r;
+        const double v = S[i];
+        W[(pa[a] - a0) * nb + pb[b]] = fm_phase(xa[a], xb[b]) ? -v : v;
     }
 }
 
@@ -546,8 +568,9 @@ struct CrossTables {
     size_t total_chunks = 0;
 };
 
+// launches cover the bras a0 <= a < a1 of this rank
 inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
-                             const std::vector<double> &eri)
+                             const std::vector<double> &eri, size_t a0, size_t a1)
 {
     const int nrs = L * L;
     const int nrc = nrs / 64 + 1;  // > nrs / 64, so column nrs (padding) exists and is zero
@@ -632,7 +655,7 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
     for (int hi : bounds) {
         std::vector<int> ids;
         int km = 0;
-        for (size_t a = 0; a < na; a++)
+        for (size_t a = a0; a < a1; a++)
             if (Kp[a] > lo && Kp[a] <= hi) {
                 ids.push_back(static_cast<int>(a));
                 km = std::max(km, Kp[a]);
@@ -644,7 +667,7 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
                                 + static_cast<size_t>(km) * (sizeof(long long) + sizeof(int))
                                 + static_cast<size_t>(x.max_chunks) * 64 * sizeof(int));
     }
-    for (size_t a = 0; a < na; a++) ksum += Kp[a];
+    for (size_t a = a0; a < a1; a++) ksum += Kp[a];
     x.flops = 2.0 * 64 * 64 * static_cast<double>(cbase[x.nbt]) * ksum;
     x.total_chunks = cbase[x.nbt];
 }
@@ -653,16 +676,30 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
 
 /**
    H·C from the factored Hamiltonian; see the file comment.
+
+   Several ranks split the alpha strings (adet_comm_size = number of ranks, bdet_comm_size,
+   task_comm_size and h_comm of size 1): each rank owns the alpha rows of its helper's bra range and
+   all beta strings. Every multiplication needs nearly all of C on every rank (the doubles of a block
+   of bras reach almost every row), so run() gathers the whole input vector first, with
+   ncclAllGather when built with SBD_USE_NCCL and GPU-aware MPI_Allgather otherwise, and then
+   computes this rank's rows of H·C. No reduction follows.
 */
 template <typename ElemT>
 class MultTPBFactored : public MultBase<ElemT> {
 public:
     MultTPBFactored() {}
+    ~MultTPBFactored()
+    {
+#ifdef SBD_USE_NCCL
+        if (nccl_ready_) ncclCommDestroy(nccl_);
+#endif
+    }
 
     void Init(const det_vector<size_t, det_kind::half> &adets,
               const det_vector<size_t, det_kind::half> &bdets,
               const uint32_t bit_length,
               const size_t norbs,
+              const std::vector<TaskHelpers> &helper,
               const ElemT &I0,
               const oneInt<ElemT> &I1,
               const twoInt<ElemT> &I2,
@@ -671,12 +708,16 @@ public:
         SBD_NVTX_RANGE_COLOR("MultTPBFactored::Init", __LINE__);
         if (!std::is_same<ElemT, double>::value)
             throw std::runtime_error("factored_mult: real coefficients only");
-        int sh, sb, st;
+        int sh, st;
         MPI_Comm_size(h_comm, &sh);
-        MPI_Comm_size(b_comm, &sb);
         MPI_Comm_size(t_comm, &st);
-        if (sh != 1 || sb != 1 || st != 1)
-            throw std::runtime_error("factored_mult: one MPI rank only in this version");
+        MPI_Comm_size(b_comm, &P_);
+        MPI_Comm_rank(b_comm, &rank_);
+        if (sh != 1 || st != 1)
+            throw std::runtime_error("factored_mult: task_comm_size and h_comm must be 1");
+        if (helper.empty()) throw std::runtime_error("factored_mult: no task helper on this rank");
+        if (helper[0].braBetaStart != 0 || helper[0].braBetaEnd != bdets.size())
+            throw std::runtime_error("factored_mult: split the alpha strings only (bdet_comm_size 1)");
         if (norbs > 64) throw std::runtime_error("factored_mult: at most 64 orbitals");
         this->bit_length_ = bit_length;
         this->norbs_ = norbs;
@@ -686,6 +727,19 @@ public:
         this->a_comm_ = a_comm;
         L_ = static_cast<int>(norbs);
         I0_ = I0;
+        a0_ = helper[0].braAlphaStart;
+        a1_ = helper[0].braAlphaEnd;
+
+        // every rank's alpha range, in rank order
+        std::vector<long long> mine = {static_cast<long long>(a0_), static_cast<long long>(a1_)};
+        std::vector<long long> ranges(2 * P_);
+        MPI_Allgather(mine.data(), 2, MPI_LONG_LONG, ranges.data(), 2, MPI_LONG_LONG, b_comm);
+        maxrows_ = 0;
+        for (int r = 0; r < P_; r++) {
+            maxrows_ = std::max<size_t>(maxrows_, ranges[2 * r + 1] - ranges[2 * r]);
+            if (ranges[2 * r] != (r == 0 ? 0 : ranges[2 * r - 1]))
+                throw std::runtime_error("factored_mult: alpha ranges are not contiguous in rank order");
+        }
 
         auto strings = [&](const det_vector<size_t, det_kind::half> &d, factored::SpinStrings &s) {
             s.n = d.size();
@@ -701,32 +755,47 @@ public:
         strings(bdets, sb_);
         na_ = sa_.n;
         nb_ = sb_.n;
+        if (static_cast<long long>(na_) != ranges[2 * P_ - 1])
+            throw std::runtime_error("factored_mult: alpha ranges do not cover the alpha strings");
         // Engine order: strings sorted by their bit-reversed value (orbital 0 most significant).
         // sbd sorts with the highest orbital most significant; in that order a 64-wide tile of beta
         // kets mixes strings that share fewer orbitals, and the cross term computes 1.8x the rows
-        // (507 against 285 padded rows per tile at 10,000 strings).
+        // (507 against 285 padded rows per tile at 10,000 strings). Alpha strings are sorted within
+        // each rank's range, so a rank's bras stay contiguous.
         const std::vector<uint64_t> xa_ext = sa_.x, xb_ext = sb_.x;
-        auto engine_order = [&](factored::SpinStrings &s, std::vector<int> &perm) {
+        auto reversed = [&](uint64_t v) {
+            uint64_t r = 0;
+            for (int o = 0; o < L_; o++)
+                if ((v >> o) & 1) r |= 1ull << (L_ - 1 - o);
+            return r;
+        };
+        auto engine_order = [&](factored::SpinStrings &s, std::vector<int> &perm,
+                                const std::vector<long long> &blocks) {
             perm.resize(s.n);
             for (size_t i = 0; i < s.n; i++) perm[i] = static_cast<int>(i);
-            auto reversed = [&](uint64_t v) {
-                uint64_t r = 0;
-                for (int o = 0; o < L_; o++)
-                    if ((v >> o) & 1) r |= 1ull << (L_ - 1 - o);
-                return r;
-            };
             std::vector<uint64_t> key(s.n);
             for (size_t i = 0; i < s.n; i++) key[i] = reversed(s.x[i]);
-            std::stable_sort(perm.begin(), perm.end(), [&](int i, int j) { return key[i] < key[j]; });
+            for (size_t k = 0; k + 1 < blocks.size(); k++)
+                std::stable_sort(perm.begin() + blocks[k], perm.begin() + blocks[k + 1],
+                                 [&](int i, int j) { return key[i] < key[j]; });
             std::vector<uint64_t> x(s.n);
             for (size_t i = 0; i < s.n; i++) x[i] = s.x[perm[i]];
             s.x = x;
         };
+        std::vector<long long> ablocks(P_ + 1);
+        for (int r = 0; r < P_; r++) ablocks[r] = ranges[2 * r];
+        ablocks[P_] = na_;
         std::vector<int> pa, pb;
-        engine_order(sa_, pa);
-        engine_order(sb_, pb);
+        engine_order(sa_, pa, ablocks);
+        engine_order(sb_, pb, {0, static_cast<long long>(nb_)});
         pa_ = pa;
         pb_ = pb;
+        // row of the gathered vector (rank blocks padded to maxrows) for each engine alpha row
+        std::vector<long long> gofs(na_);
+        for (int r = 0; r < P_; r++)
+            for (long long i = ranges[2 * r]; i < ranges[2 * r + 1]; i++)
+                gofs[i] = static_cast<long long>(r) * maxrows_ + (pa[i] - ranges[2 * r]);
+        gofs_ = gofs;
 
         std::vector<double> h1(static_cast<size_t>(L_) * L_);
         std::vector<double> eri(static_cast<size_t>(L_) * L_ * L_ * L_);
@@ -743,22 +812,26 @@ public:
         factored::BuildSpinStrings(sb_, L_, h1, eri);
         factored::BuildSpinTiles(ta_, sa_, I0);
         factored::BuildSpinTiles(tb_, sb_, 0.0);
-        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
-        std::printf(" factored_mult: %zu alpha x %zu beta strings; same-spin entries %lld / %lld; "
-                    "cross term %.1f rs rows per 64-wide beta tile, %.3e flop per multiplication\n",
-                    na_, nb_, static_cast<long long>(sa_.hptr[na_]), static_cast<long long>(sb_.hptr[nb_]),
-                    64.0 * cross_.total_chunks / cross_.nbt, cross_.flops);
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri, a0_, a1_);
+        if (rank_ == 0)
+            std::printf(" factored_mult: %zu alpha x %zu beta strings on %d rank(s); same-spin entries "
+                        "%lld / %lld; cross term %.1f rs rows per 64-wide beta tile, %.3e flop per "
+                        "multiplication on rank 0\n",
+                        na_, nb_, P_, static_cast<long long>(sa_.hptr[na_]),
+                        static_cast<long long>(sb_.hptr[nb_]), 64.0 * cross_.total_chunks / cross_.nbt,
+                        cross_.flops);
 
         std::vector<unsigned long long> xa(sa_.x.begin(), sa_.x.end()), xb(sb_.x.begin(), sb_.x.end());
         xa_ = xa;
         xb_ = xb;
-        // the diagonal is made in sbd's order
-        std::vector<unsigned long long> xae(xa_ext.begin(), xa_ext.end());
+        // the diagonal is made in sbd's order, for this rank's rows
+        std::vector<unsigned long long> xae(xa_ext.begin() + a0_, xa_ext.begin() + a1_);
         xa_ext_ = xae;
         std::vector<double> da(na_), db(nb_);
         for (size_t i = 0; i < na_; i++) da[pa[i]] = sa_.hdiag[i];
         for (size_t i = 0; i < nb_; i++) db[pb[i]] = sb_.hdiag[i];
-        da_ = da;
+        std::vector<double> da_local(da.begin() + a0_, da.begin() + a1_);
+        da_ = da_local;
         db_ = db;
         std::vector<double> Jb(nb_ * L_, 0.0);  // Jb[b, p] = sum over r in b of (pp|rr)
         for (size_t b = 0; b < nb_; b++)
@@ -779,44 +852,74 @@ public:
                              static_cast<int>(smem));
         cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
+        if (P_ > 1) {
+            if (maxrows_ * nb_ > static_cast<size_t>(INT32_MAX))
+                throw std::runtime_error("factored_mult: a rank's part of the vector exceeds 2^31 elements");
+#ifdef SBD_USE_NCCL
+            ncclUniqueId id;
+            if (rank_ == 0) ncclGetUniqueId(&id);
+            MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, b_comm);
+            if (ncclCommInitRank(&nccl_, P_, id, rank_) != ncclSuccess)
+                throw std::runtime_error("factored_mult: ncclCommInitRank failed");
+            nccl_ready_ = true;
+#endif
+        }
     }
 
-    /// Diagonal of H in sbd's layout (the phase does not touch it).
+    /// Diagonal of H for this rank's rows, in sbd's layout (the phase does not touch it).
     void makeQChamDiagTerms(thrust::device_vector<ElemT> &hii)
     {
-        hii.resize(na_ * nb_);
+        hii.resize((a1_ - a0_) * nb_);
         factored::diagonal_terms<<<1024, 256>>>(
-            thrust::raw_pointer_cast(xa_ext_.data()), thrust::raw_pointer_cast(da_.data()),
-            thrust::raw_pointer_cast(db_.data()), thrust::raw_pointer_cast(Jb_.data()), L_,
-            static_cast<long long>(na_), static_cast<long long>(nb_), I0_,
-            thrust::raw_pointer_cast(hii.data()));
+            ptr(xa_ext_), ptr(da_), ptr(db_), ptr(Jb_), L_, static_cast<long long>(a1_ - a0_),
+            static_cast<long long>(nb_), I0_, ptr(hii));
         check("diagonal_terms");
     }
 
-    /// Wb = H Wk; hii is not needed (the diagonal is part of the factors).
+    /// Wb = H Wk for this rank's rows; hii is not needed (the diagonal is part of the factors).
     void run(const thrust::device_vector<ElemT> &hii,
              const thrust::device_vector<ElemT> &Wk,
              thrust::device_vector<ElemT> &Wb) override
     {
         (void)hii;
         SBD_NVTX_RANGE_COLOR("MultTPBFactored::run", __LINE__);
-        const size_t n = na_ * nb_;
-        if (Wb.size() != n) Wb.resize(n);
-        if (T_.size() != n) T_.resize(n);
-        if (S_.size() != n) S_.resize(n);
-        const unsigned long long* xa = thrust::raw_pointer_cast(xa_.data());
-        const unsigned long long* xb = thrust::raw_pointer_cast(xb_.data());
-        double* T = thrust::raw_pointer_cast(T_.data());
-        double* S = thrust::raw_pointer_cast(S_.data());
+        const size_t nloc = (a1_ - a0_) * nb_;
+        if (Wb.size() != nloc) Wb.resize(nloc);
+        if (T_.size() != na_ * nb_) T_.resize(na_ * nb_);
+        if (S_.size() != nloc) S_.resize(nloc);
         const long long na = static_cast<long long>(na_), nb = static_cast<long long>(nb_);
+        const long long a0 = static_cast<long long>(a0_), a1 = static_cast<long long>(a1_);
+        double* T = ptr(T_);
+        double* S = ptr(S_);
 
-        factored::phase_permute<<<1024, 256>>>(xa, xb, ptr(pa_), ptr(pb_), na, nb,
-                                               thrust::raw_pointer_cast(Wk.data()), T, 0);
+        // the whole input vector, rank blocks padded to maxrows rows
+        const double* Cg = ptr(Wk);
+        if (P_ > 1) {
+            SBD_NVTX_RANGE_COLOR("MultTPBFactored::gather", __LINE__);
+            const size_t count = maxrows_ * nb_;
+            if (G_.size() != count * P_) G_.resize(count * P_);
+            double* G = ptr(G_);
+            cudaMemcpy(G + rank_ * count, ptr(Wk), nloc * sizeof(double), cudaMemcpyDeviceToDevice);
+#ifdef SBD_USE_NCCL
+            if (ncclAllGather(G + rank_ * count, G, count, ncclDouble, nccl_, 0) != ncclSuccess)
+                throw std::runtime_error("factored_mult: ncclAllGather failed");
+#else
+            cudaDeviceSynchronize();
+            MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, G, static_cast<int>(count), MPI_DOUBLE,
+                          this->b_comm_);
+#endif
+            Cg = G;
+        }
+        factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), na, nb, Cg, T);
         const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
-        factored::spmm_same_spin<<<dim3(ta_.nT, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-            T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, 0);
-        factored::spmm_same_spin<<<dim3(tb_.nT, (na_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-            T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, 1);
+        const int I_lo = static_cast<int>(a0 / SBD_FM_TR), I_hi = static_cast<int>((a1 + SBD_FM_TR - 1) / SBD_FM_TR);
+        if (I_hi > I_lo)
+            factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, a0, a1,
+                I_lo, 0);
+        if (a1 > a0)
+            factored::spmm_same_spin<<<dim3(tb_.nT, (a1 - a0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, a0, a1, 0, 1);
         for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
             const int* ids = ptr(cross_.bucket_ids[k]);
             const size_t count = cross_.bucket_ids[k].size();
@@ -825,31 +928,32 @@ public:
                 factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cross_.bucket_smem[k]>>>(
                     T, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket), ptr(cross_.krow),
                     ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
-                    nb, S);
+                    nb, a0, S);
             }
         }
-        factored::phase_permute<<<1024, 256>>>(xa, xb, ptr(pa_), ptr(pb_), na, nb, S,
-                                               thrust::raw_pointer_cast(Wb.data()), 1);
+        factored::scatter_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(pa_), ptr(pb_), a0, a1, nb, S,
+                                               ptr(Wb));
         check("run");
     }
 
     /// Relative differences from a reference multiplier (method 0) in the diagonal and in H x for a
-    /// pseudo-random x (--factored_mult_check 1).
+    /// pseudo-random x, over all ranks (--factored_mult_check 1).
     void CompareWithReference(MultBase<ElemT> &ref, const thrust::device_vector<ElemT> &hii,
                               const thrust::device_vector<ElemT> &hii_ref, double &diag_diff,
                               double &mult_diff)
     {
-        const size_t n = na_ * nb_;
+        const size_t nloc = (a1_ - a0_) * nb_;
         diag_diff = rel_diff(hii, hii_ref);
-        thrust::device_vector<ElemT> x(n), y(n), y_ref(n);
-        thrust::transform(thrust::counting_iterator<size_t>(0), thrust::counting_iterator<size_t>(n),
-                          x.begin(), factored::hash_value());
+        thrust::device_vector<ElemT> x(nloc), y(nloc), y_ref(nloc);
+        thrust::transform(thrust::counting_iterator<size_t>(a0_ * nb_),
+                          thrust::counting_iterator<size_t>(a0_ * nb_ + nloc), x.begin(),
+                          factored::hash_value());
         run(hii, x, y);
         ref.run(hii_ref, x, y_ref);
         mult_diff = rel_diff(y, y_ref);
     }
 
-    /// Flops of the cross-term tensor-core work per multiplication.
+    /// Flops of this rank's cross-term tensor-core work per multiplication.
     double cross_flops() const { return cross_.flops; }
 
 private:
@@ -857,13 +961,15 @@ private:
     static T* ptr(thrust::device_vector<T> &v) { return thrust::raw_pointer_cast(v.data()); }
     template <typename T>
     static const T* ptr(const thrust::device_vector<T> &v) { return thrust::raw_pointer_cast(v.data()); }
-    static double rel_diff(const thrust::device_vector<ElemT> &a, const thrust::device_vector<ElemT> &b)
+    double rel_diff(const thrust::device_vector<ElemT> &a, const thrust::device_vector<ElemT> &b) const
     {
         thrust::device_vector<ElemT> d(a.size());
         thrust::transform(a.begin(), a.end(), b.begin(), d.begin(), thrust::minus<ElemT>());
-        const double dd = thrust::inner_product(d.begin(), d.end(), d.begin(), 0.0);
-        const double bb = thrust::inner_product(b.begin(), b.end(), b.begin(), 0.0);
-        return bb > 0.0 ? std::sqrt(dd / bb) : std::sqrt(dd);
+        double local[2] = {thrust::inner_product(d.begin(), d.end(), d.begin(), 0.0),
+                           thrust::inner_product(b.begin(), b.end(), b.begin(), 0.0)};
+        double sum[2];
+        MPI_Allreduce(local, sum, 2, MPI_DOUBLE, MPI_SUM, this->b_comm_);
+        return sum[1] > 0.0 ? std::sqrt(sum[0] / sum[1]) : std::sqrt(sum[0]);
     }
     static void check(const char* where)
     {
@@ -876,14 +982,22 @@ private:
     int L_ = 0;
     double I0_ = 0.0;
     size_t na_ = 0, nb_ = 0;
+    int P_ = 1, rank_ = 0;
+    size_t a0_ = 0, a1_ = 0;    // this rank's alpha rows (same positions in sbd and engine order)
+    size_t maxrows_ = 0;        // largest alpha range over the ranks
     factored::SpinStrings sa_, sb_;
     factored::SpinTiles ta_, tb_;
     factored::CrossTables cross_;
     thrust::device_vector<unsigned long long> xa_, xb_;  // engine order
-    thrust::device_vector<unsigned long long> xa_ext_;   // sbd order (diagonal)
+    thrust::device_vector<unsigned long long> xa_ext_;   // sbd order, this rank's rows (diagonal)
     thrust::device_vector<int> pa_, pb_;                 // engine index -> sbd index
+    thrust::device_vector<long long> gofs_;              // engine alpha row -> row of the gathered vector
     thrust::device_vector<double> da_, db_, Jb_;         // sbd order (diagonal)
-    thrust::device_vector<double> T_, S_;                // engine-order input and output
+    thrust::device_vector<double> T_, S_, G_;            // engine-order input, local output, gathered input
+#ifdef SBD_USE_NCCL
+    ncclComm_t nccl_;
+    bool nccl_ready_ = false;
+#endif
 };
 
 } // namespace sbd

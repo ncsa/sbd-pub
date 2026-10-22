@@ -445,7 +445,7 @@ namespace sbd {
 	auto time_start_mult_init = std::chrono::high_resolution_clock::now();
 	if( use_factored ) {
 	    SBD_NVTX_RANGE_COLOR("factored_mult.Init", __LINE__);
-	    factored_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L), I0, I1, I2,
+	    factored_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L), helper, I0, I1, I2,
 	                       h_comm, b_comm, t_comm, a_comm);
 	}
 	if( !use_factored || sbd_data.factored_mult_check ) {
