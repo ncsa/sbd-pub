@@ -1,0 +1,837 @@
+/**
+@file sbd/chemistry/tpb/mult_factored_thrust.h
+@brief Factored Hamiltonian multiplication for the tensor-product basis (--factored_mult 1)
+
+In a tensor-product basis the determinants are all pairs (a, b) of an alpha string list and a beta
+string list, and the Hamiltonian factors into string operators and integrals:
+
+  H = H_a (x) I + I (x) H_b + sum_{pq,rs} (pq|rs) E^a_pq (x) E^b_rs
+
+H_a and H_b are the same-spin string Hamiltonians (one-body part, same-spin two-body part and, for
+H_a, the core energy), with 1 + S + D entries per string for S singles and D doubles within the
+list. E_pq moves one electron from q to p, with p == q giving the occupation. H·C is formed from
+these factors; no element of H is stored:
+
+  - same-spin terms, H_a C and C H_b^T: H_a and H_b are kept as their nonzero 128 x 64 tiles, and
+    each thread accumulates one output row over 32 columns from C staged in shared memory
+    (spmm_same_spin);
+  - cross term: for each bra string a, X_a[rs, b'] = sum_k sgn_k (pq_k|rs) C[a'_k, b'] over the
+    excitations a = E_pq a' of a, computed by FP64 tensor-core MMA on 64 x 64 tiles. Only the rs
+    rows that some b' in a 64-wide tile can use are computed, and only the entries with E_rs b' in
+    the beta list are added into H·C[a, b] (fused_cross); X never reaches GPU memory.
+
+Within a string the orbitals are ordered ascending, and the factored form takes determinants as the
+alpha string followed by the beta string. sbd interleaves the spins (spin orbital 2i is alpha i,
+2i+1 is beta i), so run() multiplies by the phase P(a, b) = (-1)^(sum over i in a of the beta
+electrons below i) on the way in and on the way out; the vectors outside stay in sbd's convention.
+
+Limits of this version: one MPI rank, real coefficients, at most 64 orbitals.
+*/
+#ifndef SBD_CHEMISTRY_TPB_MULT_FACTORED_THRUST_H
+#define SBD_CHEMISTRY_TPB_MULT_FACTORED_THRUST_H
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+#include <thrust/device_vector.h>
+#include <thrust/functional.h>
+#include <thrust/inner_product.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/transform.h>
+
+#include "sbd/framework/nvtx.h"
+
+namespace sbd {
+namespace factored {
+
+// ---------------------------------------------------------------------------------------------
+// Device kernels
+// ---------------------------------------------------------------------------------------------
+
+#define SBD_FM_LD 72    // row stride (doubles) of the V, C and X tiles: 64 + 8 avoids bank conflicts
+#define SBD_FM_LDC 65   // row stride of the same-spin C tiles; odd so transposed fills spread over banks
+#define SBD_FM_TR 128   // rows per same-spin tile (columns per tile: 64)
+
+__device__ __forceinline__ void fm_cp_async8(double* dst, const double* src, bool valid)
+{
+    unsigned d = (unsigned)__cvta_generic_to_shared(dst);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8, %2;\n"
+                 :: "r"(d), "l"(src), "r"(valid ? 8 : 0));  // zero-fills when not valid
+}
+__device__ __forceinline__ void fm_cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void fm_cp_wait0() { asm volatile("cp.async.wait_group 0;\n" ::); }
+__device__ __forceinline__ void fm_cp_wait1() { asm volatile("cp.async.wait_group 1;\n" ::); }
+__device__ __forceinline__ void fm_dmma(double& d0, double& d1, double a, double b)
+{
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {%0, %1}, {%2}, {%3}, {%0, %1};\n"
+                 : "+d"(d0), "+d"(d1) : "d"(a), "d"(b));
+}
+
+// V tile t of a chunk (rows k of the tile, 64 rs columns) into a ring stage, by cp.async
+__device__ __forceinline__ void fm_load_v_tile(double* stage, const double* Vs, const int* rl,
+                                               const int* vr_s, int K, int t, int m, int kh)
+{
+    const int k0 = t * 32, kc = min(32, K - k0);
+    double* dst = stage + m;
+    const double* src = Vs + rl[m];
+    for (int k = kh; k < kc; k += 2) fm_cp_async8(dst + k * SBD_FM_LD, src + vr_s[k0 + k], true);
+    fm_cp_commit();
+}
+
+/**
+   Cross term. One block per (bra a, 64-column tile of b'). The C tile C[a'_k, b'-tile] (K x 64)
+   stays in shared memory; the sign of each excitation is folded into the V row it reads (Vs holds
+   V, -V and a zero row for padding), so the C tile and the 32 x 64 V tiles (two-stage ring, which
+   also holds the X tile) arrive by cp.async. For each 64-row chunk of the rows the tile can use
+   (rlist), 4 warps of 32 x 32 form X with mma.sync m8n8k4 f64, and the entries with E_rs b' in the
+   list are added into sigma (gent: rs_local 6 | b'_local 6 | sign 1 | b 19, grouped by chunk).
+*/
+static __global__ void __launch_bounds__(128)
+fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv,
+            const long long* __restrict__ kptr, const int* __restrict__ kket,
+            const int* __restrict__ krow, const int* __restrict__ aidx,
+            const long long* __restrict__ goff, const unsigned* __restrict__ gent,
+            const int* __restrict__ cbase, const int* __restrict__ rlist, long long nb,
+            double* sigma)
+{
+    extern __shared__ double sm[];
+    const int bt = blockIdx.x;
+    const long long a = aidx[blockIdx.y];
+    const long long kp = kptr[a];
+    const int K = (int)(kptr[a + 1] - kp);  // multiple of 4, padded with the zero row
+    const int c0 = cbase[bt], nch = cbase[bt + 1] - c0;
+    const int T = (K + 31) / 32;            // 32-deep V tiles per chunk
+    double* Bs = sm;                        // K x LD
+    double* ring = Bs + K * SBD_FM_LD;      // 2 x 32 x LD V tiles, or the 64 x LD X tile
+    long long* cr_s = (long long*)(ring + 64 * SBD_FM_LD);  // K offsets of the C rows (a'_k * nb)
+    int* vr_s = (int*)(cr_s + K);           // K offsets of the signed V rows (row * ldv)
+    int* rl_s = vr_s + K;                   // nch x 64 rs columns
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const int wm = warp >> 1, wn = warp & 1;  // 2 x 2 warps, 32 x 32 outputs each
+    const int r4 = lane & 3, q8 = lane >> 2;  // fragment row/column within an 8 x 4 / 4 x 8 piece
+    for (int i = tid; i < K; i += 128) {
+        cr_s[i] = (long long)kket[kp + i] * nb;
+        vr_s[i] = krow[kp + i] * ldv;
+    }
+    for (int i = tid; i < nch * 64; i += 128) rl_s[i] = rlist[(long long)c0 * 64 + i];
+    __syncthreads();
+
+    const int m = tid & 63, kh = tid >> 6;  // each thread copies one column, every other row
+    const long long b0 = (long long)bt * 64;
+    {   // C tile: one cp.async group
+        const bool ok = b0 + m < nb;
+        for (int k = kh; k < K; k += 2)
+            fm_cp_async8(Bs + k * SBD_FM_LD + m, C + cr_s[k] + (ok ? b0 + m : 0), ok);
+        fm_cp_commit();
+    }
+    if (nch > 0) fm_load_v_tile(ring, Vs, rl_s, vr_s, K, 0, m, kh);
+
+    double* srow = sigma + a * nb;
+    for (int c = 0; c < nch; c++) {
+        double acc[4][4][2];
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+#pragma unroll
+            for (int j = 0; j < 4; j++) acc[i][j][0] = acc[i][j][1] = 0.0;
+        for (int t = 0; t < T; t++) {
+            if (t + 1 < T) {
+                fm_load_v_tile(ring + ((t + 1) & 1) * 32 * SBD_FM_LD, Vs, rl_s + c * 64, vr_s, K, t + 1, m, kh);
+                fm_cp_wait1();
+            }
+            else fm_cp_wait0();
+            __syncthreads();  // tile t (and, first time, the C tile) visible to all warps
+            const double* As = ring + (t & 1) * 32 * SBD_FM_LD + wm * 32 + q8;
+            const double* Bt = Bs + (t * 32) * SBD_FM_LD + wn * 32 + q8;
+            const int kc = min(32, K - t * 32);
+            for (int kk = 0; kk < kc; kk += 4) {
+                double fa[4], fb[4];
+#pragma unroll
+                for (int i = 0; i < 4; i++) fa[i] = As[(kk + r4) * SBD_FM_LD + i * 8];  // A[m][k], .row
+#pragma unroll
+                for (int j = 0; j < 4; j++) fb[j] = Bt[(kk + r4) * SBD_FM_LD + j * 8];  // B[k][n], .col
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+#pragma unroll
+                    for (int j = 0; j < 4; j++) fm_dmma(acc[i][j][0], acc[i][j][1], fa[i], fb[j]);
+            }
+            __syncthreads();  // stage (t & 1) free for the load two tiles ahead / for X
+        }
+        double* Xs = ring;
+#pragma unroll
+        for (int i = 0; i < 4; i++)
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                double* x = Xs + (wm * 32 + i * 8 + q8) * SBD_FM_LD + wn * 32 + j * 8 + 2 * r4;
+                x[0] = acc[i][j][0];
+                x[1] = acc[i][j][1];
+            }
+        __syncthreads();
+        const long long e1 = goff[c0 + c + 1];
+        for (long long e = goff[c0 + c] + tid; e < e1; e += 128) {
+            unsigned u = gent[e];
+            double v = Xs[(u & 63) * SBD_FM_LD + ((u >> 6) & 63)];
+            atomicAdd(srow + (u >> 13), (u >> 12) & 1 ? -v : v);
+        }
+        __syncthreads();  // X read before the ring is refilled
+        if (c + 1 < nch) fm_load_v_tile(ring, Vs, rl_s + (c + 1) * 64, vr_s, K, 0, m, kh);
+    }
+}
+
+// 64 x 64 slice of C for same-spin tile t into a ring stage (mode 0: rows J0.. of C; mode 1:
+// columns J0.., transposed), by cp.async
+__device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, long long J0, long long y0,
+                                               long long nrow, long long nchk, long long nb, int mode,
+                                               int tid)
+{
+    const int u = tid & 63;  // consecutive threads read consecutive global addresses
+    for (int v = tid >> 6; v < 64; v += 2 * SBD_FM_TR / 64) {
+        if (mode == 0) {      // Cs[c][y] = C[J0 + c, y0 + y], c = v, y = u
+            bool ok = J0 + v < nrow && y0 + u < nchk;
+            fm_cp_async8(dst + v * SBD_FM_LDC + u, C + (ok ? (J0 + v) * nb + y0 + u : 0), ok);
+        } else {              // Cs[c][y] = C[y0 + y, J0 + c], y = v, c = u
+            bool ok = y0 + v < nchk && J0 + u < nrow;
+            fm_cp_async8(dst + u * SBD_FM_LDC + v, C + (ok ? (y0 + v) * nb + J0 + u : 0), ok);
+        }
+    }
+    fm_cp_commit();
+}
+
+/**
+   Same-spin products with a sparse, symmetric string Hamiltonian stored as nonzero TR x 64 tiles of
+   (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb.
+     mode 0: sigma[I rows, chunk] = H_a[I rows, :] C[:, chunk]       (writes sigma; I over alpha)
+     mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta)
+   One block per (tile row I, 64-wide chunk); blockIdx.x = I runs fastest, so the blocks in flight
+   share one slice of C, which stays in L2. Each nonzero tile's 64 x 64 slice of C arrives in a
+   two-stage cp.async ring; thread (row, half) owns one output row and 32 output columns in
+   registers, so each entry of its row drives 32 multiply-adds.
+*/
+static __global__ void __launch_bounds__(2 * SBD_FM_TR, 2)  // 2 blocks per SM: at most 128 registers
+spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
+               const int* __restrict__ tj, const int* __restrict__ rp,
+               const unsigned char* __restrict__ ec, const double* __restrict__ ev,
+               long long na, long long nb, int mode)
+{
+    extern __shared__ double smem[];  // two stages of 64 x LDC doubles
+    const int I = blockIdx.x, ch = blockIdx.y;
+    const int tid = threadIdx.x;
+    const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
+    const long long nrow = mode == 0 ? na : nb;   // rows and columns of this H
+    const long long nchk = mode == 0 ? nb : na;   // extent of the chunked index
+    const long long y0 = (long long)ch * 64;
+    const int t0 = trp[I], t1 = trp[I + 1];
+    double acc[32];
+#pragma unroll
+    for (int k = 0; k < 32; k++) acc[k] = 0.0;
+    if (t0 < t1) fm_load_c_tile(smem, C, (long long)tj[t0] * 64, y0, nrow, nchk, nb, mode, tid);
+    for (int t = t0; t < t1; t++) {
+        const int st = (t - t0) & 1;
+        if (t + 1 < t1) {
+            fm_load_c_tile(smem + (st ^ 1) * 64 * SBD_FM_LDC, C, (long long)tj[t + 1] * 64, y0, nrow, nchk,
+                           nb, mode, tid);
+            fm_cp_wait1();
+        }
+        else fm_cp_wait0();
+        __syncthreads();
+        const double* cs = smem + st * 64 * SBD_FM_LDC + half * 32;
+        int e = rp[(long long)t * (SBD_FM_TR + 1) + row];
+        const int e1 = rp[(long long)t * (SBD_FM_TR + 1) + row + 1];
+        if (e < e1) {
+            int c = ec[e];
+            double v = ev[e];
+            for (; e < e1; e++) {
+                const double* crow = cs + c * SBD_FM_LDC;
+                const double vv = v;
+                if (e + 1 < e1) { c = ec[e + 1]; v = ev[e + 1]; }  // next entry's loads overlap
+#pragma unroll
+                for (int k = 0; k < 32; k++) acc[k] += vv * crow[k];
+            }
+        }
+        __syncthreads();  // stage st free for the load two tiles ahead
+    }
+    const long long R = (long long)I * SBD_FM_TR + row;
+    if (R >= nrow) return;
+#pragma unroll
+    for (int k = 0; k < 32; k++) {
+        const long long y = y0 + half * 32 + k;
+        if (y < nchk) {
+            if (mode == 0) sigma[R * nb + y] = acc[k];
+            else sigma[y * nb + R] += acc[k];
+        }
+    }
+}
+
+// out[a, b] = P(a, b) in[a, b]: interleaved spin order <-> alpha string then beta string
+static __global__ void phase_multiply(const unsigned long long* __restrict__ xa,
+                                      const unsigned long long* __restrict__ xb,
+                                      long long na, long long nb,
+                                      const double* in, double* out)
+{
+    const long long n = na * nb;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += (long long)gridDim.x * blockDim.x) {
+        const long long a = i / nb, b = i - a * nb;
+        unsigned long long A = xa[a];
+        const unsigned long long B = xb[b];
+        int s = 0;
+        while (A) {
+            const int o = __ffsll((long long)A) - 1;
+            A &= A - 1;
+            s += __popcll(B & ((1ull << o) - 1));
+        }
+        out[i] = (s & 1) ? -in[i] : in[i];
+    }
+}
+
+// hii[a, b] = I0 + d_a[a] + d_b[b] + sum over p in a, r in b of (pp|rr)  (Jb[b * L + p])
+static __global__ void diagonal_terms(const unsigned long long* __restrict__ xa,
+                                      const double* __restrict__ da, const double* __restrict__ db,
+                                      const double* __restrict__ Jb, int L, long long na, long long nb,
+                                      double I0, double* hii)
+{
+    const long long n = na * nb;
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += (long long)gridDim.x * blockDim.x) {
+        const long long a = i / nb, b = i - a * nb;
+        unsigned long long A = xa[a];
+        double v = I0 + da[a] + db[b];
+        const double* J = Jb + b * L;
+        while (A) {
+            const int o = __ffsll((long long)A) - 1;
+            A &= A - 1;
+            v += J[o];
+        }
+        hii[i] = v;
+    }
+}
+
+// a reproducible value in [-1, 1) from an index (splitmix64), for the reference check
+struct hash_value {
+    __host__ __device__ double operator()(size_t i) const
+    {
+        unsigned long long z = i + 0x9e3779b97f4a7c15ull;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+        z ^= z >> 31;
+        return static_cast<double>(z >> 11) * (2.0 / 9007199254740992.0) - 1.0;
+    }
+};
+
+// ---------------------------------------------------------------------------------------------
+// Host-side tables
+// ---------------------------------------------------------------------------------------------
+
+inline int fm_popcount(uint64_t x) { return __builtin_popcountll(x); }
+// (-1)^(occupied orbitals of x below i)
+inline int fm_sign_below(uint64_t x, int i) { return (fm_popcount(x & ((1ull << i) - 1)) & 1) ? -1 : 1; }
+
+/**
+   Strings of one spin, their same-spin Hamiltonian (CSR, diagonal first in each row) and their
+   excitation lists E (for each bra string: the occupied orbitals as p == q entries, then the single
+   excitations a = E_pq a' within the list, with sign).
+*/
+struct SpinStrings {
+    size_t n = 0;
+    std::vector<uint64_t> x;
+    std::vector<int64_t> hptr;
+    std::vector<int32_t> hcol;
+    std::vector<double> hval;
+    std::vector<double> hdiag;
+    std::vector<int64_t> eptr;
+    std::vector<int32_t> eket;
+    std::vector<int32_t> epq;
+    std::vector<double> esg;
+};
+
+inline void BuildSpinStrings(SpinStrings &s, int L, const std::vector<double> &h1,
+                             const std::vector<double> &eri)
+{
+    const size_t n = s.n;
+    auto V = [&](int p, int q, int r, int t) {
+        return eri[((static_cast<size_t>(p) * L + q) * L + r) * L + t];
+    };
+    std::vector<int64_t> ns(n, 0), nd(n, 0);
+#pragma omp parallel for schedule(dynamic, 64)
+    for (size_t i = 0; i < n; i++) {
+        int64_t cs = 0, cd = 0;
+        for (size_t j = 0; j < n; j++) {
+            int c = fm_popcount(s.x[i] ^ s.x[j]);
+            cs += (c == 2);
+            cd += (c == 4);
+        }
+        ns[i] = cs;
+        nd[i] = cd;
+    }
+    const int nel = fm_popcount(s.x[0]);
+    s.hptr.assign(n + 1, 0);
+    s.eptr.assign(n + 1, 0);
+    for (size_t i = 0; i < n; i++) {
+        s.hptr[i + 1] = s.hptr[i] + 1 + ns[i] + nd[i];
+        s.eptr[i + 1] = s.eptr[i] + ns[i] + nel;
+    }
+    s.hcol.resize(s.hptr[n]);
+    s.hval.resize(s.hptr[n]);
+    s.hdiag.resize(n);
+    s.eket.resize(s.eptr[n]);
+    s.epq.resize(s.eptr[n]);
+    s.esg.resize(s.eptr[n]);
+#pragma omp parallel for schedule(dynamic, 64)
+    for (size_t i = 0; i < n; i++) {
+        const uint64_t a = s.x[i];
+        int occ[64];
+        int k = 0;
+        for (int o = 0; o < L; o++)
+            if ((a >> o) & 1) occ[k++] = o;
+        int64_t hp = s.hptr[i], ep = s.eptr[i];
+        double d = 0.0;
+        for (int u = 0; u < k; u++) {
+            const int p = occ[u];
+            d += h1[p * L + p];
+            for (int w = 0; w < k; w++) {
+                const int r = occ[w];
+                d += 0.5 * (V(p, p, r, r) - V(p, r, r, p));
+            }
+            s.eket[ep] = static_cast<int32_t>(i);
+            s.epq[ep] = p * L + p;
+            s.esg[ep] = 1.0;
+            ep++;
+        }
+        s.hdiag[i] = d;
+        s.hcol[hp] = static_cast<int32_t>(i);
+        s.hval[hp] = d;
+        hp++;
+        for (size_t j = 0; j < n; j++) {
+            const uint64_t ap = s.x[j];
+            const uint64_t diff = a ^ ap;
+            const int c = fm_popcount(diff);
+            if (c == 2) {
+                const int p = __builtin_ctzll(a & diff);   // in the bra, not the ket
+                const int q = __builtin_ctzll(ap & diff);  // in the ket, not the bra
+                // a = E_pq a' = a+_p a_q a'
+                const uint64_t y = ap & ~(1ull << q);
+                const int sg = fm_sign_below(ap, q) * fm_sign_below(y, p);
+                double v = h1[p * L + q];
+                for (int u = 0; u < k; u++) {
+                    const int kk = occ[u];
+                    if (kk != p) v += V(p, q, kk, kk) - V(p, kk, kk, q);
+                }
+                s.hcol[hp] = static_cast<int32_t>(j);
+                s.hval[hp] = sg * v;
+                hp++;
+                s.eket[ep] = static_cast<int32_t>(j);
+                s.epq[ep] = p * L + q;
+                s.esg[ep] = sg;
+                ep++;
+            } else if (c == 4) {
+                uint64_t cr = a & diff, an = ap & diff;
+                const int p = __builtin_ctzll(cr); cr &= cr - 1;
+                const int r = __builtin_ctzll(cr);
+                const int q = __builtin_ctzll(an); an &= an - 1;
+                const int t = __builtin_ctzll(an);
+                // a = a+_p a+_r a_t a_q a'
+                uint64_t y = ap;
+                int sg = fm_sign_below(y, q);
+                y &= ~(1ull << q);
+                sg *= fm_sign_below(y, t);
+                y &= ~(1ull << t);
+                sg *= fm_sign_below(y, r);
+                y |= 1ull << r;
+                sg *= fm_sign_below(y, p);
+                s.hcol[hp] = static_cast<int32_t>(j);
+                s.hval[hp] = sg * (V(p, q, r, t) - V(p, t, r, q));
+                hp++;
+            }
+        }
+    }
+}
+
+/**
+   Nonzero TR x 64 tiles of a same-spin Hamiltonian, entries (column within the tile, value)
+   ordered by row; diag_shift is added to the diagonal (the core energy, once, on the alpha side).
+*/
+struct SpinTiles {
+    size_t nT = 0;
+    thrust::device_vector<int> trp, tj, rp;
+    thrust::device_vector<unsigned char> ec;
+    thrust::device_vector<double> ev;
+};
+
+inline void BuildSpinTiles(SpinTiles &t, const SpinStrings &s, double diag_shift)
+{
+    const size_t n = s.n;
+    const size_t TR = SBD_FM_TR;
+    const size_t nT = (n + TR - 1) / TR, nC = (n + 63) / 64;
+    std::vector<int> trp(nT + 1, 0), tj, rp;
+    std::vector<unsigned char> ec(s.hptr[n]);
+    std::vector<double> ev(s.hptr[n]);
+    std::vector<int64_t> cnt(nC), tile_of(nC), pos(nC);
+    int64_t base = 0;
+    for (size_t I = 0; I < nT; I++) {
+        const size_t r0 = I * TR, r1 = std::min(n, r0 + TR);
+        std::fill(cnt.begin(), cnt.end(), 0);
+        for (size_t r = r0; r < r1; r++)
+            for (int64_t e = s.hptr[r]; e < s.hptr[r + 1]; e++) cnt[s.hcol[e] / 64]++;
+        const size_t first = tj.size();
+        for (size_t ct = 0; ct < nC; ct++) {
+            if (cnt[ct] == 0) continue;
+            tile_of[ct] = static_cast<int64_t>(tj.size());
+            pos[ct] = base;
+            base += cnt[ct];
+            tj.push_back(static_cast<int>(ct));
+        }
+        const size_t ntile = tj.size() - first;
+        trp[I + 1] = static_cast<int>(tj.size());
+        std::vector<int> rowcnt(ntile * TR, 0);
+        std::vector<int64_t> start(ntile);
+        for (size_t u = 0; u < ntile; u++) start[u] = pos[tj[first + u]];
+        for (size_t r = r0; r < r1; r++)
+            for (int64_t e = s.hptr[r]; e < s.hptr[r + 1]; e++) {
+                const int ct = s.hcol[e] / 64;
+                const int64_t at = pos[ct]++;
+                ec[at] = static_cast<unsigned char>(s.hcol[e] % 64);
+                ev[at] = s.hval[e] + (static_cast<size_t>(s.hcol[e]) == r ? diag_shift : 0.0);
+                rowcnt[(tile_of[ct] - first) * TR + (r - r0)]++;
+            }
+        for (size_t u = 0; u < ntile; u++) {
+            int64_t p = start[u];
+            rp.push_back(static_cast<int>(p));
+            for (size_t r = 0; r < TR; r++) {
+                p += rowcnt[u * TR + r];
+                rp.push_back(static_cast<int>(p));
+            }
+        }
+    }
+    if (base > INT32_MAX) throw std::runtime_error("factored_mult: same-spin Hamiltonian too large for 32-bit offsets");
+    t.nT = nT;
+    t.trp = trp;
+    t.tj = tj;
+    t.rp = rp;
+    t.ec = ec;
+    t.ev = ev;
+}
+
+/**
+   Tables of the cross term: per bra alpha string its excitation list padded to a multiple of 4
+   (C rows kket, signed V rows krow), the signed integral rows Vs, and per 64-wide tile of beta kets
+   the rs rows it can use (rlist, in 64-row chunks from cbase) with its scatter entries (gent from
+   goff, one range per chunk).
+*/
+struct CrossTables {
+    int ldv = 0;
+    size_t nbt = 0;
+    int max_chunks = 0;
+    thrust::device_vector<double> Vs;
+    thrust::device_vector<long long> kptr, goff;
+    thrust::device_vector<int> kket, krow, cbase, rlist;
+    thrust::device_vector<unsigned> gent;
+    std::vector<thrust::device_vector<int>> bucket_ids;
+    std::vector<size_t> bucket_smem;
+    double flops = 0.0;
+};
+
+inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
+                             const std::vector<double> &eri)
+{
+    const int nrs = L * L;
+    const int nrc = nrs / 64 + 1;  // > nrs / 64, so column nrs (padding) exists and is zero
+    x.ldv = nrc * 64;
+    std::vector<double> Vs(static_cast<size_t>(2 * nrs + 1) * x.ldv, 0.0);
+    for (int pq = 0; pq < nrs; pq++)
+        for (int rs = 0; rs < nrs; rs++) {
+            const double v = eri[static_cast<size_t>(pq) * nrs + rs];
+            Vs[static_cast<size_t>(pq) * x.ldv + rs] = v;
+            Vs[static_cast<size_t>(nrs + pq) * x.ldv + rs] = -v;
+        }
+    x.Vs = Vs;
+
+    // alpha side
+    const size_t na = sa.n;
+    std::vector<long long> kptr(na + 1, 0);
+    std::vector<int> Kp(na);
+    for (size_t a = 0; a < na; a++) {
+        Kp[a] = static_cast<int>((sa.eptr[a + 1] - sa.eptr[a] + 3) / 4 * 4);
+        kptr[a + 1] = kptr[a] + Kp[a];
+    }
+    std::vector<int> kket(kptr[na], 0), krow(kptr[na], 2 * nrs);
+    for (size_t a = 0; a < na; a++)
+        for (int64_t e = sa.eptr[a]; e < sa.eptr[a + 1]; e++) {
+            const long long at = kptr[a] + (e - sa.eptr[a]);
+            kket[at] = sa.eket[e];
+            krow[at] = sa.esg[e] > 0 ? sa.epq[e] : nrs + sa.epq[e];
+        }
+    x.kptr = kptr;
+    x.kket = kket;
+    x.krow = krow;
+
+    // beta side: rows used per 64-wide tile of kets, scatter entries grouped by chunk
+    const size_t nb = sb.n;
+    if (nb >= (1u << 19)) throw std::runtime_error("factored_mult: more than 2^19 beta strings");
+    x.nbt = (nb + 63) / 64;
+    std::vector<int> rank(x.nbt * nrs, -1), nused(x.nbt, 0);
+    for (size_t b = 0; b < nb; b++)
+        for (int64_t e = sb.eptr[b]; e < sb.eptr[b + 1]; e++) rank[(sb.eket[e] / 64) * nrs + sb.epq[e]] = 0;
+    std::vector<int> cbase(x.nbt + 1, 0);
+    for (size_t t = 0; t < x.nbt; t++) {
+        int u = 0;
+        for (int rs = 0; rs < nrs; rs++)
+            if (rank[t * nrs + rs] == 0) rank[t * nrs + rs] = u++;
+        nused[t] = u;
+        cbase[t + 1] = cbase[t] + (u + 63) / 64;
+        x.max_chunks = std::max(x.max_chunks, (u + 63) / 64);
+    }
+    std::vector<int> rlist(static_cast<size_t>(cbase[x.nbt]) * 64, nrs);
+    for (size_t t = 0; t < x.nbt; t++)
+        for (int rs = 0; rs < nrs; rs++) {
+            const int u = rank[t * nrs + rs];
+            if (u >= 0) rlist[static_cast<size_t>(cbase[t]) * 64 + u] = rs;
+        }
+    std::vector<long long> goff(cbase[x.nbt] + 1, 0);
+    for (size_t b = 0; b < nb; b++)
+        for (int64_t e = sb.eptr[b]; e < sb.eptr[b + 1]; e++) {
+            const int t = sb.eket[e] / 64;
+            goff[cbase[t] + rank[t * nrs + sb.epq[e]] / 64 + 1]++;
+        }
+    for (size_t c = 0; c < static_cast<size_t>(cbase[x.nbt]); c++) goff[c + 1] += goff[c];
+    std::vector<long long> fill(goff.begin(), goff.end() - 1);
+    std::vector<unsigned> gent(goff.back());
+    for (size_t b = 0; b < nb; b++)
+        for (int64_t e = sb.eptr[b]; e < sb.eptr[b + 1]; e++) {
+            const int t = sb.eket[e] / 64;
+            const int u = rank[t * nrs + sb.epq[e]];
+            gent[fill[cbase[t] + u / 64]++] = static_cast<unsigned>(u % 64)
+                                              | (static_cast<unsigned>(sb.eket[e] % 64) << 6)
+                                              | (static_cast<unsigned>(sb.esg[e] < 0) << 12)
+                                              | (static_cast<unsigned>(b) << 13);
+        }
+    x.cbase = cbase;
+    x.rlist = rlist;
+    x.goff = goff;
+    x.gent = gent;
+
+    // bras grouped by padded excitation count, so shared memory per launch fits its bras
+    const int bounds[] = {64, 96, 128, 160, 192, 256, 1 << 30};
+    int lo = 0;
+    double ksum = 0.0;
+    for (int hi : bounds) {
+        std::vector<int> ids;
+        int km = 0;
+        for (size_t a = 0; a < na; a++)
+            if (Kp[a] > lo && Kp[a] <= hi) {
+                ids.push_back(static_cast<int>(a));
+                km = std::max(km, Kp[a]);
+            }
+        lo = hi;
+        if (ids.empty()) continue;
+        x.bucket_ids.emplace_back(ids);
+        x.bucket_smem.push_back(static_cast<size_t>(km + 64) * SBD_FM_LD * sizeof(double)
+                                + static_cast<size_t>(km) * (sizeof(long long) + sizeof(int))
+                                + static_cast<size_t>(x.max_chunks) * 64 * sizeof(int));
+    }
+    for (size_t a = 0; a < na; a++) ksum += Kp[a];
+    x.flops = 2.0 * 64 * 64 * static_cast<double>(cbase[x.nbt]) * ksum;
+}
+
+} // namespace factored
+
+/**
+   H·C from the factored Hamiltonian; see the file comment.
+*/
+template <typename ElemT>
+class MultTPBFactored : public MultBase<ElemT> {
+public:
+    MultTPBFactored() {}
+
+    void Init(const det_vector<size_t, det_kind::half> &adets,
+              const det_vector<size_t, det_kind::half> &bdets,
+              const uint32_t bit_length,
+              const size_t norbs,
+              const ElemT &I0,
+              const oneInt<ElemT> &I1,
+              const twoInt<ElemT> &I2,
+              MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm, MPI_Comm a_comm)
+    {
+        SBD_NVTX_RANGE_COLOR("MultTPBFactored::Init", __LINE__);
+        if (!std::is_same<ElemT, double>::value)
+            throw std::runtime_error("factored_mult: real coefficients only");
+        int sh, sb, st;
+        MPI_Comm_size(h_comm, &sh);
+        MPI_Comm_size(b_comm, &sb);
+        MPI_Comm_size(t_comm, &st);
+        if (sh != 1 || sb != 1 || st != 1)
+            throw std::runtime_error("factored_mult: one MPI rank only in this version");
+        if (norbs > 64) throw std::runtime_error("factored_mult: at most 64 orbitals");
+        this->bit_length_ = bit_length;
+        this->norbs_ = norbs;
+        this->h_comm_ = h_comm;
+        this->b_comm_ = b_comm;
+        this->t_comm_ = t_comm;
+        this->a_comm_ = a_comm;
+        L_ = static_cast<int>(norbs);
+        I0_ = I0;
+
+        auto strings = [&](const det_vector<size_t, det_kind::half> &d, factored::SpinStrings &s) {
+            s.n = d.size();
+            s.x.resize(s.n);
+            for (size_t i = 0; i < s.n; i++) {
+                uint64_t v = 0;
+                for (int o = 0; o < L_; o++)
+                    if ((d[i][o / bit_length] >> (o % bit_length)) & 1) v |= 1ull << o;
+                s.x[i] = v;
+            }
+        };
+        strings(adets, sa_);
+        strings(bdets, sb_);
+        na_ = sa_.n;
+        nb_ = sb_.n;
+
+        std::vector<double> h1(static_cast<size_t>(L_) * L_);
+        std::vector<double> eri(static_cast<size_t>(L_) * L_ * L_ * L_);
+        for (int p = 0; p < L_; p++)
+            for (int q = 0; q < L_; q++) h1[p * L_ + q] = I1.Value(2 * p, 2 * q);
+        for (int p = 0; p < L_; p++)
+            for (int q = 0; q < L_; q++)
+                for (int r = 0; r < L_; r++)
+                    for (int s = 0; s < L_; s++)
+                        eri[((static_cast<size_t>(p) * L_ + q) * L_ + r) * L_ + s] =
+                            I2.Value(2 * p, 2 * q, 2 * r, 2 * s);
+
+        factored::BuildSpinStrings(sa_, L_, h1, eri);
+        factored::BuildSpinStrings(sb_, L_, h1, eri);
+        factored::BuildSpinTiles(ta_, sa_, I0);
+        factored::BuildSpinTiles(tb_, sb_, 0.0);
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
+
+        std::vector<unsigned long long> xa(sa_.x.begin(), sa_.x.end()), xb(sb_.x.begin(), sb_.x.end());
+        xa_ = xa;
+        xb_ = xb;
+        da_ = sa_.hdiag;
+        db_ = sb_.hdiag;
+        std::vector<double> Jb(nb_ * L_, 0.0);  // Jb[b, p] = sum over r in b of (pp|rr)
+        for (size_t b = 0; b < nb_; b++)
+            for (int p = 0; p < L_; p++)
+                for (int r = 0; r < L_; r++)
+                    if ((sb_.x[b] >> r) & 1)
+                        Jb[b * L_ + p] += eri[((static_cast<size_t>(p) * L_ + p) * L_ + r) * L_ + r];
+        Jb_ = Jb;
+
+        size_t smem = 0;
+        for (size_t s : cross_.bucket_smem) smem = std::max(smem, s);
+        int dev = 0, optin = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        if (smem > static_cast<size_t>(optin))
+            throw std::runtime_error("factored_mult: excitation lists too long for shared memory");
+        cudaFuncSetAttribute(factored::fused_cross, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(smem));
+        cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
+    }
+
+    /// Diagonal of H in sbd's layout (the phase does not touch it).
+    void makeQChamDiagTerms(thrust::device_vector<ElemT> &hii)
+    {
+        hii.resize(na_ * nb_);
+        factored::diagonal_terms<<<1024, 256>>>(
+            thrust::raw_pointer_cast(xa_.data()), thrust::raw_pointer_cast(da_.data()),
+            thrust::raw_pointer_cast(db_.data()), thrust::raw_pointer_cast(Jb_.data()), L_,
+            static_cast<long long>(na_), static_cast<long long>(nb_), I0_,
+            thrust::raw_pointer_cast(hii.data()));
+        check("diagonal_terms");
+    }
+
+    /// Wb = H Wk; hii is not needed (the diagonal is part of the factors).
+    void run(const thrust::device_vector<ElemT> &hii,
+             const thrust::device_vector<ElemT> &Wk,
+             thrust::device_vector<ElemT> &Wb) override
+    {
+        (void)hii;
+        SBD_NVTX_RANGE_COLOR("MultTPBFactored::run", __LINE__);
+        const size_t n = na_ * nb_;
+        if (Wb.size() != n) Wb.resize(n);
+        if (T_.size() != n) T_.resize(n);
+        const unsigned long long* xa = thrust::raw_pointer_cast(xa_.data());
+        const unsigned long long* xb = thrust::raw_pointer_cast(xb_.data());
+        double* T = thrust::raw_pointer_cast(T_.data());
+        double* S = thrust::raw_pointer_cast(Wb.data());
+        const long long na = static_cast<long long>(na_), nb = static_cast<long long>(nb_);
+
+        factored::phase_multiply<<<1024, 256>>>(xa, xb, na, nb, thrust::raw_pointer_cast(Wk.data()), T);
+        const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
+        factored::spmm_same_spin<<<dim3(ta_.nT, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+            T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, 0);
+        factored::spmm_same_spin<<<dim3(tb_.nT, (na_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+            T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, 1);
+        for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
+            const int* ids = ptr(cross_.bucket_ids[k]);
+            const size_t count = cross_.bucket_ids[k].size();
+            for (size_t y0 = 0; y0 < count; y0 += 65535) {
+                const unsigned ny = static_cast<unsigned>(std::min<size_t>(65535, count - y0));
+                factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cross_.bucket_smem[k]>>>(
+                    T, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket), ptr(cross_.krow),
+                    ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
+                    nb, S);
+            }
+        }
+        factored::phase_multiply<<<1024, 256>>>(xa, xb, na, nb, S, S);
+        check("run");
+    }
+
+    /// Relative differences from a reference multiplier (method 0) in the diagonal and in H x for a
+    /// pseudo-random x (--factored_mult_check 1).
+    void CompareWithReference(MultBase<ElemT> &ref, const thrust::device_vector<ElemT> &hii,
+                              const thrust::device_vector<ElemT> &hii_ref, double &diag_diff,
+                              double &mult_diff)
+    {
+        const size_t n = na_ * nb_;
+        diag_diff = rel_diff(hii, hii_ref);
+        thrust::device_vector<ElemT> x(n), y(n), y_ref(n);
+        thrust::transform(thrust::counting_iterator<size_t>(0), thrust::counting_iterator<size_t>(n),
+                          x.begin(), factored::hash_value());
+        run(hii, x, y);
+        ref.run(hii_ref, x, y_ref);
+        mult_diff = rel_diff(y, y_ref);
+    }
+
+    /// Flops of the cross-term tensor-core work per multiplication.
+    double cross_flops() const { return cross_.flops; }
+
+private:
+    template <typename T>
+    static T* ptr(thrust::device_vector<T> &v) { return thrust::raw_pointer_cast(v.data()); }
+    template <typename T>
+    static const T* ptr(const thrust::device_vector<T> &v) { return thrust::raw_pointer_cast(v.data()); }
+    static double rel_diff(const thrust::device_vector<ElemT> &a, const thrust::device_vector<ElemT> &b)
+    {
+        thrust::device_vector<ElemT> d(a.size());
+        thrust::transform(a.begin(), a.end(), b.begin(), d.begin(), thrust::minus<ElemT>());
+        const double dd = thrust::inner_product(d.begin(), d.end(), d.begin(), 0.0);
+        const double bb = thrust::inner_product(b.begin(), b.end(), b.begin(), 0.0);
+        return bb > 0.0 ? std::sqrt(dd / bb) : std::sqrt(dd);
+    }
+    static void check(const char* where)
+    {
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) err = cudaDeviceSynchronize();
+        if (err != cudaSuccess)
+            throw std::runtime_error(std::string("factored_mult: ") + where + ": " + cudaGetErrorString(err));
+    }
+
+    int L_ = 0;
+    double I0_ = 0.0;
+    size_t na_ = 0, nb_ = 0;
+    factored::SpinStrings sa_, sb_;
+    factored::SpinTiles ta_, tb_;
+    factored::CrossTables cross_;
+    thrust::device_vector<unsigned long long> xa_, xb_;
+    thrust::device_vector<double> da_, db_, Jb_, T_;
+};
+
+} // namespace sbd
+
+#endif
