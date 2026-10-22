@@ -24,6 +24,8 @@ Within a string the orbitals are ordered ascending, and the factored form takes 
 alpha string followed by the beta string. sbd interleaves the spins (spin orbital 2i is alpha i,
 2i+1 is beta i), so run() multiplies by the phase P(a, b) = (-1)^(sum over i in a of the beta
 electrons below i) on the way in and on the way out; the vectors outside stay in sbd's convention.
+Inside, the strings of each spin are ordered by their bit-reversed value, which keeps the beta
+tiles of the cross term compact; the same passes apply that permutation.
 
 Limits of this version: one MPI rank, real coefficients, at most 64 orbitals.
 */
@@ -267,11 +269,17 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
     }
 }
 
-// out[a, b] = P(a, b) in[a, b]: interleaved spin order <-> alpha string then beta string
-static __global__ void phase_multiply(const unsigned long long* __restrict__ xa,
-                                      const unsigned long long* __restrict__ xb,
-                                      long long na, long long nb,
-                                      const double* in, double* out)
+// Between sbd's layout and the engine's: the engine orders the strings of each spin by their
+// bit-reversed value (see Init) and its determinants alpha string then beta string, so element
+// (a', b') of an engine vector is P(a, b) times element (pa[a'], pb[b']) of an sbd vector, with
+// P(a, b) = (-1)^(sum over i in a of the beta electrons below i) from sbd's interleaved spins.
+//   scatter == 0: out[a', b'] = P in[pa[a'], pb[b']]   (sbd -> engine)
+//   scatter == 1: out[pa[a'], pb[b']] = P in[a', b']   (engine -> sbd)
+static __global__ void phase_permute(const unsigned long long* __restrict__ xa,
+                                     const unsigned long long* __restrict__ xb,
+                                     const int* __restrict__ pa, const int* __restrict__ pb,
+                                     long long na, long long nb, const double* __restrict__ in,
+                                     double* __restrict__ out, int scatter)
 {
     const long long n = na * nb;
     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
@@ -285,7 +293,9 @@ static __global__ void phase_multiply(const unsigned long long* __restrict__ xa,
             A &= A - 1;
             s += __popcll(B & ((1ull << o) - 1));
         }
-        out[i] = (s & 1) ? -in[i] : in[i];
+        const long long e = (long long)pa[a] * nb + pb[b];
+        if (scatter) out[e] = (s & 1) ? -in[i] : in[i];
+        else out[i] = (s & 1) ? -in[e] : in[e];
     }
 }
 
@@ -691,6 +701,32 @@ public:
         strings(bdets, sb_);
         na_ = sa_.n;
         nb_ = sb_.n;
+        // Engine order: strings sorted by their bit-reversed value (orbital 0 most significant).
+        // sbd sorts with the highest orbital most significant; in that order a 64-wide tile of beta
+        // kets mixes strings that share fewer orbitals, and the cross term computes 1.8x the rows
+        // (507 against 285 padded rows per tile at 10,000 strings).
+        const std::vector<uint64_t> xa_ext = sa_.x, xb_ext = sb_.x;
+        auto engine_order = [&](factored::SpinStrings &s, std::vector<int> &perm) {
+            perm.resize(s.n);
+            for (size_t i = 0; i < s.n; i++) perm[i] = static_cast<int>(i);
+            auto reversed = [&](uint64_t v) {
+                uint64_t r = 0;
+                for (int o = 0; o < L_; o++)
+                    if ((v >> o) & 1) r |= 1ull << (L_ - 1 - o);
+                return r;
+            };
+            std::vector<uint64_t> key(s.n);
+            for (size_t i = 0; i < s.n; i++) key[i] = reversed(s.x[i]);
+            std::stable_sort(perm.begin(), perm.end(), [&](int i, int j) { return key[i] < key[j]; });
+            std::vector<uint64_t> x(s.n);
+            for (size_t i = 0; i < s.n; i++) x[i] = s.x[perm[i]];
+            s.x = x;
+        };
+        std::vector<int> pa, pb;
+        engine_order(sa_, pa);
+        engine_order(sb_, pb);
+        pa_ = pa;
+        pb_ = pb;
 
         std::vector<double> h1(static_cast<size_t>(L_) * L_);
         std::vector<double> eri(static_cast<size_t>(L_) * L_ * L_ * L_);
@@ -716,13 +752,19 @@ public:
         std::vector<unsigned long long> xa(sa_.x.begin(), sa_.x.end()), xb(sb_.x.begin(), sb_.x.end());
         xa_ = xa;
         xb_ = xb;
-        da_ = sa_.hdiag;
-        db_ = sb_.hdiag;
+        // the diagonal is made in sbd's order
+        std::vector<unsigned long long> xae(xa_ext.begin(), xa_ext.end());
+        xa_ext_ = xae;
+        std::vector<double> da(na_), db(nb_);
+        for (size_t i = 0; i < na_; i++) da[pa[i]] = sa_.hdiag[i];
+        for (size_t i = 0; i < nb_; i++) db[pb[i]] = sb_.hdiag[i];
+        da_ = da;
+        db_ = db;
         std::vector<double> Jb(nb_ * L_, 0.0);  // Jb[b, p] = sum over r in b of (pp|rr)
         for (size_t b = 0; b < nb_; b++)
             for (int p = 0; p < L_; p++)
                 for (int r = 0; r < L_; r++)
-                    if ((sb_.x[b] >> r) & 1)
+                    if ((xb_ext[b] >> r) & 1)
                         Jb[b * L_ + p] += eri[((static_cast<size_t>(p) * L_ + p) * L_ + r) * L_ + r];
         Jb_ = Jb;
 
@@ -744,7 +786,7 @@ public:
     {
         hii.resize(na_ * nb_);
         factored::diagonal_terms<<<1024, 256>>>(
-            thrust::raw_pointer_cast(xa_.data()), thrust::raw_pointer_cast(da_.data()),
+            thrust::raw_pointer_cast(xa_ext_.data()), thrust::raw_pointer_cast(da_.data()),
             thrust::raw_pointer_cast(db_.data()), thrust::raw_pointer_cast(Jb_.data()), L_,
             static_cast<long long>(na_), static_cast<long long>(nb_), I0_,
             thrust::raw_pointer_cast(hii.data()));
@@ -761,13 +803,15 @@ public:
         const size_t n = na_ * nb_;
         if (Wb.size() != n) Wb.resize(n);
         if (T_.size() != n) T_.resize(n);
+        if (S_.size() != n) S_.resize(n);
         const unsigned long long* xa = thrust::raw_pointer_cast(xa_.data());
         const unsigned long long* xb = thrust::raw_pointer_cast(xb_.data());
         double* T = thrust::raw_pointer_cast(T_.data());
-        double* S = thrust::raw_pointer_cast(Wb.data());
+        double* S = thrust::raw_pointer_cast(S_.data());
         const long long na = static_cast<long long>(na_), nb = static_cast<long long>(nb_);
 
-        factored::phase_multiply<<<1024, 256>>>(xa, xb, na, nb, thrust::raw_pointer_cast(Wk.data()), T);
+        factored::phase_permute<<<1024, 256>>>(xa, xb, ptr(pa_), ptr(pb_), na, nb,
+                                               thrust::raw_pointer_cast(Wk.data()), T, 0);
         const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
         factored::spmm_same_spin<<<dim3(ta_.nT, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
             T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, 0);
@@ -784,7 +828,8 @@ public:
                     nb, S);
             }
         }
-        factored::phase_multiply<<<1024, 256>>>(xa, xb, na, nb, S, S);
+        factored::phase_permute<<<1024, 256>>>(xa, xb, ptr(pa_), ptr(pb_), na, nb, S,
+                                               thrust::raw_pointer_cast(Wb.data()), 1);
         check("run");
     }
 
@@ -834,8 +879,11 @@ private:
     factored::SpinStrings sa_, sb_;
     factored::SpinTiles ta_, tb_;
     factored::CrossTables cross_;
-    thrust::device_vector<unsigned long long> xa_, xb_;
-    thrust::device_vector<double> da_, db_, Jb_, T_;
+    thrust::device_vector<unsigned long long> xa_, xb_;  // engine order
+    thrust::device_vector<unsigned long long> xa_ext_;   // sbd order (diagonal)
+    thrust::device_vector<int> pa_, pb_;                 // engine index -> sbd index
+    thrust::device_vector<double> da_, db_, Jb_;         // sbd order (diagonal)
+    thrust::device_vector<double> T_, S_;                // engine-order input and output
 };
 
 } // namespace sbd
