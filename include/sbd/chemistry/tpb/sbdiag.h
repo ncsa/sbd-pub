@@ -52,11 +52,11 @@ namespace sbd {
 	  int max_memory_gb_for_determinants = -1;
 	  bool thrust_collapse_loops = true;
 	  bool cpu_subspace = false;
-	  // --factored_mult 1: H·C from string factors (mult_factored_thrust.h);
+#endif
+	  // --factored_mult 1: H·C from string factors (mult_factored_thrust.h; Thrust builds only);
 	  // --factored_mult_check 1 compares it with the method 0 multiplication first
 	  int factored_mult = 0;
 	  int factored_mult_check = 0;
-#endif
 	};
 
     SBD generate_sbd_data(int argc, char *argv[]) {
@@ -138,14 +138,20 @@ namespace sbd {
 	  sbd_data.cpu_subspace = std::atoi(argv[i+1]) == 1;
 	  i++;
 	}
+#endif
 	if( std::string(argv[i]) == "--factored_mult" ) {
 	  sbd_data.factored_mult = std::atoi(argv[++i]);
 	}
 	if( std::string(argv[i]) == "--factored_mult_check" ) {
 	  sbd_data.factored_mult_check = std::atoi(argv[++i]);
 	}
-#endif
       }
+#ifndef SBD_THRUST
+      // parsed in every build so that it is refused here rather than silently ignored
+      if( sbd_data.factored_mult != 0 ) {
+	throw std::invalid_argument("--factored_mult 1 needs a Thrust (CUDA) build of sbd");
+      }
+#endif
       return sbd_data;
     }
 
