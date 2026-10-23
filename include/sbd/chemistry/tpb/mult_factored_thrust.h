@@ -307,7 +307,8 @@ static __global__ void gather_phase(const unsigned long long* __restrict__ xa,
     }
 }
 
-// W[pa[a'] - a0, pb[b']] = P S[a' - a0, b'] for this rank's engine rows a0 <= a' < a1
+// W[pa[a'] - a0, pb[b']] += P S[a' - a0, b'] for this rank's engine rows a0 <= a' < a1 (run() adds
+// H C into its output, as Lanczos expects)
 static __global__ void scatter_phase(const unsigned long long* __restrict__ xa,
                                      const unsigned long long* __restrict__ xb,
                                      const int* __restrict__ pa, const int* __restrict__ pb,
@@ -319,7 +320,7 @@ static __global__ void scatter_phase(const unsigned long long* __restrict__ xa,
          i += (long long)gridDim.x * blockDim.x) {
         const long long r = i / nb, b = i - r * nb, a = a0 + r;
         const double v = S[i];
-        W[(pa[a] - a0) * nb + pb[b]] = fm_phase(xa[a], xb[b]) ? -v : v;
+        W[(pa[a] - a0) * nb + pb[b]] += fm_phase(xa[a], xb[b]) ? -v : v;
     }
 }
 
@@ -902,7 +903,7 @@ public:
         check("diagonal_terms");
     }
 
-    /// Wb = H Wk for this rank's rows; hii is not needed (the diagonal is part of the factors).
+    /// Wb += H Wk for this rank's rows; hii is not needed (the diagonal is part of the factors).
     void run(const thrust::device_vector<ElemT> &hii,
              const thrust::device_vector<ElemT> &Wk,
              thrust::device_vector<ElemT> &Wb) override
