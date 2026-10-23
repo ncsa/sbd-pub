@@ -94,6 +94,8 @@ __device__ __forceinline__ void fm_load_v_tile(double* stage, const double* Vs, 
    also holds the X tile) arrive by cp.async. For each 64-row chunk of the rows the tile can use
    (rlist), 4 warps of 32 x 32 form X with mma.sync m8n8k4 f64, and the entries with E_rs b' in the
    list are added into sigma (gent: rs_local 6 | b'_local 6 | sign 1 | b 19, grouped by chunk).
+   C holds the beta columns from ccol0 of every alpha row, with row stride ldc; the launch covers the
+   beta tiles from bt0.
 */
 static __global__ void __launch_bounds__(128)
 fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv,
@@ -101,10 +103,11 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
             const int* __restrict__ krow, const int* __restrict__ aidx,
             const long long* __restrict__ goff, const unsigned* __restrict__ gent,
             const int* __restrict__ cbase, const int* __restrict__ rlist, long long nb,
-            long long a0, double* sigma)  // sigma holds this rank's bras a0.. (rows a - a0)
+            long long a0, double* sigma,  // sigma holds this rank's bras a0.. (rows a - a0)
+            long long ldc, long long ccol0, int bt0)
 {
     extern __shared__ double sm[];
-    const int bt = blockIdx.x;
+    const int bt = blockIdx.x + bt0;
     const long long a = aidx[blockIdx.y];
     const long long kp = kptr[a];
     const int K = (int)(kptr[a + 1] - kp);  // multiple of 4, padded with the zero row
@@ -119,7 +122,7 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
     const int wm = warp >> 1, wn = warp & 1;  // 2 x 2 warps, 32 x 32 outputs each
     const int r4 = lane & 3, q8 = lane >> 2;  // fragment row/column within an 8 x 4 / 4 x 8 piece
     for (int i = tid; i < K; i += 128) {
-        cr_s[i] = (long long)kket[kp + i] * nb;
+        cr_s[i] = (long long)kket[kp + i] * ldc;
         vr_s[i] = krow[kp + i] * ldv;
     }
     for (int i = tid; i < nch * 64; i += 128) rl_s[i] = rlist[(long long)c0 * 64 + i];
@@ -130,7 +133,7 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
     {   // C tile: one cp.async group
         const bool ok = b0 + m < nb;
         for (int k = kh; k < K; k += 2)
-            fm_cp_async8(Bs + k * SBD_FM_LD + m, C + cr_s[k] + (ok ? b0 + m : 0), ok);
+            fm_cp_async8(Bs + k * SBD_FM_LD + m, C + cr_s[k] + (ok ? b0 + m - ccol0 : 0), ok);
         fm_cp_commit();
     }
     if (nch > 0) fm_load_v_tile(ring, Vs, rl_s, vr_s, K, 0, m, kh);
@@ -187,20 +190,21 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
 }
 
 // 64 x 64 slice of C for same-spin tile t into a ring stage (mode 0: rows J0.. of C; mode 1:
-// columns J0.., transposed), by cp.async. C holds the alpha rows [cw0, cw1) from row cbase (the rows
-// of one pass); mode 0 zero-fills the rows outside them.
+// columns J0.., transposed), by cp.async. Element (alpha row i, beta column j) of C is at
+// C[(i - crow0) * ldc + j - ccol0]; the tile's H column index J0 + c outside [cw0, cw1) reads zero.
 __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, long long J0, long long y0,
-                                               long long nrow, long long nchk, long long nb, int mode,
-                                               int tid, long long cw0, long long cw1, long long cbase)
+                                               long long nrow, long long nchk, int mode, int tid,
+                                               long long cw0, long long cw1, long long crow0,
+                                               long long ccol0, long long ldc)
 {
     const int u = tid & 63;  // consecutive threads read consecutive global addresses
     for (int v = tid >> 6; v < 64; v += 2 * SBD_FM_TR / 64) {
         if (mode == 0) {      // Cs[c][y] = C[J0 + c, y0 + y], c = v, y = u
             bool ok = J0 + v < nrow && J0 + v >= cw0 && J0 + v < cw1 && y0 + u < nchk;
-            fm_cp_async8(dst + v * SBD_FM_LDC + u, C + (ok ? (J0 + v - cbase) * nb + y0 + u : 0), ok);
+            fm_cp_async8(dst + v * SBD_FM_LDC + u, C + (ok ? (J0 + v - crow0) * ldc + y0 + u - ccol0 : 0), ok);
         } else {              // Cs[c][y] = C[y0 + y, J0 + c], y = v, c = u
-            bool ok = y0 + v < nchk && J0 + u < nrow;
-            fm_cp_async8(dst + u * SBD_FM_LDC + v, C + (ok ? (y0 + v - cbase) * nb + J0 + u : 0), ok);
+            bool ok = y0 + v < nchk && J0 + u < nrow && J0 + u >= cw0 && J0 + u < cw1;
+            fm_cp_async8(dst + u * SBD_FM_LDC + v, C + (ok ? (y0 + v - crow0) * ldc + J0 + u - ccol0 : 0), ok);
         }
     }
     fm_cp_commit();
@@ -213,7 +217,8 @@ __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, lon
      mode 0: sigma[I rows, chunk] += H_a[I rows, :] C[:, chunk]      (I over alpha tiles built from
              row rbase, rows outside [rlo, rhi) dropped)
      mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta, chunks of [rlo, rhi))
-   C holds the alpha rows [cw0, cw1) from row cbase; mode 0 skips the tiles of H_a outside them.
+   The chunks cover [ylo, yhi) (beta strings in mode 0, alpha rows in mode 1); only the tiles whose
+   columns of H overlap [cw0, cw1) are read; C is addressed as in fm_load_c_tile.
    One block per (tile row I, 64-wide chunk); blockIdx.x = I runs fastest, so the blocks in flight
    share one slice of C, which stays in L2. Each nonzero tile's 64 x 64 slice of C arrives in a
    two-stage cp.async ring; thread (row, half) owns one output row and 32 output columns in
@@ -224,17 +229,18 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
                const int* __restrict__ tj, const int* __restrict__ rp,
                const unsigned char* __restrict__ ec, const double* __restrict__ ev,
                long long na, long long nb, long long rlo, long long rhi, long long sbase, long long rbase,
-               int mode, long long cw0, long long cw1, long long cbase)
+               int mode, long long ylo, long long yhi, long long cw0, long long cw1, long long crow0,
+               long long ccol0, long long ldc)
 {
     extern __shared__ double smem[];  // two stages of 64 x LDC doubles
     const int I = blockIdx.x, ch = blockIdx.y;
     const int tid = threadIdx.x;
     const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
     const long long nrow = mode == 0 ? na : nb;   // rows and columns of this H
-    const long long nchk = mode == 0 ? nb : rhi;  // end of the chunked index
-    const long long y0 = (mode == 0 ? 0 : rlo) + (long long)ch * 64;
+    const long long nchk = yhi;                   // end of the chunked index
+    const long long y0 = ylo + (long long)ch * 64;
     int t0 = trp[I], t1 = trp[I + 1];
-    if (mode == 0) {  // tiles ascend by column: keep those overlapping [cw0, cw1)
+    {   // tiles ascend by column: keep those overlapping [cw0, cw1)
         int lo = t0, hi = t1;
         while (lo < hi) { const int m = (lo + hi) / 2; if ((long long)(tj[m] + 1) * 64 <= cw0) lo = m + 1; else hi = m; }
         t0 = lo;
@@ -245,12 +251,12 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
     double acc[32];
 #pragma unroll
     for (int k = 0; k < 32; k++) acc[k] = 0.0;
-    if (t0 < t1) fm_load_c_tile(smem, C, (long long)tj[t0] * 64, y0, nrow, nchk, nb, mode, tid, cw0, cw1, cbase);
+    if (t0 < t1) fm_load_c_tile(smem, C, (long long)tj[t0] * 64, y0, nrow, nchk, mode, tid, cw0, cw1, crow0, ccol0, ldc);
     for (int t = t0; t < t1; t++) {
         const int st = (t - t0) & 1;
         if (t + 1 < t1) {
             fm_load_c_tile(smem + (st ^ 1) * 64 * SBD_FM_LDC, C, (long long)tj[t + 1] * 64, y0, nrow, nchk,
-                           nb, mode, tid, cw0, cw1, cbase);
+                           mode, tid, cw0, cw1, crow0, ccol0, ldc);
             fm_cp_wait1();
         }
         else fm_cp_wait0();
@@ -299,9 +305,9 @@ __device__ __forceinline__ int fm_phase(unsigned long long A, unsigned long long
     return s & 1;
 }
 
-// T[a' - tbase, b'] = P Cg[gofs[a'] - shift, pb[b']] for the engine rows r0 <= a' < r1; Cg is this
-// rank's block of the sbd vector, its row for engine row a' at gofs[a'] - shift (gofs: rows of the
-// rank blocks padded to the same length)
+// T[a' - tbase, b'] = P Cg[gofs[a'] - shift, pb[b']] for the engine rows r0 <= a' < r1; Cg is the gathered
+// sbd vector (shift 0), its row for engine row a' at gofs[a'] (rank blocks padded to the same
+// length), or this rank's block of it (shift = the block's first row)
 static __global__ void gather_phase(const unsigned long long* __restrict__ xa,
                                     const unsigned long long* __restrict__ xb,
                                     const long long* __restrict__ gofs, const int* __restrict__ pb,
@@ -588,31 +594,24 @@ inline std::vector<int> ColumnTilesPerTileRow(const SpinStrings &s)
 }
 
 /**
-   Tables of the cross term. Per pass (alpha kets [g0, g1)) and bra alpha string its excitations
-   with kets in the pass, padded to a multiple of 4 (C rows kket relative to g0, signed V rows
-   krow); the signed integral rows Vs; per 64-wide tile of beta kets the rs rows it can use (rlist,
-   in 64-row chunks from cbase) with its scatter entries (gent from goff, one range per chunk).
+   Tables of the cross term: per bra alpha string its excitation list padded to a multiple of 4
+   (C rows kket, signed V rows krow), the signed integral rows Vs, and per 64-wide tile of beta kets
+   the rs rows it can use (rlist, in 64-row chunks from cbase) with its scatter entries (gent from
+   goff, one range per chunk).
 */
-struct CrossPass {
-    long long g0 = 0, g1 = 0;
-    std::vector<int> Kp;  // padded excitation count of each bra in this pass (host)
-    thrust::device_vector<long long> kptr;
-    thrust::device_vector<int> kket, krow;
-    std::vector<thrust::device_vector<int>> bucket_ids;
-    std::vector<size_t> bucket_smem;
-    std::vector<int> bucket_group;   // index into fm_kp_bounds
-    std::vector<double> bucket_kp;   // sum of the padded excitation counts of its bras
-};
-
 struct CrossTables {
     int ldv = 0;
     size_t nbt = 0;
     int max_chunks = 0;
     thrust::device_vector<double> Vs;
-    thrust::device_vector<long long> goff;
-    thrust::device_vector<int> cbase, rlist;
+    thrust::device_vector<long long> kptr, goff;
+    thrust::device_vector<int> kket, krow, cbase, rlist;
     thrust::device_vector<unsigned> gent;
-    std::vector<CrossPass> pass;
+    std::vector<int> Kp;  // padded excitation count of each bra (host)
+    std::vector<thrust::device_vector<int>> bucket_ids;
+    std::vector<size_t> bucket_smem;
+    std::vector<int> bucket_group;   // index into fm_kp_bounds
+    std::vector<double> bucket_kp;   // sum of the padded excitation counts of its bras
     double flops = 0.0;
     size_t total_chunks = 0;
 };
@@ -628,9 +627,8 @@ inline size_t fm_cross_smem(int km, int max_chunks)
            + static_cast<size_t>(max_chunks) * 64 * sizeof(int);
 }
 
-// gb: the passes' first alpha rows, and na
 inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
-                             const std::vector<double> &eri, const std::vector<long long> &gb)
+                             const std::vector<double> &eri)
 {
     const int nrs = L * L;
     const int nrc = nrs / 64 + 1;  // > nrs / 64, so column nrs (padding) exists and is zero
@@ -644,35 +642,24 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
         }
     x.Vs = Vs;
 
-    // alpha side, per pass
+    // alpha side
     const size_t na = sa.n;
-    x.pass.assign(gb.size() - 1, CrossPass());
-    for (size_t q = 0; q + 1 < gb.size(); q++) {
-        CrossPass &cp = x.pass[q];
-        cp.g0 = gb[q];
-        cp.g1 = gb[q + 1];
-        std::vector<long long> kptr(na + 1, 0);
-        cp.Kp.assign(na, 0);
-        for (size_t a = 0; a < na; a++) {
-            int k = 0;
-            for (int64_t e = sa.eptr[a]; e < sa.eptr[a + 1]; e++) k += sa.eket[e] >= cp.g0 && sa.eket[e] < cp.g1;
-            cp.Kp[a] = (k + 3) / 4 * 4;
-            kptr[a + 1] = kptr[a] + cp.Kp[a];
-        }
-        std::vector<int> kket(kptr[na], 0), krow(kptr[na], 2 * nrs);
-        for (size_t a = 0; a < na; a++) {
-            long long at = kptr[a];
-            for (int64_t e = sa.eptr[a]; e < sa.eptr[a + 1]; e++) {
-                if (sa.eket[e] < cp.g0 || sa.eket[e] >= cp.g1) continue;
-                kket[at] = static_cast<int>(sa.eket[e] - cp.g0);
-                krow[at] = sa.esg[e] > 0 ? sa.epq[e] : nrs + sa.epq[e];
-                at++;
-            }
-        }
-        cp.kptr = kptr;
-        cp.kket = kket;
-        cp.krow = krow;
+    std::vector<long long> kptr(na + 1, 0);
+    std::vector<int> Kp(na);
+    for (size_t a = 0; a < na; a++) {
+        Kp[a] = static_cast<int>((sa.eptr[a + 1] - sa.eptr[a] + 3) / 4 * 4);
+        kptr[a + 1] = kptr[a] + Kp[a];
     }
+    std::vector<int> kket(kptr[na], 0), krow(kptr[na], 2 * nrs);
+    for (size_t a = 0; a < na; a++)
+        for (int64_t e = sa.eptr[a]; e < sa.eptr[a + 1]; e++) {
+            const long long at = kptr[a] + (e - sa.eptr[a]);
+            kket[at] = sa.eket[e];
+            krow[at] = sa.esg[e] > 0 ? sa.epq[e] : nrs + sa.epq[e];
+        }
+    x.kptr = kptr;
+    x.kket = kket;
+    x.krow = krow;
 
     // beta side: rows used per 64-wide tile of kets, scatter entries grouped by chunk
     const size_t nb = sb.n;
@@ -718,40 +705,39 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
     x.rlist = rlist;
     x.goff = goff;
     x.gent = gent;
+    x.Kp = Kp;
     x.total_chunks = cbase[x.nbt];
 }
 
-// launches for the bras a0 <= a < a1 that this rank computes, per pass, grouped by padded
-// excitation count so that the shared memory of a launch fits its bras
+// launches for the bras a0 <= a < a1 that this rank computes, grouped by padded excitation count
+// so that the shared memory of a launch fits its bras
 inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
 {
+    x.bucket_ids.clear();
+    x.bucket_smem.clear();
+    x.bucket_group.clear();
+    x.bucket_kp.clear();
+    int lo = 0;
     double ksum = 0.0;
-    for (CrossPass &cp : x.pass) {
-        cp.bucket_ids.clear();
-        cp.bucket_smem.clear();
-        cp.bucket_group.clear();
-        cp.bucket_kp.clear();
-        int lo = 0;
-        for (int g = 0; g < static_cast<int>(sizeof(fm_kp_bounds) / sizeof(int)); g++) {
-            const int hi = fm_kp_bounds[g];
-            std::vector<int> ids;
-            int km = 0;
-            double kp = 0.0;
-            for (size_t a = a0; a < a1; a++)
-                if (cp.Kp[a] > lo && cp.Kp[a] <= hi) {
-                    ids.push_back(static_cast<int>(a));
-                    km = std::max(km, cp.Kp[a]);
-                    kp += cp.Kp[a];
-                }
-            lo = hi;
-            if (ids.empty()) continue;
-            cp.bucket_ids.emplace_back(ids);
-            cp.bucket_smem.push_back(fm_cross_smem(km, x.max_chunks));
-            cp.bucket_group.push_back(g);
-            cp.bucket_kp.push_back(kp);
-        }
-        for (size_t a = a0; a < a1; a++) ksum += cp.Kp[a];
+    for (int g = 0; g < static_cast<int>(sizeof(fm_kp_bounds) / sizeof(int)); g++) {
+        const int hi = fm_kp_bounds[g];
+        std::vector<int> ids;
+        int km = 0;
+        double kp = 0.0;
+        for (size_t a = a0; a < a1; a++)
+            if (x.Kp[a] > lo && x.Kp[a] <= hi) {
+                ids.push_back(static_cast<int>(a));
+                km = std::max(km, x.Kp[a]);
+                kp += x.Kp[a];
+            }
+        lo = hi;
+        if (ids.empty()) continue;
+        x.bucket_ids.emplace_back(ids);
+        x.bucket_smem.push_back(fm_cross_smem(km, x.max_chunks));
+        x.bucket_group.push_back(g);
+        x.bucket_kp.push_back(kp);
     }
+    for (size_t a = a0; a < a1; a++) ksum += x.Kp[a];
     x.flops = 2.0 * 64 * 64 * static_cast<double>(x.total_chunks) * ksum;
 }
 
@@ -780,8 +766,8 @@ public:
             cudaEventDestroy(gathered_);
             cudaEventDestroy(local_ready_);
             for (int b = 0; b < 2; b++) {
+                cudaEventDestroy(pass_packed_[b]);
                 cudaEventDestroy(pass_in_[b]);
-                cudaEventDestroy(pass_done_[b]);
             }
             cudaStreamDestroy(comm_);
         }
@@ -905,12 +891,7 @@ public:
         factored::BuildSpinStrings(sb_, L_, h1, eri);
         factored::BuildSpinTiles(tb_, sb_, 0.0);  // the alpha tiles cover the computed rows (SplitRows)
         tcnt_ = factored::ColumnTilesPerTileRow(sa_);
-        // Passes: each multiplication brings in the alpha kets [gb_[q], gb_[q + 1]) at a time, so a
-        // rank holds 1/Q of the input vector (two such buffers when Q > 1) instead of all of it.
-        Q_ = std::max(1, std::min(passes, static_cast<int>(na_)));
-        gb_.assign(Q_ + 1, 0);
-        for (int q = 0; q <= Q_; q++) gb_[q] = static_cast<long long>(na_) * q / Q_;
-        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri, gb_);
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
 
         // Shared memory of the largest cross-term launch on any rank, so that every rank sets the
         // same limit and the occupancy of each group of bras can be queried for the work estimate.
@@ -918,9 +899,8 @@ public:
         for (size_t g = 0, lo = 0; g < sizeof(factored::fm_kp_bounds) / sizeof(int); g++) {
             const int hi = factored::fm_kp_bounds[g];
             int km = 0;
-            for (const factored::CrossPass &cp : cross_.pass)
-                for (size_t a = 0; a < na_; a++)
-                    if (cp.Kp[a] > static_cast<int>(lo) && cp.Kp[a] <= hi) km = std::max(km, cp.Kp[a]);
+            for (size_t a = 0; a < na_; a++)
+                if (cross_.Kp[a] > static_cast<int>(lo) && cross_.Kp[a] <= hi) km = std::max(km, cross_.Kp[a]);
             km_all.push_back(km);
             lo = hi;
         }
@@ -938,13 +918,19 @@ public:
                              2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
         ranges_ = ranges;
         BalanceRows(km_all);
+        // Passes: a multiplication brings in the beta columns [bg_[q], bg_[q + 1]) of the input at a
+        // time (whole 64-wide tiles), so a rank holds 1/Q of it (two such buffers when Q > 1).
+        Q_ = P_ == 1 ? 1 : std::max(1, std::min(passes, static_cast<int>(cross_.nbt)));
+        bg_.assign(Q_ + 1, 0);
+        for (int q = 0; q <= Q_; q++)
+            bg_[q] = std::min<long long>(nb_, static_cast<long long>(cross_.nbt * q / Q_) * 64);
         if (rank_ == 0) {
-            size_t maxgroup = 0;
-            for (int q = 0; q < Q_; q++) maxgroup = std::max<size_t>(maxgroup, gb_[q + 1] - gb_[q]);
+            size_t maxw = 0;
+            for (int q = 0; q < Q_; q++) maxw = std::max<size_t>(maxw, bg_[q + 1] - bg_[q]);
             const int nbuf = P_ == 1 ? 0 : std::min(Q_, 2);
             std::printf(" factored_mult: %d pass(es) per multiplication; input vector buffers %.2f GB per GPU "
-                        "(%d x %zu alpha rows) and own rows %.2f GB\n",
-                        Q_, 8e-9 * nbuf * maxgroup * nb_, nbuf, maxgroup, 8e-9 * (a1_ - a0_) * nb_);
+                        "(%d x %zu beta columns) and own rows %.2f GB\n",
+                        Q_, 8e-9 * nbuf * na_ * maxw, nbuf, maxw, 8e-9 * (a1_ - a0_) * nb_);
         }
         if (rank_ == 0)
             std::printf(" factored_mult: %zu alpha x %zu beta strings on %d rank(s); same-spin entries "
@@ -1005,8 +991,8 @@ public:
             cudaEventCreateWithFlags(&local_ready_, cudaEventDisableTiming);
             cudaEventCreateWithFlags(&gathered_, cudaEventDisableTiming);
             for (int b = 0; b < 2; b++) {
+                cudaEventCreateWithFlags(&pass_packed_[b], cudaEventDisableTiming);
                 cudaEventCreateWithFlags(&pass_in_[b], cudaEventDisableTiming);
-                cudaEventCreateWithFlags(&pass_done_[b], cudaEventDisableTiming);
             }
 #endif
         }
@@ -1033,11 +1019,11 @@ public:
         const size_t ncomp = (c1_ - c0_) * nb_;
         if (Wb.size() != nloc) Wb.resize(nloc);
         if (TL_.size() != nloc) TL_.resize(nloc);
-        size_t maxgroup = 0;
-        for (int q = 0; q < Q_; q++) maxgroup = std::max<size_t>(maxgroup, gb_[q + 1] - gb_[q]);
+        size_t maxw = 0;
+        for (int q = 0; q < Q_; q++) maxw = std::max<size_t>(maxw, bg_[q + 1] - bg_[q]);
         const int nbuf = P_ == 1 ? 0 : std::min(Q_, 2);  // one rank reads its own rows directly
         for (int b = 0; b < nbuf; b++)
-            if (Tb_[b].size() != maxgroup * nb_) Tb_[b].resize(maxgroup * nb_);
+            if (Tb_[b].size() != na_ * maxw) Tb_[b].resize(na_ * maxw);
         if (S_.size() != ncomp) S_.resize(ncomp);
         if (R_.size() != nrecv_rows_ * nb_) R_.resize(nrecv_rows_ * nb_);
         const long long na = static_cast<long long>(na_), nb = static_cast<long long>(nb_);
@@ -1061,100 +1047,110 @@ public:
             cudaEventRecord(e1, 0);
             marks.push_back({what, {e0, e1}});
         };
-        // beta same-spin terms for the computed rows [r0, r1), from C holding alpha rows from cbase
-        auto beta_terms = [&](long long r0, long long r1, const double* C, long long cbase) {
+        // beta same-spin terms for the computed rows [r0, r1) from the columns [cw0, cw1) of C, whose
+        // element (alpha row i, beta column j) is at C[(i - crow0) * ldc + j - ccol0]
+        auto beta_terms = [&](long long r0, long long r1, const double* C, long long crow0, long long ccol0,
+                              long long ldc, long long cw0, long long cw1) {
             if (r1 > r0)
                 timed(NG + 1, [&] {
                     factored::spmm_same_spin<<<dim3(tb_.nT, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
                         C, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, r0, r1,
-                        c0, 0, 1, 0, na, cbase);
+                        c0, 0, 1, r0, r1, cw0, cw1, crow0, ccol0, ldc);
                 });
         };
 
-        // This rank's rows in engine order and phase (TL); pass q brings in the rows [gb_[q],
-        // gb_[q + 1]) of every rank, each broadcast by its owner from TL, into Tb_[q % 2] on comm_,
-        // while the previous pass computes. The beta terms of the rows this rank owns and computes
-        // need only TL and run during the first broadcast.
+        // This rank's rows in engine order and phase (TL). Pass q brings in the beta columns
+        // [bg_[q], bg_[q + 1]) of every alpha row: each rank copies its rows' slab into Tb_[q % 2],
+        // and the owners broadcast them on comm_ while the previous pass computes. Each beta tile of
+        // the cross term and each beta chunk of the alpha terms is computed in the one pass that holds
+        // its columns; the beta terms of the rows a rank owns and computes need only TL and run during
+        // the first broadcast.
         factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), a0, a1, nb,
                                                static_cast<long long>(rank_ * maxrows_), a0, ptr(Wk), TL);
         cudaMemsetAsync(S, 0, ncomp * sizeof(double), 0);
-        auto pass_input = [&](int q) -> const double* {
-            return P_ == 1 ? TL + gb_[q] * nb : ptr(Tb_[q & 1]);
+        auto pack = [&](int q) {  // this rank's rows of pass q into its buffer, on the compute stream
+            const long long w = bg_[q + 1] - bg_[q];
+            cudaMemcpy2DAsync(ptr(Tb_[q & 1]) + a0 * w, w * sizeof(double), TL + bg_[q], nb * sizeof(double),
+                              w * sizeof(double), a1 - a0, cudaMemcpyDeviceToDevice, 0);
         };
 #ifdef SBD_USE_NCCL
-        auto broadcast = [&](int q) {
+        auto broadcast = [&](int q) {  // after pack(q), on comm_
             const int b = q & 1;
-            if (q >= 2) cudaStreamWaitEvent(comm_, pass_done_[b], 0);
-            double* dst = ptr(Tb_[b]);
+            const long long w = bg_[q + 1] - bg_[q];
+            cudaEventRecord(pass_packed_[b], 0);
+            cudaStreamWaitEvent(comm_, pass_packed_[b], 0);
+            double* buf = ptr(Tb_[b]);
             ncclGroupStart();
             for (int r = 0; r < P_; r++) {
-                const long long lo = std::max(gb_[q], ranges_[2 * r]), hi = std::min(gb_[q + 1], ranges_[2 * r + 1]);
+                const long long lo = ranges_[2 * r], hi = ranges_[2 * r + 1];
                 if (lo < hi)
-                    ncclBroadcast(r == rank_ ? TL + (lo - a0) * nb : dst + (lo - gb_[q]) * nb,
-                                  dst + (lo - gb_[q]) * nb, (hi - lo) * nb_, ncclDouble, r, nccl_, comm_);
+                    ncclBroadcast(buf + lo * w, buf + lo * w, (hi - lo) * w, ncclDouble, r, nccl_, comm_);
             }
             if (ncclGroupEnd() != ncclSuccess) throw std::runtime_error("factored_mult: pass broadcast failed");
             cudaEventRecord(pass_in_[b], comm_);
         };
         if (P_ > 1) {
             SBD_NVTX_RANGE_COLOR("MultTPBFactored::gather", __LINE__);
-            cudaEventRecord(local_ready_, 0);
-            cudaStreamWaitEvent(comm_, local_ready_, 0);
-            broadcast(0);
-            if (Q_ > 1) broadcast(1);
+            for (int q = 0; q < std::min(Q_, 2); q++) {
+                pack(q);
+                broadcast(q);
+            }
         }
 #endif
-        beta_terms(m0, m1, TL, a0);
+        beta_terms(m0, m1, TL, a0, 0, nb, 0, nb);
         for (int q = 0; q < Q_; q++) {
-            const long long g0 = gb_[q], g1 = gb_[q + 1];
+            const long long g0 = bg_[q], g1 = bg_[q + 1], w = g1 - g0;
+            const double* C = TL;
+            long long crow0 = a0, ccol0 = 0, ldc = nb;
             if (P_ > 1) {
+                C = ptr(Tb_[q & 1]);
+                crow0 = 0;
+                ccol0 = g0;
+                ldc = w;
 #ifdef SBD_USE_NCCL
                 cudaStreamWaitEvent(0, pass_in_[q & 1], 0);
 #else
                 // MPI: the broadcasts of a pass, after the kernels queued so far
+                pack(q);
                 cudaStreamSynchronize(0);
-                double* dst = ptr(Tb_[q & 1]);
                 std::vector<MPI_Request> req;
                 for (int r = 0; r < P_; r++) {
-                    const long long lo = std::max(g0, ranges_[2 * r]), hi = std::min(g1, ranges_[2 * r + 1]);
+                    const long long lo = ranges_[2 * r], hi = ranges_[2 * r + 1];
                     if (lo >= hi) continue;
-                    if (r == rank_)
-                        cudaMemcpy(dst + (lo - g0) * nb, TL + (lo - a0) * nb, (hi - lo) * nb_ * sizeof(double),
-                                   cudaMemcpyDeviceToDevice);
                     req.emplace_back();
-                    MPI_Ibcast(dst + (lo - g0) * nb, static_cast<int>((hi - lo) * nb), MPI_DOUBLE, r, this->b_comm_,
-                               &req.back());
+                    MPI_Ibcast(ptr(Tb_[q & 1]) + lo * w, static_cast<int>((hi - lo) * w), MPI_DOUBLE, r,
+                               this->b_comm_, &req.back());
                 }
                 MPI_Waitall(static_cast<int>(req.size()), req.data(), MPI_STATUSES_IGNORE);
 #endif
+                // beta terms of the computed rows owned by other ranks, from this pass's columns
+                beta_terms(c0, std::min(c1, a0), C, crow0, ccol0, ldc, g0, g1);
+                beta_terms(std::max(c0, a1), c1, C, crow0, ccol0, ldc, g0, g1);
             }
-            const double* C = pass_input(q);
-            // beta terms of the computed rows owned by other ranks, in the pass that holds them
-            beta_terms(std::max(c0, g0), std::min({c1, a0, g1}), C, g0);
-            beta_terms(std::max({c0, a1, g0}), std::min(c1, g1), C, g0);
-            if (ta_.nT > 0)
+            if (ta_.nT > 0 && w > 0)
                 timed(NG, [&] {
-                    factored::spmm_same_spin<<<dim3(ta_.nT, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                    factored::spmm_same_spin<<<dim3(ta_.nT, (w + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
                         C, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, c0, c1, c0,
-                        static_cast<long long>(ta_.r0), 0, g0, g1, g0);
+                        static_cast<long long>(ta_.r0), 0, g0, g1, 0, na, crow0, ccol0, ldc);
                 });
-            const factored::CrossPass &cp = cross_.pass[q];
-            for (size_t k = 0; k < cp.bucket_ids.size(); k++) {
-                const int* ids = ptr(cp.bucket_ids[k]);
-                const size_t count = cp.bucket_ids[k].size();
-                timed(cp.bucket_group[k], [&] {
+            const int bt0 = static_cast<int>(g0 / 64), nbt = static_cast<int>((w + 63) / 64);
+            for (size_t k = 0; k < cross_.bucket_ids.size() && nbt > 0; k++) {
+                const int* ids = ptr(cross_.bucket_ids[k]);
+                const size_t count = cross_.bucket_ids[k].size();
+                timed(cross_.bucket_group[k], [&] {
                     for (size_t y0 = 0; y0 < count; y0 += 65535) {
                         const unsigned ny = static_cast<unsigned>(std::min<size_t>(65535, count - y0));
-                        factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cp.bucket_smem[k]>>>(
-                            C, ptr(cross_.Vs), cross_.ldv, ptr(cp.kptr), ptr(cp.kket), ptr(cp.krow), ids + y0,
-                            ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist), nb, c0, S);
+                        factored::fused_cross<<<dim3(nbt, ny), 128, cross_.bucket_smem[k]>>>(
+                            C - crow0 * ldc, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket),
+                            ptr(cross_.krow), ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase),
+                            ptr(cross_.rlist), nb, c0, S, ldc, ccol0, bt0);
                     }
                 });
             }
 #ifdef SBD_USE_NCCL
-            if (P_ > 1) {
-                cudaEventRecord(pass_done_[q & 1], 0);
-                if (q + 2 < Q_) broadcast(q + 2);
+            if (P_ > 1 && q + 2 < Q_) {
+                pack(q + 2);  // into this pass's buffer, after its kernels
+                broadcast(q + 2);
             }
 #endif
         }
@@ -1274,14 +1270,10 @@ private:
     {
         std::vector<double> pre(na_ + 1, 0.0);
         for (size_t a = 0; a < na_; a++) {
-            double w = ca_ * tcnt_[a / SBD_FM_TR] / SBD_FM_TR + cr_;
-            for (const factored::CrossPass &cp : cross_.pass) {
-                const int kp = cp.Kp[a];
-                size_t g = 0;
-                while (kp > factored::fm_kp_bounds[g]) g++;
-                w += cg_[g] * kp;
-            }
-            pre[a + 1] = pre[a] + w;
+            const int kp = cross_.Kp[a];
+            size_t g = 0;
+            while (kp > factored::fm_kp_bounds[g]) g++;
+            pre[a + 1] = pre[a] + cg_[g] * kp + ca_ * tcnt_[a / SBD_FM_TR] / SBD_FM_TR + cr_;
         }
         double even = 0.0, before = 0.0, after = 0.0;
         for (int q = 0; q < P_; q++) {
@@ -1329,8 +1321,7 @@ private:
     {
         const size_t G = cg_.size();
         std::vector<double> v(2 * G + 4, 0.0);  // times and work: groups, alpha, beta
-        for (const factored::CrossPass &cp : cross_.pass)
-            for (size_t k = 0; k < cp.bucket_group.size(); k++) v[G + cp.bucket_group[k]] += cp.bucket_kp[k];
+        for (size_t k = 0; k < cross_.bucket_group.size(); k++) v[G + cross_.bucket_group[k]] += cross_.bucket_kp[k];
         for (size_t g = 0; g < G; g++) v[g] = t[g];
         v[2 * G] = t[G];
         v[2 * G + 1] = static_cast<double>(ta_.ntiles);
@@ -1412,17 +1403,17 @@ private:
     thrust::device_vector<int> pa_, pb_;                 // engine index -> sbd index
     thrust::device_vector<long long> gofs_;              // engine alpha row -> row of the gathered vector
     thrust::device_vector<double> da_, db_, Jb_;         // sbd order (diagonal)
-    thrust::device_vector<double> TL_, S_;                // own rows in engine order and phase, computed rows
-    thrust::device_vector<double> Tb_[2];                // the input rows of a pass (double-buffered)
+    thrust::device_vector<double> TL_, S_;               // own rows in engine order and phase, computed rows
+    thrust::device_vector<double> Tb_[2];                // a pass's beta columns of every alpha row
     int Q_ = 1;                                          // passes per multiplication
-    std::vector<long long> gb_;                          // first alpha row of each pass, and na
+    std::vector<long long> bg_;                          // first beta column of each pass, and nb
     thrust::device_vector<double> R_;                    // received rows of this rank's output
 #ifdef SBD_USE_NCCL
     ncclComm_t nccl_;
     bool nccl_ready_ = false;
     cudaStream_t comm_;                 // the gather
     cudaEvent_t local_ready_, gathered_;
-    cudaEvent_t pass_in_[2], pass_done_[2];  // a pass's input arrived; its buffer is free again
+    cudaEvent_t pass_packed_[2], pass_in_[2];  // a pass's own rows copied; its input arrived
 #endif
 };
 
