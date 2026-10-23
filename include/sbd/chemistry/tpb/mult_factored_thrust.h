@@ -782,7 +782,8 @@ public:
               const ElemT &I0,
               const oneInt<ElemT> &I1,
               const twoInt<ElemT> &I2,
-              MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm, MPI_Comm a_comm, int passes = 1)
+              MPI_Comm h_comm, MPI_Comm b_comm, MPI_Comm t_comm, MPI_Comm a_comm, int passes = 1,
+              size_t reserve_bytes = 0)
     {
         SBD_NVTX_RANGE_COLOR("MultTPBFactored::Init", __LINE__);
         if (!std::is_same<ElemT, double>::value)
@@ -918,20 +919,6 @@ public:
                              2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
         ranges_ = ranges;
         BalanceRows(km_all);
-        // Passes: a multiplication brings in the beta columns [bg_[q], bg_[q + 1]) of the input at a
-        // time (whole 64-wide tiles), so a rank holds 1/Q of it (two such buffers when Q > 1).
-        Q_ = P_ == 1 ? 1 : std::max(1, std::min(passes, static_cast<int>(cross_.nbt)));
-        bg_.assign(Q_ + 1, 0);
-        for (int q = 0; q <= Q_; q++)
-            bg_[q] = std::min<long long>(nb_, static_cast<long long>(cross_.nbt * q / Q_) * 64);
-        if (rank_ == 0) {
-            size_t maxw = 0;
-            for (int q = 0; q < Q_; q++) maxw = std::max<size_t>(maxw, bg_[q + 1] - bg_[q]);
-            const int nbuf = P_ == 1 ? 0 : std::min(Q_, 2);
-            std::printf(" factored_mult: %d pass(es) per multiplication; input vector buffers %.2f GB per GPU "
-                        "(%d x %zu beta columns) and own rows %.2f GB\n",
-                        Q_, 8e-9 * nbuf * na_ * maxw, nbuf, maxw, 8e-9 * (a1_ - a0_) * nb_);
-        }
         if (rank_ == 0)
             std::printf(" factored_mult: %zu alpha x %zu beta strings on %d rank(s); same-spin entries "
                         "%lld / %lld; cross term %.1f rs rows per 64-wide beta tile, %.3e flop per "
@@ -996,6 +983,57 @@ public:
             }
 #endif
         }
+        ChoosePasses(passes, reserve_bytes);
+    }
+
+    /**
+       Passes: a multiplication brings in the beta columns [bg_[q], bg_[q + 1]) of the input at a time
+       (whole 64-wide tiles), into two buffers of 1/Q of it each, the next pass's broadcast running
+       behind the current pass's kernels. With passes <= 0 Q is the smallest from 2 whose buffers fit
+       in the free GPU memory, after reserve_bytes for what the caller allocates later (the Davidson
+       or Lanczos vectors, the diagonal) and this engine's own rows (phased input, computed output,
+       received rows), with 5% to spare. Two passes were faster than one gather at 1e9 determinants
+       on 8 GPUs (43.9 against 45.2 s) and four nearly as fast (44.4 s). One rank needs no buffers.
+    */
+    void ChoosePasses(int passes, size_t reserve_bytes)
+    {
+        const int nbt = static_cast<int>(cross_.nbt);
+        auto buffers = [&](int q) {  // bytes of the pass buffers for q passes
+            size_t maxw = 0;
+            for (int k = 0; k < q; k++) {
+                const long long g0 = std::min<long long>(nb_, static_cast<long long>(cross_.nbt * k / q) * 64);
+                const long long g1 = std::min<long long>(nb_, static_cast<long long>(cross_.nbt * (k + 1) / q) * 64);
+                maxw = std::max<size_t>(maxw, g1 - g0);
+            }
+            return static_cast<size_t>(std::min(q, 2)) * na_ * maxw * sizeof(double);
+        };
+        const char* how = "requested";
+        if (P_ == 1) {
+            Q_ = 1;
+            how = "one rank";
+        } else if (passes > 0) {
+            Q_ = std::min(passes, nbt);
+        } else {
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            const double own = 8.0 * nb_ * ((a1_ - a0_) + 1.2 * (c1_ - c0_));  // phased rows, output, received
+            const double avail = static_cast<double>(free_b) - 0.05 * total_b - own - static_cast<double>(reserve_bytes);
+            int q = 2;
+            while (q < nbt && static_cast<double>(buffers(q)) > avail) q++;
+            int qmax = q;  // the same Q on every rank: the largest any rank needs
+            MPI_Allreduce(&q, &qmax, 1, MPI_INT, MPI_MAX, this->b_comm_);
+            if (static_cast<double>(buffers(qmax)) > avail && qmax >= nbt)
+                throw std::runtime_error("factored_mult: the input vector does not fit in GPU memory in any number of passes");
+            Q_ = qmax;
+            how = "chosen for the free GPU memory";
+        }
+        bg_.assign(Q_ + 1, 0);
+        for (int q = 0; q <= Q_; q++)
+            bg_[q] = std::min<long long>(nb_, static_cast<long long>(cross_.nbt * q / Q_) * 64);
+        if (rank_ == 0)
+            std::printf(" factored_mult: %d pass(es) per multiplication (%s); input vector buffers %.2f GB per "
+                        "GPU, own rows %.2f GB\n",
+                        Q_, how, P_ == 1 ? 0.0 : 1e-9 * buffers(Q_), 8e-9 * (a1_ - a0_) * nb_);
     }
 
     /// Diagonal of H for this rank's rows, in sbd's layout (the phase does not touch it).

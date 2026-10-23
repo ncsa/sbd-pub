@@ -55,10 +55,11 @@ namespace sbd {
 #endif
 	  // --factored_mult 1: H·C from string factors (mult_factored_thrust.h; Thrust builds only);
 	  // --factored_mult_check 1 compares it with the method 0 multiplication first;
-	  // --factored_passes Q brings in 1/Q of the input vector at a time (memory per GPU ~2N/Q)
+	  // --factored_passes Q brings in 1/Q of the input vector at a time (memory per GPU ~2N/Q);
+	  // 0 (the default) takes the smallest Q from 2 that fits in GPU memory
 	  int factored_mult = 0;
 	  int factored_mult_check = 0;
-	  int factored_passes = 1;
+	  int factored_passes = 0;
 	};
 
     SBD generate_sbd_data(int argc, char *argv[]) {
@@ -467,7 +468,10 @@ namespace sbd {
 	if( use_factored ) {
 	    SBD_NVTX_RANGE_COLOR("factored_mult.Init", __LINE__);
 	    factored_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L), helper, I0, I1, I2,
-	                       h_comm, b_comm, t_comm, a_comm, sbd_data.factored_passes);
+	                       h_comm, b_comm, t_comm, a_comm, sbd_data.factored_passes,
+	                       // allocated later: the eigensolver's vectors on the GPU and the diagonal
+	                       sizeof(double) * (helper[0].braAlphaEnd - helper[0].braAlphaStart) * bdet.size()
+	                       * static_cast<size_t>(sbd_data.cpu_subspace ? 5 : 2 * max_nb + 5));
 	}
 	if( !use_factored || sbd_data.factored_mult_check ) {
 	    init_device_mult();
