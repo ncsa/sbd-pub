@@ -54,9 +54,11 @@ namespace sbd {
 	  bool cpu_subspace = false;
 #endif
 	  // --factored_mult 1: H·C from string factors (mult_factored_thrust.h; Thrust builds only);
-	  // --factored_mult_check 1 compares it with the method 0 multiplication first
+	  // --factored_mult_check 1 compares it with the method 0 multiplication first;
+	  // --factored_passes Q brings in 1/Q of the input vector at a time (memory per GPU ~2N/Q)
 	  int factored_mult = 0;
 	  int factored_mult_check = 0;
+	  int factored_passes = 1;
 	};
 
     SBD generate_sbd_data(int argc, char *argv[]) {
@@ -144,6 +146,9 @@ namespace sbd {
 	}
 	if( std::string(argv[i]) == "--factored_mult_check" ) {
 	  sbd_data.factored_mult_check = std::atoi(argv[++i]);
+	}
+	if( std::string(argv[i]) == "--factored_passes" ) {
+	  sbd_data.factored_passes = std::atoi(argv[++i]);
 	}
       }
 #ifndef SBD_THRUST
@@ -462,7 +467,7 @@ namespace sbd {
 	if( use_factored ) {
 	    SBD_NVTX_RANGE_COLOR("factored_mult.Init", __LINE__);
 	    factored_mult.Init(adet, bdet, bit_length, static_cast<size_t>(L), helper, I0, I1, I2,
-	                       h_comm, b_comm, t_comm, a_comm);
+	                       h_comm, b_comm, t_comm, a_comm, sbd_data.factored_passes);
 	}
 	if( !use_factored || sbd_data.factored_mult_check ) {
 	    init_device_mult();
