@@ -570,6 +570,8 @@ struct CrossTables {
     std::vector<int> Kp;  // padded excitation count of each bra (host)
     std::vector<thrust::device_vector<int>> bucket_ids;
     std::vector<size_t> bucket_smem;
+    std::vector<int> bucket_group;   // index into fm_kp_bounds
+    std::vector<double> bucket_kp;   // sum of the padded excitation counts of its bras
     double flops = 0.0;
     size_t total_chunks = 0;
 };
@@ -673,20 +675,27 @@ inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
 {
     x.bucket_ids.clear();
     x.bucket_smem.clear();
+    x.bucket_group.clear();
+    x.bucket_kp.clear();
     int lo = 0;
     double ksum = 0.0;
-    for (int hi : fm_kp_bounds) {
+    for (int g = 0; g < static_cast<int>(sizeof(fm_kp_bounds) / sizeof(int)); g++) {
+        const int hi = fm_kp_bounds[g];
         std::vector<int> ids;
         int km = 0;
+        double kp = 0.0;
         for (size_t a = a0; a < a1; a++)
             if (x.Kp[a] > lo && x.Kp[a] <= hi) {
                 ids.push_back(static_cast<int>(a));
                 km = std::max(km, x.Kp[a]);
+                kp += x.Kp[a];
             }
         lo = hi;
         if (ids.empty()) continue;
         x.bucket_ids.emplace_back(ids);
         x.bucket_smem.push_back(fm_cross_smem(km, x.max_chunks));
+        x.bucket_group.push_back(g);
+        x.bucket_kp.push_back(kp);
     }
     for (size_t a = a0; a < a1; a++) ksum += x.Kp[a];
     x.flops = 2.0 * 64 * 64 * static_cast<double>(x.total_chunks) * ksum;
@@ -863,8 +872,8 @@ public:
                              static_cast<int>(smem));
         cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
-        BalanceRows(ranges, km_all);
-        factored::BuildCrossBuckets(cross_, c0_, c1_);
+        ranges_ = ranges;
+        BalanceRows(km_all);
         if (rank_ == 0)
             std::printf(" factored_mult: %zu alpha x %zu beta strings on %d rank(s); same-spin entries "
                         "%lld / %lld; cross term %.1f rs rows per 64-wide beta tile, %.3e flop per "
@@ -957,11 +966,27 @@ public:
         double* T = ptr(T_);
         double* S = ptr(S_);
         const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
+        // the second multiplication times the kernels the work split models (Calibrate)
+        const size_t NG = cg_.size();
+        const bool timing = P_ > 1 && nrun_ == 1;
+        std::vector<std::pair<size_t, std::pair<cudaEvent_t, cudaEvent_t>>> marks;
+        auto timed = [&](size_t what, auto &&launch) {
+            if (!timing) { launch(); return; }
+            cudaEvent_t e0, e1;
+            cudaEventCreate(&e0);
+            cudaEventCreate(&e1);
+            cudaEventRecord(e0, 0);
+            launch();
+            cudaEventRecord(e1, 0);
+            marks.push_back({what, {e0, e1}});
+        };
         auto beta_terms = [&](long long r0, long long r1) {
             if (r1 > r0)
-                factored::spmm_same_spin<<<dim3(tb_.nT, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-                    T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, r0, r1,
-                    c0, 0, 1);
+                timed(NG + 1, [&] {
+                    factored::spmm_same_spin<<<dim3(tb_.nT, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                        T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, r0, r1,
+                        c0, 0, 1);
+                });
         };
 
         // The whole input vector, rank blocks padded to maxrows rows, gathered on comm_ while this
@@ -1008,19 +1033,23 @@ public:
         }
         const int I_lo = static_cast<int>(c0 / SBD_FM_TR), I_hi = static_cast<int>((c1 + SBD_FM_TR - 1) / SBD_FM_TR);
         if (I_hi > I_lo)
-            factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-                T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, c0, c1, c0,
-                I_lo, 0);
+            timed(NG, [&] {
+                factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                    T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, c0, c1, c0,
+                    I_lo, 0);
+            });
         for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
             const int* ids = ptr(cross_.bucket_ids[k]);
             const size_t count = cross_.bucket_ids[k].size();
-            for (size_t y0 = 0; y0 < count; y0 += 65535) {
-                const unsigned ny = static_cast<unsigned>(std::min<size_t>(65535, count - y0));
-                factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cross_.bucket_smem[k]>>>(
-                    T, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket), ptr(cross_.krow),
-                    ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
-                    nb, c0, S);
-            }
+            timed(cross_.bucket_group[k], [&] {
+                for (size_t y0 = 0; y0 < count; y0 += 65535) {
+                    const unsigned ny = static_cast<unsigned>(std::min<size_t>(65535, count - y0));
+                    factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cross_.bucket_smem[k]>>>(
+                        T, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket), ptr(cross_.krow),
+                        ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
+                        nb, c0, S);
+                }
+            });
         }
         if (m1 > m0)
             factored::scatter_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(pa_), ptr(pb_), m0, m1, nb, c0, a0,
@@ -1060,6 +1089,18 @@ public:
                                                        p.r0 - p.off, a0, R, ptr(Wb));
         }
         check("run");
+        if (timing) {
+            std::vector<double> t(NG + 2, 0.0);
+            for (auto &m : marks) {
+                float ms = 0.0f;
+                cudaEventElapsedTime(&ms, m.second.first, m.second.second);
+                t[m.first] += 1e-3 * ms;
+                cudaEventDestroy(m.second.first);
+                cudaEventDestroy(m.second.second);
+            }
+            Calibrate(t);
+        }
+        nrun_++;
     }
 
     /// Relative differences from a reference multiplier (method 0) in the diagonal and in H x for a
@@ -1084,60 +1125,71 @@ public:
 
 private:
     /**
-       The rows each rank computes, [c0_, c1_), split by estimated work rather than by count; the
-       vector layout (each rank owns [a0_, a1_)) stays sbd's even split, and run() sends the rows
-       computed by another rank to their owner. Per engine row, in seconds per multiplication on
-       GH200 (kernel times of job 3444161, 1e9 determinants on 8 GPUs):
-         cross term   0.55 ns x padded excitations x 64-row chunks over the beta tiles
-                      x sqrt(2 / blocks per SM of its launch)  (one block per SM costs ~1.4x)
-         alpha terms  0.97 ps x nonzeros of its H_a row x beta strings
-         beta terms   0.775 ps x nonzeros of H_b, the same for every row
+       The rows each rank computes, [c0_, c1_), split by work rather than by count; the vector
+       layout (each rank owns [a0_, a1_)) stays sbd's even split, and run() sends the rows computed by
+       another rank to their owner. The work of an engine row a is
+         cg_[group of a] x (padded excitations of a)   cross term, by launch group
+         + ca_ x (nonzeros of its H_a row)            alpha same-spin terms
+         + cr_                                        beta same-spin terms, the same for every row
+       in seconds per multiplication. Init starts from GH200 kernel times (job 3444161, 1e9
+       determinants on 8 GPUs): the cross term 0.55 ns per excitation and 64-row chunk of the beta
+       tiles, x sqrt(2 / blocks per SM of its launch) (one block per SM costs ~1.4x); 0.97 ps per
+       nonzero and beta string; 0.775 ps per nonzero of H_b. The second multiplication times these
+       kernels on every rank, and Calibrate() refits the coefficients and splits the rows again.
        With even counts the work of 8 ranks differed by 13% on Fe4S4, the ranks with the lowest
        strings (most excitations within the list) doing the most; every rank then waits for those
        at the next gather.
     */
-    void BalanceRows(const std::vector<long long> &ranges, const std::vector<int> &km_all)
+    void BalanceRows(const std::vector<int> &km_all)
     {
-        c0_ = a0_;
-        c1_ = a1_;
-        cb_.assign(P_ + 1, 0);
-        for (int r = 0; r < P_; r++) cb_[r + 1] = ranges[2 * r + 1];
-        sends_.clear();
-        recvs_.clear();
-        nrecv_rows_ = 0;
-        if (P_ == 1) return;
-        std::vector<double> occf(km_all.size(), 1.0);
-        for (size_t g = 0; g < km_all.size(); g++) {
+        const size_t G = km_all.size();
+        cg_.assign(G, 0.0);
+        for (size_t g = 0; g < G; g++) {
             if (km_all[g] == 0) continue;
             int nblk = 0;
             cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nblk, factored::fused_cross, 128,
                                                           factored::fm_cross_smem(km_all[g], cross_.max_chunks));
-            occf[g] = std::sqrt(2.0 / std::max(nblk, 1));
+            cg_[g] = 0.55e-9 * cross_.total_chunks * std::sqrt(2.0 / std::max(nblk, 1));
         }
-        const double nnzb = static_cast<double>(sb_.hptr[nb_]);
+        ca_ = 0.97e-12 * nb_;
+        cr_ = 0.775e-12 * static_cast<double>(sb_.hptr[nb_]);
+        cb_.assign(P_ + 1, 0);
+        for (int r = 0; r < P_; r++) cb_[r + 1] = ranges_[2 * r + 1];
+        SplitRows("estimated work");
+    }
+
+    /// Computed ranges from the coefficients, the exchange plan and this rank's cross-term launches.
+    void SplitRows(const char* how)
+    {
         std::vector<double> pre(na_ + 1, 0.0);
         for (size_t a = 0; a < na_; a++) {
             const int kp = cross_.Kp[a];
             size_t g = 0;
             while (kp > factored::fm_kp_bounds[g]) g++;
-            pre[a + 1] = pre[a] + 0.55e-9 * kp * cross_.total_chunks * occf[g]
-                         + 0.97e-12 * static_cast<double>(sa_.hptr[a + 1] - sa_.hptr[a]) * nb_
-                         + 0.775e-12 * nnzb;
+            pre[a + 1] = pre[a] + cg_[g] * kp + ca_ * static_cast<double>(sa_.hptr[a + 1] - sa_.hptr[a]) + cr_;
         }
-        for (int r = 1; r < P_; r++) {
-            const double target = pre[na_] * r / P_;
-            cb_[r] = std::lower_bound(pre.begin(), pre.end(), target) - pre.begin();
-            cb_[r] = std::max(cb_[r], cb_[r - 1]);
+        double even = 0.0, before = 0.0, after = 0.0;
+        for (int q = 0; q < P_; q++) {
+            even = std::max(even, pre[ranges_[2 * q + 1]] - pre[ranges_[2 * q]]);
+            before = std::max(before, pre[cb_[q + 1]] - pre[cb_[q]]);
         }
-        cb_[P_] = na_;
+        if (P_ > 1) {
+            for (int r = 1; r < P_; r++) {
+                cb_[r] = std::lower_bound(pre.begin(), pre.end(), pre[na_] * r / P_) - pre.begin();
+                cb_[r] = std::max(cb_[r], cb_[r - 1]);
+            }
+            cb_[P_] = na_;
+        }
         c0_ = cb_[rank_];
         c1_ = cb_[rank_ + 1];
+        sends_.clear();
+        recvs_.clear();
+        nrecv_rows_ = 0;
         long long moved = 0;
-        double even = 0.0, balanced = 0.0;
         for (int q = 0; q < P_; q++) {
-            const long long o0 = ranges[2 * q], o1 = ranges[2 * q + 1];
-            even = std::max(even, pre[o1] - pre[o0]);
-            balanced = std::max(balanced, pre[cb_[q + 1]] - pre[cb_[q]]);
+            const long long o0 = ranges_[2 * q], o1 = ranges_[2 * q + 1];
+            after = std::max(after, pre[cb_[q + 1]] - pre[cb_[q]]);
+            moved += std::abs(static_cast<long long>(cb_[q]) - o0);
             if (q == rank_) continue;
             const long long s0 = std::max<long long>(c0_, o0), s1 = std::min<long long>(c1_, o1);
             if (s0 < s1) sends_.push_back({q, s0, s1, s0 - static_cast<long long>(c0_)});
@@ -1147,13 +1199,33 @@ private:
                 nrecv_rows_ += r1 - r0;
             }
         }
-        for (int q = 0; q < P_; q++)
-            moved += std::abs(static_cast<long long>(cb_[q]) - ranges[2 * q]);
-        if (rank_ == 0)
-            std::printf(" factored_mult: rows split by estimated work: slowest rank %.1f ms per "
-                        "multiplication with even counts, %.1f ms split by work (mean %.1f ms); %lld "
+        factored::BuildCrossBuckets(cross_, c0_, c1_);
+        if (rank_ == 0 && P_ > 1)
+            std::printf(" factored_mult: rows split by %s: slowest rank %.1f ms per multiplication with "
+                        "even counts, %.1f ms with the previous split, %.1f ms now (mean %.1f ms); %lld "
                         "boundary rows moved\n",
-                        1e3 * even, 1e3 * balanced, 1e3 * pre[na_] / P_, moved);
+                        how, 1e3 * even, 1e3 * before, 1e3 * after, 1e3 * pre[na_] / P_, moved);
+    }
+
+    /// Refit cg_, ca_ and cr_ from the kernel times of one multiplication on all ranks
+    /// (t: seconds per launch group, then alpha and beta same-spin terms) and split again.
+    void Calibrate(const std::vector<double> &t)
+    {
+        const size_t G = cg_.size();
+        std::vector<double> v(2 * G + 4, 0.0);  // times and work: groups, alpha, beta
+        for (size_t k = 0; k < cross_.bucket_group.size(); k++) v[G + cross_.bucket_group[k]] += cross_.bucket_kp[k];
+        for (size_t g = 0; g < G; g++) v[g] = t[g];
+        v[2 * G] = t[G];
+        v[2 * G + 1] = static_cast<double>(sa_.hptr[c1_] - sa_.hptr[c0_]);
+        v[2 * G + 2] = t[G + 1];
+        v[2 * G + 3] = static_cast<double>(c1_ - c0_);
+        std::vector<double> sum(v.size());
+        MPI_Allreduce(v.data(), sum.data(), static_cast<int>(v.size()), MPI_DOUBLE, MPI_SUM, this->b_comm_);
+        for (size_t g = 0; g < G; g++)
+            if (sum[G + g] > 0.0) cg_[g] = sum[g] / sum[G + g];
+        if (sum[2 * G + 1] > 0.0) ca_ = sum[2 * G] / sum[2 * G + 1];
+        if (sum[2 * G + 3] > 0.0) cr_ = sum[2 * G + 2] / sum[2 * G + 3];
+        SplitRows("measured kernel times");
     }
 
     template <typename T>
@@ -1185,6 +1257,10 @@ private:
     size_t a0_ = 0, a1_ = 0;    // this rank's alpha rows (same positions in sbd and engine order)
     size_t c0_ = 0, c1_ = 0;    // the engine rows this rank computes (BalanceRows)
     std::vector<size_t> cb_;    // every rank's first computed row, and na
+    std::vector<long long> ranges_;  // every rank's owned rows, [ranges_[2r], ranges_[2r + 1])
+    std::vector<double> cg_;    // work model (BalanceRows)
+    double ca_ = 0.0, cr_ = 0.0;
+    int nrun_ = 0;              // multiplications so far; the second one calibrates the split
     struct Piece {
         int peer;
         long long r0, r1, off;  // engine rows [r0, r1), at row off of S (sends) or R_ (receives)
