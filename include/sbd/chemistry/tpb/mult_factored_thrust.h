@@ -208,7 +208,7 @@ __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, lon
 /**
    Same-spin products with a sparse, symmetric string Hamiltonian stored as nonzero TR x 64 tiles of
    (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb; sigma holds
-   only the alpha rows [rlo, rhi) of this rank (row a at a - rlo).
+   the alpha rows this rank computes, row a at a - sbase.
      mode 0: sigma[I rows, chunk] += H_a[I rows, :] C[:, chunk]      (I over alpha, blockIdx.x +
              Ibase, rows outside [rlo, rhi) dropped)
      mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta, chunks of [rlo, rhi))
@@ -221,7 +221,8 @@ static __global__ void __launch_bounds__(2 * SBD_FM_TR, 2)  // 2 blocks per SM: 
 spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
                const int* __restrict__ tj, const int* __restrict__ rp,
                const unsigned char* __restrict__ ec, const double* __restrict__ ev,
-               long long na, long long nb, long long rlo, long long rhi, int Ibase, int mode)
+               long long na, long long nb, long long rlo, long long rhi, long long sbase, int Ibase,
+               int mode)
 {
     extern __shared__ double smem[];  // two stages of 64 x LDC doubles
     const int I = blockIdx.x + Ibase, ch = blockIdx.y;
@@ -266,8 +267,8 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
     for (int k = 0; k < 32; k++) {
         const long long y = y0 + half * 32 + k;
         if (y < nchk) {
-            if (mode == 0) sigma[(R - rlo) * nb + y] += acc[k];
-            else sigma[(y - rlo) * nb + R] += acc[k];
+            if (mode == 0) sigma[(R - sbase) * nb + y] += acc[k];
+            else sigma[(y - sbase) * nb + R] += acc[k];
         }
     }
 }
@@ -307,20 +308,21 @@ static __global__ void gather_phase(const unsigned long long* __restrict__ xa,
     }
 }
 
-// W[pa[a'] - a0, pb[b']] += P S[a' - a0, b'] for this rank's engine rows a0 <= a' < a1 (run() adds
-// H C into its output, as Lanczos expects)
+// W[pa[a'] - obase, pb[b']] += P S[a' - sbase, b'] for engine rows r0 <= a' < r1 that this rank owns
+// (its W starts at sbd row obase; run() adds H C into its output, as Lanczos expects)
 static __global__ void scatter_phase(const unsigned long long* __restrict__ xa,
                                      const unsigned long long* __restrict__ xb,
                                      const int* __restrict__ pa, const int* __restrict__ pb,
-                                     long long a0, long long a1, long long nb,
-                                     const double* __restrict__ S, double* __restrict__ W)
+                                     long long r0, long long r1, long long nb, long long sbase,
+                                     long long obase, const double* __restrict__ S,
+                                     double* __restrict__ W)
 {
-    const long long n = (a1 - a0) * nb;
+    const long long n = (r1 - r0) * nb;
     for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
          i += (long long)gridDim.x * blockDim.x) {
-        const long long r = i / nb, b = i - r * nb, a = a0 + r;
-        const double v = S[i];
-        W[(pa[a] - a0) * nb + pb[b]] += fm_phase(xa[a], xb[b]) ? -v : v;
+        const long long r = i / nb, b = i - r * nb, a = r0 + r;
+        const double v = S[(a - sbase) * nb + b];
+        W[(pa[a] - obase) * nb + pb[b]] += fm_phase(xa[a], xb[b]) ? -v : v;
     }
 }
 
@@ -565,15 +567,26 @@ struct CrossTables {
     thrust::device_vector<long long> kptr, goff;
     thrust::device_vector<int> kket, krow, cbase, rlist;
     thrust::device_vector<unsigned> gent;
+    std::vector<int> Kp;  // padded excitation count of each bra (host)
     std::vector<thrust::device_vector<int>> bucket_ids;
     std::vector<size_t> bucket_smem;
     double flops = 0.0;
     size_t total_chunks = 0;
 };
 
-// launches cover the bras a0 <= a < a1 of this rank
+// bras of the cross term are launched in groups of padded excitation count up to these bounds
+static const int fm_kp_bounds[] = {64, 96, 128, 160, 192, 256, 1 << 30};
+
+// shared memory of a fused_cross block for bras of at most km excitations
+inline size_t fm_cross_smem(int km, int max_chunks)
+{
+    return static_cast<size_t>(km + 64) * SBD_FM_LD * sizeof(double)
+           + static_cast<size_t>(km) * (sizeof(long long) + sizeof(int))
+           + static_cast<size_t>(max_chunks) * 64 * sizeof(int);
+}
+
 inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
-                             const std::vector<double> &eri, size_t a0, size_t a1)
+                             const std::vector<double> &eri)
 {
     const int nrs = L * L;
     const int nrc = nrs / 64 + 1;  // > nrs / 64, so column nrs (padding) exists and is zero
@@ -650,29 +663,33 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
     x.rlist = rlist;
     x.goff = goff;
     x.gent = gent;
+    x.Kp = Kp;
+    x.total_chunks = cbase[x.nbt];
+}
 
-    // bras grouped by padded excitation count, so shared memory per launch fits its bras
-    const int bounds[] = {64, 96, 128, 160, 192, 256, 1 << 30};
+// launches for the bras a0 <= a < a1 that this rank computes, grouped by padded excitation count
+// so that the shared memory of a launch fits its bras
+inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
+{
+    x.bucket_ids.clear();
+    x.bucket_smem.clear();
     int lo = 0;
     double ksum = 0.0;
-    for (int hi : bounds) {
+    for (int hi : fm_kp_bounds) {
         std::vector<int> ids;
         int km = 0;
         for (size_t a = a0; a < a1; a++)
-            if (Kp[a] > lo && Kp[a] <= hi) {
+            if (x.Kp[a] > lo && x.Kp[a] <= hi) {
                 ids.push_back(static_cast<int>(a));
-                km = std::max(km, Kp[a]);
+                km = std::max(km, x.Kp[a]);
             }
         lo = hi;
         if (ids.empty()) continue;
         x.bucket_ids.emplace_back(ids);
-        x.bucket_smem.push_back(static_cast<size_t>(km + 64) * SBD_FM_LD * sizeof(double)
-                                + static_cast<size_t>(km) * (sizeof(long long) + sizeof(int))
-                                + static_cast<size_t>(x.max_chunks) * 64 * sizeof(int));
+        x.bucket_smem.push_back(fm_cross_smem(km, x.max_chunks));
     }
-    for (size_t a = a0; a < a1; a++) ksum += Kp[a];
-    x.flops = 2.0 * 64 * 64 * static_cast<double>(cbase[x.nbt]) * ksum;
-    x.total_chunks = cbase[x.nbt];
+    for (size_t a = a0; a < a1; a++) ksum += x.Kp[a];
+    x.flops = 2.0 * 64 * 64 * static_cast<double>(x.total_chunks) * ksum;
 }
 
 } // namespace factored
@@ -684,8 +701,9 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
    task_comm_size and h_comm of size 1): each rank owns the alpha rows of its helper's bra range and
    all beta strings. Every multiplication needs nearly all of C on every rank (the doubles of a block
    of bras reach almost every row), so run() gathers the whole input vector first, with
-   ncclAllGather when built with SBD_USE_NCCL and GPU-aware MPI_Allgather otherwise, and then
-   computes this rank's rows of H·C. No reduction follows.
+   ncclAllGather when built with SBD_USE_NCCL and GPU-aware MPI_Allgather otherwise. The rows of H·C
+   are then computed in ranges split by estimated work (BalanceRows), which differ from the owned
+   ranges by a few rows at each boundary; those rows go to their owners. No reduction follows.
 */
 template <typename ElemT>
 class MultTPBFactored : public MultBase<ElemT> {
@@ -820,7 +838,33 @@ public:
         factored::BuildSpinStrings(sb_, L_, h1, eri);
         factored::BuildSpinTiles(ta_, sa_, I0);
         factored::BuildSpinTiles(tb_, sb_, 0.0);
-        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri, a0_, a1_);
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
+
+        // Shared memory of the largest cross-term launch on any rank, so that every rank sets the
+        // same limit and the occupancy of each group of bras can be queried for the work estimate.
+        std::vector<int> km_all;  // largest padded excitation count in each group, over all bras
+        for (size_t g = 0, lo = 0; g < sizeof(factored::fm_kp_bounds) / sizeof(int); g++) {
+            const int hi = factored::fm_kp_bounds[g];
+            int km = 0;
+            for (size_t a = 0; a < na_; a++)
+                if (cross_.Kp[a] > static_cast<int>(lo) && cross_.Kp[a] <= hi) km = std::max(km, cross_.Kp[a]);
+            km_all.push_back(km);
+            lo = hi;
+        }
+        size_t smem = 0;
+        for (int km : km_all)
+            if (km > 0) smem = std::max(smem, factored::fm_cross_smem(km, cross_.max_chunks));
+        int dev = 0, optin = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        if (smem > static_cast<size_t>(optin))
+            throw std::runtime_error("factored_mult: excitation lists too long for shared memory");
+        cudaFuncSetAttribute(factored::fused_cross, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             static_cast<int>(smem));
+        cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
+        BalanceRows(ranges, km_all);
+        factored::BuildCrossBuckets(cross_, c0_, c1_);
         if (rank_ == 0)
             std::printf(" factored_mult: %zu alpha x %zu beta strings on %d rank(s); same-spin entries "
                         "%lld / %lld; cross term %.1f rs rows per 64-wide beta tile, %.3e flop per "
@@ -849,17 +893,6 @@ public:
                         Jb[b * L_ + p] += eri[((static_cast<size_t>(p) * L_ + p) * L_ + r) * L_ + r];
         Jb_ = Jb;
 
-        size_t smem = 0;
-        for (size_t s : cross_.bucket_smem) smem = std::max(smem, s);
-        int dev = 0, optin = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-        if (smem > static_cast<size_t>(optin))
-            throw std::runtime_error("factored_mult: excitation lists too long for shared memory");
-        cudaFuncSetAttribute(factored::fused_cross, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             static_cast<int>(smem));
-        cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
         if (P_ > 1) {
             // Across nodes the gather needs NCCL: its allgather runs as 8 rings that cross between
             // nodes at different GPUs, so it uses all four NICs of a node, 84 GB/s per GPU on two GH200
@@ -912,16 +945,28 @@ public:
         (void)hii;
         SBD_NVTX_RANGE_COLOR("MultTPBFactored::run", __LINE__);
         const size_t nloc = (a1_ - a0_) * nb_;
+        const size_t ncomp = (c1_ - c0_) * nb_;
         if (Wb.size() != nloc) Wb.resize(nloc);
         if (T_.size() != na_ * nb_) T_.resize(na_ * nb_);
-        if (S_.size() != nloc) S_.resize(nloc);
+        if (S_.size() != ncomp) S_.resize(ncomp);
+        if (R_.size() != nrecv_rows_ * nb_) R_.resize(nrecv_rows_ * nb_);
         const long long na = static_cast<long long>(na_), nb = static_cast<long long>(nb_);
         const long long a0 = static_cast<long long>(a0_), a1 = static_cast<long long>(a1_);
+        const long long c0 = static_cast<long long>(c0_), c1 = static_cast<long long>(c1_);
+        const long long m0 = std::max(a0, c0), m1 = std::min(a1, c1);  // rows owned and computed here
         double* T = ptr(T_);
         double* S = ptr(S_);
+        const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
+        auto beta_terms = [&](long long r0, long long r1) {
+            if (r1 > r0)
+                factored::spmm_same_spin<<<dim3(tb_.nT, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                    T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, r0, r1,
+                    c0, 0, 1);
+        };
 
         // The whole input vector, rank blocks padded to maxrows rows, gathered on comm_ while this
-        // rank's own rows are phased and multiplied by H_b, which needs no other rank's rows.
+        // rank's own rows are phased and those it also computes are multiplied by H_b, which needs
+        // no other rank's rows.
         const double* G = nullptr;
         if (P_ > 1) {
             SBD_NVTX_RANGE_COLOR("MultTPBFactored::gather", __LINE__);
@@ -942,11 +987,8 @@ public:
         }
         factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), a0, a1, nb,
                                                static_cast<long long>(rank_ * maxrows_), ptr(Wk), T);
-        cudaMemsetAsync(S, 0, nloc * sizeof(double), 0);
-        const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
-        if (a1 > a0)
-            factored::spmm_same_spin<<<dim3(tb_.nT, (a1 - a0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-                T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, a0, a1, 0, 1);
+        cudaMemsetAsync(S, 0, ncomp * sizeof(double), 0);
+        beta_terms(m0, m1);
         if (P_ > 1) {
 #ifdef SBD_USE_NCCL
             cudaStreamWaitEvent(0, gathered_, 0);
@@ -961,11 +1003,13 @@ public:
             if (na > a1)
                 factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), a1, na, nb, 0,
                                                        G, T);
+            beta_terms(c0, std::min(c1, a0));  // computed rows of lower ranks
+            beta_terms(std::max(c0, a1), c1);  // and of higher ranks
         }
-        const int I_lo = static_cast<int>(a0 / SBD_FM_TR), I_hi = static_cast<int>((a1 + SBD_FM_TR - 1) / SBD_FM_TR);
+        const int I_lo = static_cast<int>(c0 / SBD_FM_TR), I_hi = static_cast<int>((c1 + SBD_FM_TR - 1) / SBD_FM_TR);
         if (I_hi > I_lo)
             factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-                T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, a0, a1,
+                T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, c0, c1, c0,
                 I_lo, 0);
         for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
             const int* ids = ptr(cross_.bucket_ids[k]);
@@ -975,11 +1019,46 @@ public:
                 factored::fused_cross<<<dim3(cross_.nbt, ny), 128, cross_.bucket_smem[k]>>>(
                     T, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket), ptr(cross_.krow),
                     ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
-                    nb, a0, S);
+                    nb, c0, S);
             }
         }
-        factored::scatter_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(pa_), ptr(pb_), a0, a1, nb, S,
-                                               ptr(Wb));
+        if (m1 > m0)
+            factored::scatter_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(pa_), ptr(pb_), m0, m1, nb, c0, a0,
+                                                   S, ptr(Wb));
+        if (!sends_.empty() || !recvs_.empty()) {
+            // computed rows to their owners
+            SBD_NVTX_RANGE_COLOR("MultTPBFactored::exchange", __LINE__);
+            double* R = ptr(R_);
+#ifdef SBD_USE_NCCL
+            cudaEventRecord(local_ready_, 0);
+            cudaStreamWaitEvent(comm_, local_ready_, 0);
+            ncclGroupStart();
+            for (const Piece &p : sends_)
+                ncclSend(S + p.off * nb, (p.r1 - p.r0) * nb_, ncclDouble, p.peer, nccl_, comm_);
+            for (const Piece &p : recvs_)
+                ncclRecv(R + p.off * nb, (p.r1 - p.r0) * nb_, ncclDouble, p.peer, nccl_, comm_);
+            if (ncclGroupEnd() != ncclSuccess) throw std::runtime_error("factored_mult: row exchange failed");
+            cudaEventRecord(gathered_, comm_);
+            cudaStreamWaitEvent(0, gathered_, 0);
+#else
+            cudaStreamSynchronize(0);
+            std::vector<MPI_Request> req;
+            for (const Piece &p : sends_) {
+                req.emplace_back();
+                MPI_Isend(S + p.off * nb, static_cast<int>((p.r1 - p.r0) * nb), MPI_DOUBLE, p.peer, 0,
+                          this->b_comm_, &req.back());
+            }
+            for (const Piece &p : recvs_) {
+                req.emplace_back();
+                MPI_Irecv(R + p.off * nb, static_cast<int>((p.r1 - p.r0) * nb), MPI_DOUBLE, p.peer, 0,
+                          this->b_comm_, &req.back());
+            }
+            MPI_Waitall(static_cast<int>(req.size()), req.data(), MPI_STATUSES_IGNORE);
+#endif
+            for (const Piece &p : recvs_)
+                factored::scatter_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(pa_), ptr(pb_), p.r0, p.r1, nb,
+                                                       p.r0 - p.off, a0, R, ptr(Wb));
+        }
         check("run");
     }
 
@@ -1004,6 +1083,79 @@ public:
     double cross_flops() const { return cross_.flops; }
 
 private:
+    /**
+       The rows each rank computes, [c0_, c1_), split by estimated work rather than by count; the
+       vector layout (each rank owns [a0_, a1_)) stays sbd's even split, and run() sends the rows
+       computed by another rank to their owner. Per engine row, in seconds per multiplication on
+       GH200 (kernel times of job 3444161, 1e9 determinants on 8 GPUs):
+         cross term   0.55 ns x padded excitations x 64-row chunks over the beta tiles
+                      x sqrt(2 / blocks per SM of its launch)  (one block per SM costs ~1.4x)
+         alpha terms  0.97 ps x nonzeros of its H_a row x beta strings
+         beta terms   0.775 ps x nonzeros of H_b, the same for every row
+       With even counts the work of 8 ranks differed by 13% on Fe4S4, the ranks with the lowest
+       strings (most excitations within the list) doing the most; every rank then waits for those
+       at the next gather.
+    */
+    void BalanceRows(const std::vector<long long> &ranges, const std::vector<int> &km_all)
+    {
+        c0_ = a0_;
+        c1_ = a1_;
+        cb_.assign(P_ + 1, 0);
+        for (int r = 0; r < P_; r++) cb_[r + 1] = ranges[2 * r + 1];
+        sends_.clear();
+        recvs_.clear();
+        nrecv_rows_ = 0;
+        if (P_ == 1) return;
+        std::vector<double> occf(km_all.size(), 1.0);
+        for (size_t g = 0; g < km_all.size(); g++) {
+            if (km_all[g] == 0) continue;
+            int nblk = 0;
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nblk, factored::fused_cross, 128,
+                                                          factored::fm_cross_smem(km_all[g], cross_.max_chunks));
+            occf[g] = std::sqrt(2.0 / std::max(nblk, 1));
+        }
+        const double nnzb = static_cast<double>(sb_.hptr[nb_]);
+        std::vector<double> pre(na_ + 1, 0.0);
+        for (size_t a = 0; a < na_; a++) {
+            const int kp = cross_.Kp[a];
+            size_t g = 0;
+            while (kp > factored::fm_kp_bounds[g]) g++;
+            pre[a + 1] = pre[a] + 0.55e-9 * kp * cross_.total_chunks * occf[g]
+                         + 0.97e-12 * static_cast<double>(sa_.hptr[a + 1] - sa_.hptr[a]) * nb_
+                         + 0.775e-12 * nnzb;
+        }
+        for (int r = 1; r < P_; r++) {
+            const double target = pre[na_] * r / P_;
+            cb_[r] = std::lower_bound(pre.begin(), pre.end(), target) - pre.begin();
+            cb_[r] = std::max(cb_[r], cb_[r - 1]);
+        }
+        cb_[P_] = na_;
+        c0_ = cb_[rank_];
+        c1_ = cb_[rank_ + 1];
+        long long moved = 0;
+        double even = 0.0, balanced = 0.0;
+        for (int q = 0; q < P_; q++) {
+            const long long o0 = ranges[2 * q], o1 = ranges[2 * q + 1];
+            even = std::max(even, pre[o1] - pre[o0]);
+            balanced = std::max(balanced, pre[cb_[q + 1]] - pre[cb_[q]]);
+            if (q == rank_) continue;
+            const long long s0 = std::max<long long>(c0_, o0), s1 = std::min<long long>(c1_, o1);
+            if (s0 < s1) sends_.push_back({q, s0, s1, s0 - static_cast<long long>(c0_)});
+            const long long r0 = std::max<long long>(cb_[q], a0_), r1 = std::min<long long>(cb_[q + 1], a1_);
+            if (r0 < r1) {
+                recvs_.push_back({q, r0, r1, static_cast<long long>(nrecv_rows_)});
+                nrecv_rows_ += r1 - r0;
+            }
+        }
+        for (int q = 0; q < P_; q++)
+            moved += std::abs(static_cast<long long>(cb_[q]) - ranges[2 * q]);
+        if (rank_ == 0)
+            std::printf(" factored_mult: rows split by estimated work: slowest rank %.1f ms per "
+                        "multiplication with even counts, %.1f ms split by work (mean %.1f ms); %lld "
+                        "boundary rows moved\n",
+                        1e3 * even, 1e3 * balanced, 1e3 * pre[na_] / P_, moved);
+    }
+
     template <typename T>
     static T* ptr(thrust::device_vector<T> &v) { return thrust::raw_pointer_cast(v.data()); }
     template <typename T>
@@ -1031,6 +1183,14 @@ private:
     size_t na_ = 0, nb_ = 0;
     int P_ = 1, rank_ = 0;
     size_t a0_ = 0, a1_ = 0;    // this rank's alpha rows (same positions in sbd and engine order)
+    size_t c0_ = 0, c1_ = 0;    // the engine rows this rank computes (BalanceRows)
+    std::vector<size_t> cb_;    // every rank's first computed row, and na
+    struct Piece {
+        int peer;
+        long long r0, r1, off;  // engine rows [r0, r1), at row off of S (sends) or R_ (receives)
+    };
+    std::vector<Piece> sends_, recvs_;  // computed rows owned by another rank, and the reverse
+    size_t nrecv_rows_ = 0;
     size_t maxrows_ = 0;        // largest alpha range over the ranks
     factored::SpinStrings sa_, sb_;
     factored::SpinTiles ta_, tb_;
@@ -1040,7 +1200,8 @@ private:
     thrust::device_vector<int> pa_, pb_;                 // engine index -> sbd index
     thrust::device_vector<long long> gofs_;              // engine alpha row -> row of the gathered vector
     thrust::device_vector<double> da_, db_, Jb_;         // sbd order (diagonal)
-    thrust::device_vector<double> T_, S_, G_;            // engine-order input, local output, gathered input
+    thrust::device_vector<double> T_, S_, G_;            // engine-order input, computed rows, gathered input
+    thrust::device_vector<double> R_;                    // received rows of this rank's output
 #ifdef SBD_USE_NCCL
     ncclComm_t nccl_;
     bool nccl_ready_ = false;
