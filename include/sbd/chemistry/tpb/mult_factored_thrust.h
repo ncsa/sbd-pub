@@ -209,8 +209,8 @@ __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, lon
    Same-spin products with a sparse, symmetric string Hamiltonian stored as nonzero TR x 64 tiles of
    (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb; sigma holds
    only the alpha rows [rlo, rhi) of this rank (row a at a - rlo).
-     mode 0: sigma[I rows, chunk] = H_a[I rows, :] C[:, chunk]       (writes sigma; I over alpha,
-             blockIdx.x + Ibase, rows outside [rlo, rhi) dropped)
+     mode 0: sigma[I rows, chunk] += H_a[I rows, :] C[:, chunk]      (I over alpha, blockIdx.x +
+             Ibase, rows outside [rlo, rhi) dropped)
      mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta, chunks of [rlo, rhi))
    One block per (tile row I, 64-wide chunk); blockIdx.x = I runs fastest, so the blocks in flight
    share one slice of C, which stays in L2. Each nonzero tile's 64 x 64 slice of C arrives in a
@@ -266,7 +266,7 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
     for (int k = 0; k < 32; k++) {
         const long long y = y0 + half * 32 + k;
         if (y < nchk) {
-            if (mode == 0) sigma[(R - rlo) * nb + y] = acc[k];
+            if (mode == 0) sigma[(R - rlo) * nb + y] += acc[k];
             else sigma[(y - rlo) * nb + R] += acc[k];
         }
     }
@@ -288,19 +288,21 @@ __device__ __forceinline__ int fm_phase(unsigned long long A, unsigned long long
     return s & 1;
 }
 
-// T[a', b'] = P Cg[gofs[a'], pb[b']] for all engine rows; Cg is the gathered sbd vector, its row for
-// engine row a' at gofs[a'] (rank blocks padded to the same length)
+// T[a', b'] = P Cg[gofs[a'] - shift, pb[b']] for the engine rows r0 <= a' < r1; Cg is the gathered
+// sbd vector (shift 0), its row for engine row a' at gofs[a'] (rank blocks padded to the same
+// length), or this rank's block of it (shift = the block's first row)
 static __global__ void gather_phase(const unsigned long long* __restrict__ xa,
                                     const unsigned long long* __restrict__ xb,
                                     const long long* __restrict__ gofs, const int* __restrict__ pb,
-                                    long long na, long long nb, const double* __restrict__ Cg,
-                                    double* __restrict__ T)
+                                    long long r0, long long r1, long long nb, long long shift,
+                                    const double* __restrict__ Cg, double* __restrict__ T)
 {
-    const long long n = na * nb;
-    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-         i += (long long)gridDim.x * blockDim.x) {
+    const long long n = (r1 - r0) * nb;
+    for (long long j = (long long)blockIdx.x * blockDim.x + threadIdx.x; j < n;
+         j += (long long)gridDim.x * blockDim.x) {
+        const long long i = r0 * nb + j;
         const long long a = i / nb, b = i - a * nb;
-        const double v = Cg[gofs[a] * nb + pb[b]];
+        const double v = Cg[(gofs[a] - shift) * nb + pb[b]];
         T[i] = fm_phase(xa[a], xb[b]) ? -v : v;
     }
 }
@@ -691,7 +693,12 @@ public:
     ~MultTPBFactored()
     {
 #ifdef SBD_USE_NCCL
-        if (nccl_ready_) ncclCommDestroy(nccl_);
+        if (nccl_ready_) {
+            ncclCommDestroy(nccl_);
+            cudaEventDestroy(gathered_);
+            cudaEventDestroy(local_ready_);
+            cudaStreamDestroy(comm_);
+        }
 #endif
     }
 
@@ -877,6 +884,10 @@ public:
             if (ncclCommInitRank(&nccl_, P_, id, rank_) != ncclSuccess)
                 throw std::runtime_error("factored_mult: ncclCommInitRank failed");
             nccl_ready_ = true;
+            // the gather's stream must not wait for the legacy default stream, which runs the kernels
+            cudaStreamCreateWithFlags(&comm_, cudaStreamNonBlocking);
+            cudaEventCreateWithFlags(&local_ready_, cudaEventDisableTiming);
+            cudaEventCreateWithFlags(&gathered_, cudaEventDisableTiming);
 #endif
         }
     }
@@ -907,34 +918,53 @@ public:
         double* T = ptr(T_);
         double* S = ptr(S_);
 
-        // the whole input vector, rank blocks padded to maxrows rows
-        const double* Cg = ptr(Wk);
+        // The whole input vector, rank blocks padded to maxrows rows, gathered on comm_ while this
+        // rank's own rows are phased and multiplied by H_b, which needs no other rank's rows.
+        const double* G = nullptr;
         if (P_ > 1) {
             SBD_NVTX_RANGE_COLOR("MultTPBFactored::gather", __LINE__);
             const size_t count = maxrows_ * nb_;
             if (G_.size() != count * P_) G_.resize(count * P_);
-            double* G = ptr(G_);
-            cudaMemcpy(G + rank_ * count, ptr(Wk), nloc * sizeof(double), cudaMemcpyDeviceToDevice);
+            double* Gw = ptr(G_);
+            cudaMemcpyAsync(Gw + rank_ * count, ptr(Wk), nloc * sizeof(double), cudaMemcpyDeviceToDevice, 0);
 #ifdef SBD_USE_NCCL
-            if (ncclAllGather(G + rank_ * count, G, count, ncclDouble, nccl_, 0) != ncclSuccess)
+            cudaEventRecord(local_ready_, 0);
+            cudaStreamWaitEvent(comm_, local_ready_, 0);
+            if (ncclAllGather(Gw + rank_ * count, Gw, count, ncclDouble, nccl_, comm_) != ncclSuccess)
                 throw std::runtime_error("factored_mult: ncclAllGather failed");
+            cudaEventRecord(gathered_, comm_);
 #else
-            cudaDeviceSynchronize();
-            MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, G, static_cast<int>(count), MPI_DOUBLE,
-                          this->b_comm_);
+            cudaStreamSynchronize(0);
 #endif
-            Cg = G;
+            G = Gw;
         }
-        factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), na, nb, Cg, T);
+        factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), a0, a1, nb,
+                                               static_cast<long long>(rank_ * maxrows_), ptr(Wk), T);
+        cudaMemsetAsync(S, 0, nloc * sizeof(double), 0);
         const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
+        if (a1 > a0)
+            factored::spmm_same_spin<<<dim3(tb_.nT, (a1 - a0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, a0, a1, 0, 1);
+        if (P_ > 1) {
+#ifdef SBD_USE_NCCL
+            cudaStreamWaitEvent(0, gathered_, 0);
+#else
+            // the kernels above are queued and run during the gather
+            MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, const_cast<double*>(G),
+                          static_cast<int>(maxrows_ * nb_), MPI_DOUBLE, this->b_comm_);
+#endif
+            if (a0 > 0)
+                factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), 0, a0, nb, 0,
+                                                       G, T);
+            if (na > a1)
+                factored::gather_phase<<<1024, 256>>>(ptr(xa_), ptr(xb_), ptr(gofs_), ptr(pb_), a1, na, nb, 0,
+                                                       G, T);
+        }
         const int I_lo = static_cast<int>(a0 / SBD_FM_TR), I_hi = static_cast<int>((a1 + SBD_FM_TR - 1) / SBD_FM_TR);
         if (I_hi > I_lo)
             factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
                 T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, a0, a1,
                 I_lo, 0);
-        if (a1 > a0)
-            factored::spmm_same_spin<<<dim3(tb_.nT, (a1 - a0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
-                T, S, ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev), na, nb, a0, a1, 0, 1);
         for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
             const int* ids = ptr(cross_.bucket_ids[k]);
             const size_t count = cross_.bucket_ids[k].size();
@@ -1012,6 +1042,8 @@ private:
 #ifdef SBD_USE_NCCL
     ncclComm_t nccl_;
     bool nccl_ready_ = false;
+    cudaStream_t comm_;                 // the gather
+    cudaEvent_t local_ready_, gathered_;
 #endif
 };
 
