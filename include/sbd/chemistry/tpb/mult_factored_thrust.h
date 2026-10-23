@@ -1221,6 +1221,15 @@ private:
         v[2 * G + 3] = static_cast<double>(c1_ - c0_);
         std::vector<double> sum(v.size());
         MPI_Allreduce(v.data(), sum.data(), static_cast<int>(v.size()), MPI_DOUBLE, MPI_SUM, this->b_comm_);
+        double mine = 0.0, slowest = 0.0;
+        for (double x : t) mine += x;
+        MPI_Allreduce(&mine, &slowest, 1, MPI_DOUBLE, MPI_MAX, this->b_comm_);
+        double total = 0.0;
+        for (size_t g = 0; g < G; g++) total += sum[g];
+        total += sum[2 * G] + sum[2 * G + 2];
+        if (rank_ == 0)
+            std::printf(" factored_mult: measured kernel time per multiplication: slowest rank %.1f ms, mean "
+                        "%.1f ms\n", 1e3 * slowest, 1e3 * total / P_);
         for (size_t g = 0; g < G; g++)
             if (sum[G + g] > 0.0) cg_[g] = sum[g] / sum[G + g];
         if (sum[2 * G + 1] > 0.0) ca_ = sum[2 * G] / sum[2 * G + 1];
