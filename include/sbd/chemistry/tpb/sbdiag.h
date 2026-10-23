@@ -300,13 +300,21 @@ namespace sbd {
 			    h_comm_size,adet_comm_size,bdet_comm_size,task_comm_size,
 			    h_comm,b_comm,t_comm,a_comm);
 
+      // The factored multiplication reads only the rank's ranges; the excitation lists are for
+      // the method 0 multiplication, which --factored_mult_check and --rdm 1 still use.
+      const bool helper_ranges_only = sbd_data.factored_mult != 0 && sbd_data.factored_mult_check == 0
+	&& do_rdm == 0 && ( method == 0 || method == 2 );
       auto time_start_help = std::chrono::high_resolution_clock::now();
-      sbd::MakeHelpers(adet,bdet,bit_length,L,helper,
-		       h_comm,b_comm,t_comm,
-		       adet_comm_size,bdet_comm_size);
-      sbd::RemakeHelpers(adet,bdet,bit_length,L,helper,
+      if( helper_ranges_only ) {
+	sbd::MakeHelperRanges(adet,bdet,helper,b_comm,adet_comm_size,bdet_comm_size);
+      } else {
+	sbd::MakeHelpers(adet,bdet,bit_length,L,helper,
 			 h_comm,b_comm,t_comm,
 			 adet_comm_size,bdet_comm_size);
+	sbd::RemakeHelpers(adet,bdet,bit_length,L,helper,
+			   h_comm,b_comm,t_comm,
+			   adet_comm_size,bdet_comm_size);
+      }
       auto time_end_help = std::chrono::high_resolution_clock::now();
       auto elapsed_help_count = std::chrono::duration_cast<std::chrono::microseconds>(time_end_help-time_start_help).count();
       double elapsed_help = 0.000001 * elapsed_help_count;
