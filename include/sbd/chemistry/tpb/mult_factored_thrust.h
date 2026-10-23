@@ -209,8 +209,8 @@ __device__ __forceinline__ void fm_load_c_tile(double* dst, const double* C, lon
    Same-spin products with a sparse, symmetric string Hamiltonian stored as nonzero TR x 64 tiles of
    (column, value) entries sorted by row (rp: TR + 1 row pointers per tile). C is na x nb; sigma holds
    the alpha rows this rank computes, row a at a - sbase.
-     mode 0: sigma[I rows, chunk] += H_a[I rows, :] C[:, chunk]      (I over alpha, blockIdx.x +
-             Ibase, rows outside [rlo, rhi) dropped)
+     mode 0: sigma[I rows, chunk] += H_a[I rows, :] C[:, chunk]      (I over alpha tiles built from
+             row rbase, rows outside [rlo, rhi) dropped)
      mode 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]       (I over beta, chunks of [rlo, rhi))
    One block per (tile row I, 64-wide chunk); blockIdx.x = I runs fastest, so the blocks in flight
    share one slice of C, which stays in L2. Each nonzero tile's 64 x 64 slice of C arrives in a
@@ -221,11 +221,11 @@ static __global__ void __launch_bounds__(2 * SBD_FM_TR, 2)  // 2 blocks per SM: 
 spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
                const int* __restrict__ tj, const int* __restrict__ rp,
                const unsigned char* __restrict__ ec, const double* __restrict__ ev,
-               long long na, long long nb, long long rlo, long long rhi, long long sbase, int Ibase,
+               long long na, long long nb, long long rlo, long long rhi, long long sbase, long long rbase,
                int mode)
 {
     extern __shared__ double smem[];  // two stages of 64 x LDC doubles
-    const int I = blockIdx.x + Ibase, ch = blockIdx.y;
+    const int I = blockIdx.x, ch = blockIdx.y;
     const int tid = threadIdx.x;
     const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
     const long long nrow = mode == 0 ? na : nb;   // rows and columns of this H
@@ -261,7 +261,7 @@ spmm_same_spin(const double* __restrict__ C, double* sigma, const int* __restric
         }
         __syncthreads();  // stage st free for the load two tiles ahead
     }
-    const long long R = (long long)I * SBD_FM_TR + row;
+    const long long R = rbase + (long long)I * SBD_FM_TR + row;
     if (R >= nrow || (mode == 0 && (R < rlo || R >= rhi))) return;
 #pragma unroll
     for (int k = 0; k < 32; k++) {
@@ -494,23 +494,28 @@ inline void BuildSpinStrings(SpinStrings &s, int L, const std::vector<double> &h
 */
 struct SpinTiles {
     size_t nT = 0;
+    size_t r0 = 0;       // first row of tile 0
+    size_t ntiles = 0;   // nonzero tiles
     thrust::device_vector<int> trp, tj, rp;
     thrust::device_vector<unsigned char> ec;
     thrust::device_vector<double> ev;
 };
 
-inline void BuildSpinTiles(SpinTiles &t, const SpinStrings &s, double diag_shift)
+// rows [ra, rb) of the string Hamiltonian (all rows by default), in tiles of TR rows from ra
+inline void BuildSpinTiles(SpinTiles &t, const SpinStrings &s, double diag_shift, size_t ra = 0,
+                           size_t rb = static_cast<size_t>(-1))
 {
     const size_t n = s.n;
+    rb = std::min(rb, n);
     const size_t TR = SBD_FM_TR;
-    const size_t nT = (n + TR - 1) / TR, nC = (n + 63) / 64;
+    const size_t nT = (rb - ra + TR - 1) / TR, nC = (n + 63) / 64;
     std::vector<int> trp(nT + 1, 0), tj, rp;
-    std::vector<unsigned char> ec(s.hptr[n]);
-    std::vector<double> ev(s.hptr[n]);
+    std::vector<unsigned char> ec(s.hptr[rb] - s.hptr[ra]);
+    std::vector<double> ev(s.hptr[rb] - s.hptr[ra]);
     std::vector<int64_t> cnt(nC), tile_of(nC), pos(nC);
     int64_t base = 0;
     for (size_t I = 0; I < nT; I++) {
-        const size_t r0 = I * TR, r1 = std::min(n, r0 + TR);
+        const size_t r0 = ra + I * TR, r1 = std::min(rb, r0 + TR);
         std::fill(cnt.begin(), cnt.end(), 0);
         for (size_t r = r0; r < r1; r++)
             for (int64_t e = s.hptr[r]; e < s.hptr[r + 1]; e++) cnt[s.hcol[e] / 64]++;
@@ -546,11 +551,29 @@ inline void BuildSpinTiles(SpinTiles &t, const SpinStrings &s, double diag_shift
     }
     if (base > INT32_MAX) throw std::runtime_error("factored_mult: same-spin Hamiltonian too large for 32-bit offsets");
     t.nT = nT;
+    t.r0 = ra;
+    t.ntiles = tj.size();
     t.trp = trp;
     t.tj = tj;
     t.rp = rp;
     t.ec = ec;
     t.ev = ev;
+}
+
+// nonzero 64-column tiles of each TR-row tile row (tiles from row 0): the alpha same-spin kernel's
+// work goes by these (a 64 x 64 slice of C per tile), not by the entries
+inline std::vector<int> ColumnTilesPerTileRow(const SpinStrings &s)
+{
+    const size_t TR = SBD_FM_TR, n = s.n, nT = (n + TR - 1) / TR, nC = (n + 63) / 64;
+    std::vector<int> out(nT, 0);
+    std::vector<char> seen(nC);
+    for (size_t I = 0; I < nT; I++) {
+        std::fill(seen.begin(), seen.end(), 0);
+        for (size_t r = I * TR; r < std::min(n, (I + 1) * TR); r++)
+            for (int64_t e = s.hptr[r]; e < s.hptr[r + 1]; e++) seen[s.hcol[e] / 64] = 1;
+        for (char c : seen) out[I] += c;
+    }
+    return out;
 }
 
 /**
@@ -845,8 +868,8 @@ public:
 
         factored::BuildSpinStrings(sa_, L_, h1, eri);
         factored::BuildSpinStrings(sb_, L_, h1, eri);
-        factored::BuildSpinTiles(ta_, sa_, I0);
-        factored::BuildSpinTiles(tb_, sb_, 0.0);
+        factored::BuildSpinTiles(tb_, sb_, 0.0);  // the alpha tiles cover the computed rows (SplitRows)
+        tcnt_ = factored::ColumnTilesPerTileRow(sa_);
         factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
 
         // Shared memory of the largest cross-term launch on any rank, so that every rank sets the
@@ -1031,12 +1054,11 @@ public:
             beta_terms(c0, std::min(c1, a0));  // computed rows of lower ranks
             beta_terms(std::max(c0, a1), c1);  // and of higher ranks
         }
-        const int I_lo = static_cast<int>(c0 / SBD_FM_TR), I_hi = static_cast<int>((c1 + SBD_FM_TR - 1) / SBD_FM_TR);
-        if (I_hi > I_lo)
+        if (ta_.nT > 0)
             timed(NG, [&] {
-                factored::spmm_same_spin<<<dim3(I_hi - I_lo, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+                factored::spmm_same_spin<<<dim3(ta_.nT, (nb_ + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
                     T, S, ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev), na, nb, c0, c1, c0,
-                    I_lo, 0);
+                    static_cast<long long>(ta_.r0), 0);
             });
         for (size_t k = 0; k < cross_.bucket_ids.size(); k++) {
             const int* ids = ptr(cross_.bucket_ids[k]);
@@ -1129,13 +1151,17 @@ private:
        layout (each rank owns [a0_, a1_)) stays sbd's even split, and run() sends the rows computed by
        another rank to their owner. The work of an engine row a is
          cg_[group of a] x (padded excitations of a)   cross term, by launch group
-         + ca_ x (nonzeros of its H_a row)            alpha same-spin terms
+         + ca_ x (nonzero column tiles of its tile row) / 128    alpha same-spin terms
          + cr_                                        beta same-spin terms, the same for every row
-       in seconds per multiplication. Init starts from GH200 kernel times (job 3444161, 1e9
-       determinants on 8 GPUs): the cross term 0.55 ns per excitation and 64-row chunk of the beta
-       tiles, x sqrt(2 / blocks per SM of its launch) (one block per SM costs ~1.4x); 0.97 ps per
-       nonzero and beta string; 0.775 ps per nonzero of H_b. The second multiplication times these
-       kernels on every rank, and Calibrate() refits the coefficients and splits the rows again.
+       in seconds per multiplication. The alpha kernel loads a 64 x 64 slice of C per nonzero tile,
+       so its time goes by tiles, not entries (5.2-6.3 ms per 128-row tile row on every rank of job
+       3444566, against 169-207 ms per rank). Init starts from GH200 kernel times (jobs 3444161 and
+       3444566, 1e9 determinants on 8 GPUs): the cross term 0.55 ns per excitation and 64-row chunk
+       of the beta tiles, x sqrt(2 / blocks per SM of its launch) (one block per SM costs ~1.4x);
+       ~24.5 ns per column tile and 64 beta strings (6 ms per tile row if all 495 column tiles are
+       nonzero); 0.775 ps per nonzero of H_b. The second
+       multiplication times these kernels on every rank, and Calibrate() refits the coefficients and
+       splits the rows again.
        With even counts the work of 8 ranks differed by 13% on Fe4S4, the ranks with the lowest
        strings (most excitations within the list) doing the most; every rank then waits for those
        at the next gather.
@@ -1151,7 +1177,7 @@ private:
                                                           factored::fm_cross_smem(km_all[g], cross_.max_chunks));
             cg_[g] = 0.55e-9 * cross_.total_chunks * std::sqrt(2.0 / std::max(nblk, 1));
         }
-        ca_ = 0.97e-12 * nb_;
+        ca_ = 24.5e-9 * static_cast<double>((nb_ + 63) / 64);
         cr_ = 0.775e-12 * static_cast<double>(sb_.hptr[nb_]);
         cb_.assign(P_ + 1, 0);
         for (int r = 0; r < P_; r++) cb_[r + 1] = ranges_[2 * r + 1];
@@ -1166,7 +1192,7 @@ private:
             const int kp = cross_.Kp[a];
             size_t g = 0;
             while (kp > factored::fm_kp_bounds[g]) g++;
-            pre[a + 1] = pre[a] + cg_[g] * kp + ca_ * static_cast<double>(sa_.hptr[a + 1] - sa_.hptr[a]) + cr_;
+            pre[a + 1] = pre[a] + cg_[g] * kp + ca_ * tcnt_[a / SBD_FM_TR] / SBD_FM_TR + cr_;
         }
         double even = 0.0, before = 0.0, after = 0.0;
         for (int q = 0; q < P_; q++) {
@@ -1200,6 +1226,7 @@ private:
             }
         }
         factored::BuildCrossBuckets(cross_, c0_, c1_);
+        factored::BuildSpinTiles(ta_, sa_, I0_, c0_, c1_);
         if (rank_ == 0 && P_ > 1)
             std::printf(" factored_mult: rows split by %s: slowest rank %.1f ms per multiplication with "
                         "even counts, %.1f ms with the previous split, %.1f ms now (mean %.1f ms); %lld "
@@ -1216,7 +1243,7 @@ private:
         for (size_t k = 0; k < cross_.bucket_group.size(); k++) v[G + cross_.bucket_group[k]] += cross_.bucket_kp[k];
         for (size_t g = 0; g < G; g++) v[g] = t[g];
         v[2 * G] = t[G];
-        v[2 * G + 1] = static_cast<double>(sa_.hptr[c1_] - sa_.hptr[c0_]);
+        v[2 * G + 1] = static_cast<double>(ta_.ntiles);
         v[2 * G + 2] = t[G + 1];
         v[2 * G + 3] = static_cast<double>(c1_ - c0_);
         std::vector<double> sum(v.size());
@@ -1234,6 +1261,15 @@ private:
             if (sum[G + g] > 0.0) cg_[g] = sum[g] / sum[G + g];
         if (sum[2 * G + 1] > 0.0) ca_ = sum[2 * G] / sum[2 * G + 1];
         if (sum[2 * G + 3] > 0.0) cr_ = sum[2 * G + 2] / sum[2 * G + 3];
+        if (rank_ == 0) {
+            std::printf(" factored_mult: fitted costs: cross term");
+            for (size_t g = 0; g < G; g++)
+                if (sum[G + g] > 0.0)
+                    std::printf(" %.3f", 1e9 * cg_[g] / cross_.total_chunks);
+            std::printf(" ns per excitation and chunk by launch group; alpha %.2f ns per column tile and "
+                        "64 beta strings; beta %.2f us per row\n",
+                        1e9 * ca_ / ((nb_ + 63) / 64), 1e6 * cr_);
+        }
         SplitRows("measured kernel times");
     }
 
@@ -1268,6 +1304,7 @@ private:
     std::vector<size_t> cb_;    // every rank's first computed row, and na
     std::vector<long long> ranges_;  // every rank's owned rows, [ranges_[2r], ranges_[2r + 1])
     std::vector<double> cg_;    // work model (BalanceRows)
+    std::vector<int> tcnt_;     // nonzero column tiles of each 128-row tile row of H_a, tiles from row 0
     double ca_ = 0.0, cr_ = 0.0;
     int nrun_ = 0;              // multiplications so far; the second one calibrates the split
     struct Piece {
