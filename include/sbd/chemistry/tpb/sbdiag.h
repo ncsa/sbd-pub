@@ -210,6 +210,8 @@ namespace sbd {
 #ifdef SBD_THRUST
 	  method = method & 1;
 #endif
+      // --factored_mult replaces both multiplications, so --method only selects Davidson or Lanczos
+      if( sbd_data.factored_mult != 0 ) method = sbd_data.method & 2;
 	  int max_it = sbd_data.max_it;
       int max_nb = sbd_data.max_nb;
       double eps = sbd_data.eps;
@@ -303,7 +305,7 @@ namespace sbd {
       // The factored multiplication reads only the rank's ranges; the excitation lists are for
       // the method 0 multiplication, which --factored_mult_check and --rdm 1 still use.
       const bool helper_ranges_only = sbd_data.factored_mult != 0 && sbd_data.factored_mult_check == 0
-	&& do_rdm == 0 && ( method == 0 || method == 2 );
+	&& do_rdm == 0;
       auto time_start_help = std::chrono::high_resolution_clock::now();
       if( helper_ranges_only ) {
 	sbd::MakeHelperRanges(adet,bdet,helper,b_comm,adet_comm_size,bdet_comm_size);
