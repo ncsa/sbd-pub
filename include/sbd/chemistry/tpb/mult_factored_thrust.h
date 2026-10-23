@@ -861,9 +861,10 @@ public:
         cudaFuncSetAttribute(factored::spmm_same_spin, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              2 * 64 * SBD_FM_LDC * static_cast<int>(sizeof(double)));
         if (P_ > 1) {
-            // Across nodes the gather needs NCCL: its allgather is hierarchical (NVLink inside a node,
-            // Libfabric between nodes), 84 GB/s per GPU on two GH200 nodes against 24 GB/s for
-            // MPI_Allgather, and Davidson at 1e9 determinants on 8 GPUs took 51.5 s against 120.9 s.
+            // Across nodes the gather needs NCCL: its allgather runs as 8 rings that cross between
+            // nodes at different GPUs, so it uses all four NICs of a node, 84 GB/s per GPU on two GH200
+            // nodes against 24 GB/s for MPI_Allgather; Davidson at 1e9 determinants on 8 GPUs took
+            // 51.5 s against 120.9 s.
             MPI_Comm node;
             MPI_Comm_split_type(b_comm, MPI_COMM_TYPE_SHARED, rank_, MPI_INFO_NULL, &node);
             int on_node = 0;
