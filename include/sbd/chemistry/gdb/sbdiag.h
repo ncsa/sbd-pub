@@ -358,6 +358,9 @@ namespace sbd {
 	MultGDBStaircase stair_mult;
 	const bool use_stair = sbd_data.factored_mult != 0;
 	MultBase<ElemT>* thrust_mult = &device_mult;
+	if( use_stair && method != 0 ) {
+	  throw std::invalid_argument("--factored_mult 1 needs --method 0 (it replaces the stored Hamiltonian)");
+	}
 	if( use_stair ) {
 	  if constexpr (std::is_same<ElemT, double>::value) {
 	    thrust_mult = &stair_mult;
