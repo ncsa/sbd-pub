@@ -29,8 +29,14 @@ H·C on S, with C zero outside S, is
     excitation lists), adding H_bk C_k into sigma_b and, for staircase kets k, H_kb C_b into sigma_k.
 
 The engine order of a determinant is alpha string then beta string; sbd's interleaved determinants
-differ by the sign factored::fm_phase. Limits: one rank, real coefficients, at most 64 orbitals,
-fewer than 2^19 beta strings.
+differ by the sign factored::fm_phase.
+
+Several ranks: sbd's determinants are split over b_comm (and repeated over h_comm and t_comm). Every rank
+builds the staircase from the whole list, gathers the whole of C before each multiplication (GPU-aware
+MPI_Allgatherv over b_comm), and does a contiguous share of each part's work list (the same-spin tile rows,
+the cross-term blocks, the remainder determinants), cut at equal estimated cost over all the ranks; the
+partial sigmas are summed (MPI_Allreduce over b_comm, t_comm and h_comm) and each rank keeps its own rows.
+Limits: real coefficients, at most 64 orbitals, fewer than 2^19 beta strings.
 */
 #ifndef SBD_CHEMISTRY_GDB_MULT_STAIRCASE_THRUST_H
 #define SBD_CHEMISTRY_GDB_MULT_STAIRCASE_THRUST_H
@@ -63,6 +69,7 @@ using factored::fm_phase;
              blockIdx.y = 64-wide beta chunk)
      MODE 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]    (blockIdx.x = beta tile row,
              blockIdx.y = 64-row alpha chunk)
+   The alpha index (tile row or chunk) is offset by off.
    Elements beyond a row's width read as zero and are not written.
 */
 template <int MODE>
@@ -70,10 +77,11 @@ static __global__ void __launch_bounds__(2 * SBD_FM_TR, 256 / SBD_FM_TR)
 spmm_stair(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
            const int* __restrict__ tj, const int* __restrict__ rp, const unsigned char* __restrict__ ec,
            const double* __restrict__ ev, const long long* __restrict__ roff, const int* __restrict__ wid,
-           long long na)
+           long long na, int off)
 {
     extern __shared__ double smem[];
-    const int I = blockIdx.x, ch = blockIdx.y;
+    // this rank's share starts at alpha tile row off (MODE 0) or 64-row alpha chunk off (MODE 1)
+    const int I = blockIdx.x + (MODE == 0 ? off : 0), ch = blockIdx.y + (MODE == 1 ? off : 0);
     const int tid = threadIdx.x;
     const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
     const long long y0 = (long long)ch * 64;
@@ -388,7 +396,7 @@ __device__ __forceinline__ long long rem_find(const long long* __restrict__ rptr
 }
 
 /**
-   The remainder, per element. One block per remainder determinant r = (a, b): for every connected ket
+   The remainder, per element. One block per remainder determinant r = (a, b), r0 <= r < r1: for every connected ket
    k (a's row of H_a with b, b's row of H_b with a, and the products of a's and b's excitation lists,
    whose occupation entries carry the opposite-spin parts), sigma_r += H_rk C_k, and for a staircase
    ket sigma_k += H_kr C_r.
@@ -402,10 +410,10 @@ rem_elem(const double* __restrict__ Cst, const double* __restrict__ Crem, double
          const long long* __restrict__ eap, const int* __restrict__ eak, const int* __restrict__ eaq,
          const double* __restrict__ eas, const long long* __restrict__ ebp, const int* __restrict__ ebk,
          const int* __restrict__ ebq, const double* __restrict__ ebs, const double* __restrict__ Vs, int ldv,
-         double I0, long long nrem)
+         double I0, long long r0, long long r1)
 {
     __shared__ double red[4];
-    for (long long r = blockIdx.x; r < nrem; r += gridDim.x) {
+    for (long long r = r0 + blockIdx.x; r < r1; r += gridDim.x) {
         const long long a = ra[r], b = rb[r];
         const double cr = Crem[r];
         const long long nha = hap[a + 1] - hap[a], nhb = hbp[b + 1] - hbp[b];
@@ -555,12 +563,15 @@ public:
     {
         SBD_NVTX_RANGE_COLOR("MultGDBStaircase::Init", __LINE__);
         auto t_start = std::chrono::high_resolution_clock::now();
-        int sh, sb, st;
+        int sh, sb, st, rh, rb, rt;
         MPI_Comm_size(h_comm, &sh);
         MPI_Comm_size(b_comm, &sb);
         MPI_Comm_size(t_comm, &st);
-        if (sh != 1 || sb != 1 || st != 1)
-            throw std::runtime_error("factored_mult (GDB): one rank only for now");
+        MPI_Comm_rank(h_comm, &rh);
+        MPI_Comm_rank(b_comm, &rb);
+        MPI_Comm_rank(t_comm, &rt);
+        nproc_ = sh * sb * st;
+        me_ = (rh * sb + rb) * st + rt;
         if (norbs > 64) throw std::runtime_error("factored_mult (GDB): at most 64 orbitals");
         this->bit_length_ = bit_length;
         this->norbs_ = norbs;
@@ -570,20 +581,36 @@ public:
         this->t_comm_ = t_comm;
         L_ = static_cast<int>(norbs);
         I0_ = I0;
-        n_ = dets.size();
+        nloc_ = dets.size();
 
-        // alpha and beta strings of each determinant (alpha orbital i at bit 2i, beta at 2i + 1)
-        std::vector<uint64_t> xa(n_), xb(n_);
-        for (size_t i = 0; i < n_; i++) {
+        // alpha and beta strings of each determinant (alpha orbital i at bit 2i, beta at 2i + 1): this
+        // rank's, then the whole list (b_comm's ranks in order)
+        std::vector<uint64_t> xla(nloc_), xlb(nloc_);
+        for (size_t i = 0; i < nloc_; i++) {
             uint64_t a = 0, b = 0;
             for (int o = 0; o < L_; o++) {
                 const size_t ka = 2 * o, kb = 2 * o + 1;
                 if ((dets[i][ka / bit_length] >> (ka % bit_length)) & 1) a |= 1ull << o;
                 if ((dets[i][kb / bit_length] >> (kb % bit_length)) & 1) b |= 1ull << o;
             }
-            xa[i] = a;
-            xb[i] = b;
+            xla[i] = a;
+            xlb[i] = b;
         }
+        {
+            const int nl = static_cast<int>(nloc_);
+            std::vector<int> cnt(sb), dsp(sb, 0);
+            MPI_Allgather(&nl, 1, MPI_INT, cnt.data(), 1, MPI_INT, b_comm);
+            for (int r = 1; r < sb; r++) dsp[r] = dsp[r - 1] + cnt[r - 1];
+            gcnt_ = cnt;
+            gdsp_ = dsp;
+            loff_ = static_cast<size_t>(dsp[rb]);
+            n_ = static_cast<size_t>(dsp[sb - 1]) + cnt[sb - 1];
+        }
+        std::vector<uint64_t> xa(n_), xb(n_);
+        MPI_Allgatherv(xla.data(), static_cast<int>(nloc_), MPI_UINT64_T, xa.data(), gcnt_.data(), gdsp_.data(),
+                       MPI_UINT64_T, b_comm);
+        MPI_Allgatherv(xlb.data(), static_cast<int>(nloc_), MPI_UINT64_T, xb.data(), gcnt_.data(), gdsp_.data(),
+                       MPI_UINT64_T, b_comm);
         // rank the strings by determinant count, then bit-reversed value within dyadic buckets
         auto rank = [&](const std::vector<uint64_t> &x, std::vector<uint64_t> &strings, std::vector<int> &of,
                         std::vector<int> &edges) {
@@ -727,6 +754,7 @@ public:
         std::vector<int> kk2, kr2, kb1, kr1, b2a, b2t, b1k, b1g, b1t;
         int kmax = 0;
         double flop2 = 0.0, flop1 = 0.0;
+        std::vector<double> cost2, cost1;  // estimated cost of each bra-driven and ket-driven block
         std::vector<int> cb(cross_.nbt + 1), cbo(cross_.nbt + 1);
         {
             thrust::host_vector<int> h1v(cross_.cbase), h2v(out_.cbase);
@@ -747,7 +775,9 @@ public:
                     b2t.push_back(t);
                     int keff = 0;
                     while (keff < static_cast<int>(l.size()) && wid[l[keff].first] > 64 * t) keff++;
-                    flop2 += 2.0 * 64 * 64 * ((keff + 3) / 4 * 4) * (cb[t + 1] - cb[t]);
+                    const double f = 2.0 * 64 * 64 * ((keff + 3) / 4 * 4) * (cb[t + 1] - cb[t]);
+                    flop2 += f;
+                    cost2.push_back(f);
                 }
             }
             auto &m = ket_b[a];
@@ -760,9 +790,35 @@ public:
                     b1k.push_back(static_cast<int>(a));
                     b1g.push_back(static_cast<int>(g));
                     b1t.push_back(t);
-                    flop1 += 2.0 * 64 * 64 * 64 * (cbo[t + 1] - cbo[t]);
+                    const double f = 2.0 * 64 * 64 * 64 * (cbo[t + 1] - cbo[t]);
+                    flop1 += f;
+                    cost1.push_back(f);
                 }
             }
+        }
+        // this rank's shares: same-spin by staircase cells over 128-row bands (an alpha tile row, two
+        // 64-row chunks), the cross-term blocks by estimated flops, the remainder by connected kets
+        active_rows_ = static_cast<int>(std::lower_bound(wid.begin(), wid.end(), 0, std::greater<int>()) - wid.begin());
+        {
+            const int nband = (active_rows_ + SBD_FM_TR - 1) / SBD_FM_TR;
+            std::vector<double> cband(nband, 0.0);
+            for (int a = 0; a < active_rows_; a++) cband[a / SBD_FM_TR] += wid[a];
+            const auto bands = Share(cband);
+            ss0_ = static_cast<int>(bands.first);
+            ss1_ = static_cast<int>(bands.second);
+        }
+        {
+            const auto s2 = Share(cost2), s1 = Share(cost1);
+            c2b_ = s2.first; c2e_ = s2.second;
+            c1b_ = s1.first; c1e_ = s1.second;
+            std::vector<double> cr(nrem_);
+            for (size_t r = 0; r < nrem_; r++) {
+                const int a = rema[r], b = remb[r];
+                cr[r] = static_cast<double>(sa_.hptr[a + 1] - sa_.hptr[a]) + (sb_.hptr[b + 1] - sb_.hptr[b])
+                        + static_cast<double>(sa_.eptr[a + 1] - sa_.eptr[a]) * (sb_.eptr[b + 1] - sb_.eptr[b]);
+            }
+            const auto sr = Share(cr);
+            rb_ = sr.first; re_ = sr.second;
         }
         k2ptr_ = kp2; k2ket_ = kk2; k2row_ = kr2; b2a_ = b2a; b2t_ = b2t;
         k1ptr_ = kp1; k1bra_ = kb1; k1row_ = kr1; b1k_ = b1k; b1g_ = b1g; b1t_ = b1t;
@@ -782,7 +838,6 @@ public:
         // device copies
         wid_ = wid;
         w0_ = na_ > 0 ? wid[0] : 0;
-        active_rows_ = static_cast<int>(std::lower_bound(wid.begin(), wid.end(), 0, std::greater<int>()) - wid.begin());
         roff_ = roff;
         where_ = where;
         sgn_ = sgn;
@@ -811,22 +866,23 @@ public:
         Sst_.resize(ncell_);
         Crem_.resize(nrem_);
         Srem_.resize(nrem_);
+        if (sb > 1) Wall_.resize(n_);
 
         size_t in_list = n_ - nrem_;
         auto t_end = std::chrono::high_resolution_clock::now();
-        std::printf(" factored_mult (GDB): %zu determinants, %zu alpha and %zu beta strings; staircase %zu cells "
+        if (me_ == 0) std::printf(" factored_mult (GDB): %zu determinants, %zu alpha and %zu beta strings; staircase %zu cells "
                     "(%.2fx the list) holding %.1f%% of it, remainder %zu; cross-term GEMM %.3e flop bra-driven "
-                    "(%zu blocks) + %.3e ket-driven (%zu blocks); setup %.1f s\n",
+                    "(%zu blocks) + %.3e ket-driven (%zu blocks); %d rank(s); setup %.1f s\n",
                     n_, na_, nb_, ncell_, static_cast<double>(ncell_) / n_, 100.0 * in_list / n_, nrem_, flop2,
-                    b2a.size(), flop1, b1k.size(),
+                    b2a.size(), flop1, b1k.size(), nproc_,
                     1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
     }
 
     void makeQChamDiagTerms(thrust::device_vector<double> &hii)
     {
-        hii.resize(n_);
-        staircase::diagonal<<<1024, 256>>>(ptr(da_dev_), ptr(db_dev_), ptr(xb_), ptr(hda_), ptr(hdb_), ptr(Ja_), L_,
-                                           I0_, static_cast<long long>(n_), ptr(hii));
+        hii.resize(nloc_);
+        staircase::diagonal<<<1024, 256>>>(ptr(da_dev_) + loff_, ptr(db_dev_) + loff_, ptr(xb_), ptr(hda_), ptr(hdb_),
+                                           ptr(Ja_), L_, I0_, static_cast<long long>(nloc_), ptr(hii));
         check("diagonal");
     }
 
@@ -836,26 +892,38 @@ public:
     {
         (void)hii;
         SBD_NVTX_RANGE_COLOR("MultGDBStaircase::run", __LINE__);
-        if (Wb.size() != n_) Wb.resize(n_);
+        if (Wb.size() != nloc_) Wb.resize(nloc_);
         const long long n = static_cast<long long>(n_), na = static_cast<long long>(na_);
-        staircase::gather_in<<<1024, 256>>>(ptr(Wk), ptr(where_), ptr(sgn_), n, ptr(Cst_), ptr(Crem_));
+        const double* W = ptr(Wk);
+        if (!Wall_.empty()) {  // the whole of C (b_comm's parts in order)
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            cudaDeviceSynchronize();
+            MPI_Allgatherv(W, static_cast<int>(nloc_), MPI_DOUBLE, ptr(Wall_), gcnt_.data(), gdsp_.data(), MPI_DOUBLE,
+                           this->b_comm_);
+            W = ptr(Wall_);
+            tsum_[4] += Seconds(t0);
+        }
+        staircase::gather_in<<<1024, 256>>>(W, ptr(where_), ptr(sgn_), n, ptr(Cst_), ptr(Crem_));
         cudaMemsetAsync(ptr(Sst_), 0, ncell_ * sizeof(double), 0);
+        if (nrem_ > 0) cudaMemsetAsync(ptr(Srem_), 0, nrem_ * sizeof(double), 0);
         check("gather_in");
         timed(0, [&] {
             const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
             const int w0 = w0_, active = active_rows_;
-            if (w0 > 0) {
-                staircase::spmm_stair<0><<<dim3(ta_.nT, (w0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+            (void)active;
+            if (w0 > 0 && ss1_ > ss0_) {  // this rank's 128-row bands [ss0_, ss1_)
+                const int r0 = ss0_ * SBD_FM_TR, r1 = std::min(ss1_ * SBD_FM_TR, active_rows_);
+                staircase::spmm_stair<0><<<dim3(ss1_ - ss0_, (w0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
                     ptr(Cst_), ptr(Sst_), ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev),
-                    ptr(roff_), ptr(wid_), na);
-                staircase::spmm_stair<1><<<dim3((w0 + SBD_FM_TR - 1) / SBD_FM_TR, (active + 63) / 64), 2 * SBD_FM_TR,
+                    ptr(roff_), ptr(wid_), na, ss0_);
+                staircase::spmm_stair<1><<<dim3((w0 + SBD_FM_TR - 1) / SBD_FM_TR, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR,
                                            ss_smem>>>(ptr(Cst_), ptr(Sst_), ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp),
-                                                      ptr(tb_.ec), ptr(tb_.ev), ptr(roff_), ptr(wid_), na);
+                                                      ptr(tb_.ec), ptr(tb_.ev), ptr(roff_), ptr(wid_), na, r0 / 64);
             }
         });
         timed(1, [&] {
-            for (size_t b0 = 0; b0 < b2a_.size(); b0 += 1u << 30) {
-                const unsigned nbk = static_cast<unsigned>(std::min<size_t>(1u << 30, b2a_.size() - b0));
+            for (size_t b0 = c2b_; b0 < c2e_; b0 += 1u << 30) {
+                const unsigned nbk = static_cast<unsigned>(std::min<size_t>(1u << 30, c2e_ - b0));
                 staircase::cross_bra<<<nbk, 128, smem2_>>>(
                     ptr(Cst_), ptr(cross_.Vs), cross_.ldv, ptr(k2ptr_), ptr(k2ket_), ptr(k2row_), ptr(b2a_) + b0,
                     ptr(b2t_) + b0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
@@ -863,8 +931,8 @@ public:
             }
         });
         timed(2, [&] {
-            for (size_t b0 = 0; b0 < b1k_.size(); b0 += 1u << 30) {
-                const unsigned nbk = static_cast<unsigned>(std::min<size_t>(1u << 30, b1k_.size() - b0));
+            for (size_t b0 = c1b_; b0 < c1e_; b0 += 1u << 30) {
+                const unsigned nbk = static_cast<unsigned>(std::min<size_t>(1u << 30, c1e_ - b0));
                 staircase::cross_ket<<<nbk, 128, CROSS_KET_SMEM>>>(
                     ptr(Cst_), ptr(cross_.Vs), cross_.ldv, ptr(k1ptr_), ptr(k1bra_), ptr(k1row_), ptr(b1k_) + b0,
                     ptr(b1g_) + b0, ptr(b1t_) + b0, ptr(out_.goff), ptr(out_.gent), ptr(out_.cbase),
@@ -872,28 +940,71 @@ public:
             }
         });
         timed(3, [&] {
-            if (nrem_ > 0)
-                staircase::rem_elem<<<static_cast<unsigned>(std::min<size_t>(nrem_, 1u << 20)), 128>>>(
+            if (re_ > rb_)
+                staircase::rem_elem<<<static_cast<unsigned>(std::min<size_t>(re_ - rb_, 1u << 20)), 128>>>(
                     ptr(Cst_), ptr(Crem_), ptr(Sst_), ptr(Srem_), ptr(rema_), ptr(remb_), ptr(rptr_), ptr(roff_),
                     ptr(wid_), ptr(hap_), ptr(hac_), ptr(hav_), ptr(hbp_), ptr(hbc_), ptr(hbv_), ptr(eap_), ptr(eak_),
                     ptr(eaq_), ptr(eas_), ptr(ebp_), ptr(ebk_), ptr(ebq_), ptr(ebs_), ptr(cross_.Vs), cross_.ldv, I0_,
-                    static_cast<long long>(nrem_));
+                    static_cast<long long>(rb_), static_cast<long long>(re_));
         });
-        staircase::scatter_out<<<1024, 256>>>(ptr(Sst_), ptr(Srem_), ptr(where_), ptr(sgn_), n, ptr(Wb));
+        if (nproc_ > 1) {  // the sum of the ranks' parts
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            for (MPI_Comm c : {this->b_comm_, this->t_comm_, this->h_comm_}) {
+                int sz;
+                MPI_Comm_size(c, &sz);
+                if (sz == 1) continue;
+                SumInPlace(ptr(Sst_), ncell_, c);
+                SumInPlace(ptr(Srem_), nrem_, c);
+            }
+            tsum_[4] += Seconds(t0);
+        }
+        staircase::scatter_out<<<1024, 256>>>(ptr(Sst_), ptr(Srem_), ptr(where_) + loff_, ptr(sgn_) + loff_,
+                                              static_cast<long long>(nloc_), ptr(Wb));
         check("run");
         nrun_++;
     }
 
-    /// Times of the parts (same-spin, cross bra-driven, cross ket-driven, remainder) over the runs so far.
+    /// Times of the parts (same-spin, cross bra-driven, cross ket-driven, remainder, communication) over the
+    /// runs so far, on this rank.
     void PrintTimes() const
     {
         if (nrun_ == 0) return;
         std::printf(" factored_mult (GDB) per multiplication over %d: same-spin %.4f s, cross bra-driven %.4f s, "
-                    "cross ket-driven %.4f s, remainder %.4f s\n", nrun_, tsum_[0] / nrun_, tsum_[1] / nrun_,
-                    tsum_[2] / nrun_, tsum_[3] / nrun_);
+                    "cross ket-driven %.4f s, remainder %.4f s, communication %.4f s\n", nrun_, tsum_[0] / nrun_,
+                    tsum_[1] / nrun_, tsum_[2] / nrun_, tsum_[3] / nrun_, tsum_[4] / nrun_);
     }
 
 private:
+    // this rank's contiguous share [first, second) of items with the given costs, cut at equal cost
+    std::pair<size_t, size_t> Share(const std::vector<double> &cost) const
+    {
+        double total = 0.0;
+        for (double c : cost) total += c;
+        auto cut = [&](int k) {
+            if (k <= 0) return static_cast<size_t>(0);
+            if (k >= nproc_) return cost.size();
+            const double target = total * k / nproc_;
+            double run = 0.0;
+            size_t i = 0;
+            while (i < cost.size() && run + 0.5 * cost[i] < target) run += cost[i++];
+            return i;
+        };
+        return {cut(me_), cut(me_ + 1)};
+    }
+
+    // GPU-aware MPI_Allreduce in place, in pieces of at most 2^30 elements
+    static void SumInPlace(double* x, size_t n, MPI_Comm c)
+    {
+        cudaDeviceSynchronize();
+        for (size_t i = 0; i < n; i += 1u << 30)
+            MPI_Allreduce(MPI_IN_PLACE, x + i, static_cast<int>(std::min<size_t>(1u << 30, n - i)), MPI_DOUBLE, MPI_SUM, c);
+    }
+
+    static double Seconds(std::chrono::high_resolution_clock::time_point t0)
+    {
+        return 1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - t0).count();
+    }
+
     static std::vector<int> BucketEdges(size_t m, double base)
     {
         std::vector<int> e = {0};
@@ -952,6 +1063,13 @@ private:
     int L_ = 0;
     double I0_ = 0.0;
     size_t n_ = 0, na_ = 0, nb_ = 0, ncell_ = 0, nrem_ = 0;
+    size_t nloc_ = 0, loff_ = 0;                // this rank's determinants: [loff_, loff_ + nloc_) of the list
+    std::vector<int> gcnt_, gdsp_;              // b_comm's counts and offsets
+    int nproc_ = 1, me_ = 0;                    // ranks over h_comm x b_comm x t_comm, and this one
+    int ss0_ = 0, ss1_ = 0;                     // this rank's shares: same-spin 128-row bands,
+    size_t c2b_ = 0, c2e_ = 0, c1b_ = 0, c1e_ = 0;  // bra- and ket-driven cross blocks,
+    size_t rb_ = 0, re_ = 0;                    // remainder determinants
+    thrust::device_vector<double> Wall_;        // the whole of C, with b_comm over one rank
     factored::SpinStrings sa_, sb_;
     factored::SpinTiles ta_, tb_;
     factored::CrossTables cross_;
@@ -970,7 +1088,7 @@ private:
     thrust::device_vector<unsigned long long> xb_;
     thrust::device_vector<double> hda_, hdb_, Ja_;
     thrust::device_vector<double> Cst_, Sst_, Crem_, Srem_;
-    double tsum_[4] = {0.0, 0.0, 0.0, 0.0};
+    double tsum_[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
     int nrun_ = 0;
 };
 

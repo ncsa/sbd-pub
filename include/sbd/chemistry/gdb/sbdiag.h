@@ -45,7 +45,7 @@ namespace sbd {
       bool cpu_subspace = false;
 #endif
       // --factored_mult 1: H·C from string factors on a staircase of the basis, the rest per element
-      // (mult_staircase_thrust.h; Thrust builds, one rank, real coefficients); --factored_mult_check 1
+      // (mult_staircase_thrust.h; Thrust builds, real coefficients); --factored_mult_check 1
       // compares it with the default multiplication first
       int factored_mult = 0;
       int factored_mult_check = 0;
@@ -393,24 +393,26 @@ namespace sbd {
 	      thrust::device_vector<ElemT> hii_ref;
 	      device_mult.makeQChamDiagTerms(hii_ref);
 	      std::vector<ElemT> xh(hii.size());
-	      std::mt19937 gen(17);
+	      std::mt19937 gen(17 + mpi_rank_b);
 	      std::uniform_real_distribution<double> dist(-1.0, 1.0);
 	      for( auto &v : xh ) v = dist(gen);
 	      thrust::device_vector<ElemT> x(xh.begin(), xh.end()), y(xh.size(), 0.0), y_ref(xh.size(), 0.0);
 	      stair_mult.run(hii, x, y);
 	      device_mult.run(hii_ref, x, y_ref);
-	      auto rel = [](const thrust::device_vector<ElemT> &a, const thrust::device_vector<ElemT> &b) {
+	      auto rel = [&](const thrust::device_vector<ElemT> &a, const thrust::device_vector<ElemT> &b) {
 	        std::vector<ElemT> ah(a.size()), bh(b.size());
 	        thrust::copy(a.begin(), a.end(), ah.begin());
 	        thrust::copy(b.begin(), b.end(), bh.begin());
-	        double d = 0.0, r = 0.0;
-	        for( size_t i = 0; i < ah.size(); i++ ) { d += (ah[i]-bh[i])*(ah[i]-bh[i]); r += bh[i]*bh[i]; }
-	        return std::sqrt(d / r);
+	        double dr[2] = {0.0, 0.0}, sum[2];
+	        for( size_t i = 0; i < ah.size(); i++ ) { dr[0] += (ah[i]-bh[i])*(ah[i]-bh[i]); dr[1] += bh[i]*bh[i]; }
+	        MPI_Allreduce(dr, sum, 2, MPI_DOUBLE, MPI_SUM, b_comm);
+	        return std::sqrt(sum[0] / sum[1]);
 	      };
+	      const double diag_diff = rel(hii, hii_ref), mult_diff = rel(y, y_ref);  // collective: on every rank
 	      if( mpi_rank == 0 ) {
 		std::cout.precision(3);
 		std::cout << " factored_mult check against the default multiplication: diagonal rel diff "
-			  << rel(hii, hii_ref) << ", H*x rel diff " << rel(y, y_ref) << std::endl;
+			  << diag_diff << ", H*x rel diff " << mult_diff << std::endl;
 	      }
 	    }
 	  }
