@@ -69,7 +69,7 @@ using factored::fm_phase;
              blockIdx.y = 64-wide beta chunk)
      MODE 1: sigma[chunk, I cols] += C[chunk, :] H_b[:, I cols]    (blockIdx.x = beta tile row,
              blockIdx.y = 64-row alpha chunk)
-   The alpha index (tile row or chunk) is offset by off.
+   A 1-D launch over blocks [lo, lo + gridDim.x) of the (alpha, beta) block grid.
    Elements beyond a row's width read as zero and are not written.
 */
 template <int MODE>
@@ -77,11 +77,14 @@ static __global__ void __launch_bounds__(2 * SBD_FM_TR, 256 / SBD_FM_TR)
 spmm_stair(const double* __restrict__ C, double* sigma, const int* __restrict__ trp,
            const int* __restrict__ tj, const int* __restrict__ rp, const unsigned char* __restrict__ ec,
            const double* __restrict__ ev, const long long* __restrict__ roff, const int* __restrict__ wid,
-           long long na, int off)
+           long long na, long long lo, int ny)
 {
     extern __shared__ double smem[];
-    // this rank's share starts at alpha tile row off (MODE 0) or 64-row alpha chunk off (MODE 1)
-    const int I = blockIdx.x + (MODE == 0 ? off : 0), ch = blockIdx.y + (MODE == 1 ? off : 0);
+    // this rank's share: blocks lo + blockIdx.x of the grid, (I, ch) row-major with ny columns (MODE 0)
+    // or (ch, I) with ny tile rows (MODE 1)
+    const long long lin = lo + blockIdx.x;
+    const int I = MODE == 0 ? (int)(lin / ny) : (int)(lin % ny);
+    const int ch = MODE == 0 ? (int)(lin % ny) : (int)(lin / ny);
     const int tid = threadIdx.x;
     const int row = tid % SBD_FM_TR, half = tid / SBD_FM_TR;
     const long long y0 = (long long)ch * 64;
@@ -796,16 +799,55 @@ public:
                 }
             }
         }
-        // this rank's shares: same-spin by staircase cells over 128-row bands (an alpha tile row, two
-        // 64-row chunks), the cross-term blocks by estimated flops, the remainder by connected kets
+        // this rank's shares: same-spin blocks by output cells times H entries per row, the cross-term
+        // blocks by estimated flops, the remainder by connected kets
         active_rows_ = static_cast<int>(std::lower_bound(wid.begin(), wid.end(), 0, std::greater<int>()) - wid.begin());
-        {
-            const int nband = (active_rows_ + SBD_FM_TR - 1) / SBD_FM_TR;
-            std::vector<double> cband(nband, 0.0);
-            for (int a = 0; a < active_rows_; a++) cband[a / SBD_FM_TR] += wid[a];
-            const auto bands = Share(cband);
-            ss0_ = static_cast<int>(bands.first);
-            ss1_ = static_cast<int>(bands.second);
+        if (active_rows_ > 0) {
+            // a block's cost, as spmm_stair runs it: 64 per H tile it loads (a 64 x 64 piece of C) plus the
+            // tiles' entries, over the tiles of its tile row in columns below cw1
+            const long long nal = static_cast<long long>(na_);
+            auto tile_cost = [](const factored::SpinTiles &t) {
+                const thrust::host_vector<int> trp = t.trp, tj = t.tj, rp = t.rp;
+                std::vector<double> pre(tj.size() + 1, 0.0);  // prefix over tiles of 64 + entries
+                for (size_t u = 0; u < tj.size(); u++)
+                    pre[u + 1] = pre[u] + 64.0 + (rp[u * (SBD_FM_TR + 1) + SBD_FM_TR] - rp[u * (SBD_FM_TR + 1)]);
+                return [trp = std::vector<int>(trp.begin(), trp.end()), tj = std::vector<int>(tj.begin(), tj.end()),
+                        pre](int I, long long cw1) {
+                    const auto e = std::lower_bound(tj.begin() + trp[I], tj.begin() + trp[I + 1], cw1,
+                                                    [](int j, long long c) { return 64LL * j < c; });
+                    return pre[e - tj.begin()] - pre[trp[I]];
+                };
+            };
+            const int w0 = wid[0];
+            // MODE 0: (alpha tile row I, 64-wide beta chunk ch); its H_a columns are the rows wider than ch*64
+            ny0_ = (w0 + 63) / 64;
+            const int nI = (active_rows_ + SBD_FM_TR - 1) / SBD_FM_TR;
+            std::vector<double> c0(static_cast<size_t>(nI) * ny0_, 0.0);
+            {
+                const auto cost = tile_cost(ta_);
+                for (int ch = 0; ch < ny0_; ch++) {
+                    const long long y0 = 64LL * ch;
+                    const long long cw1 = std::lower_bound(wid.begin(), wid.begin() + nal, y0,
+                                                           std::greater<long long>()) - wid.begin();
+                    for (int I = 0; I < nI && wid[static_cast<size_t>(I) * SBD_FM_TR] > y0; I++)
+                        c0[static_cast<size_t>(I) * ny0_ + ch] = cost(I, cw1);
+                }
+            }
+            const auto s0 = Share(c0);
+            ss0b_ = s0.first; ss0e_ = s0.second;
+            // MODE 1: (64-row alpha chunk ch, beta tile row I); its H_b columns are those below the chunk's width
+            ny1_ = (w0 + SBD_FM_TR - 1) / SBD_FM_TR;
+            const int nc = (active_rows_ + 63) / 64;
+            std::vector<double> c1(static_cast<size_t>(nc) * ny1_, 0.0);
+            {
+                const auto cost = tile_cost(tb_);
+                for (int ch = 0; ch < nc; ch++) {
+                    const long long cw1 = wid[64LL * ch];
+                    for (int I = 0; 1LL * I * SBD_FM_TR < cw1; I++) c1[static_cast<size_t>(ch) * ny1_ + I] = cost(I, cw1);
+                }
+            }
+            const auto s1 = Share(c1);
+            ss1b_ = s1.first; ss1e_ = s1.second;
         }
         {
             const auto s2 = Share(cost2), s1 = Share(cost1);
@@ -909,17 +951,14 @@ public:
         check("gather_in");
         timed(0, [&] {
             const int ss_smem = 2 * 64 * SBD_FM_LDC * sizeof(double);
-            const int w0 = w0_, active = active_rows_;
-            (void)active;
-            if (w0 > 0 && ss1_ > ss0_) {  // this rank's 128-row bands [ss0_, ss1_)
-                const int r0 = ss0_ * SBD_FM_TR, r1 = std::min(ss1_ * SBD_FM_TR, active_rows_);
-                staircase::spmm_stair<0><<<dim3(ss1_ - ss0_, (w0 + 63) / 64), 2 * SBD_FM_TR, ss_smem>>>(
+            if (ss0e_ > ss0b_)  // this rank's blocks of each grid
+                staircase::spmm_stair<0><<<static_cast<unsigned>(ss0e_ - ss0b_), 2 * SBD_FM_TR, ss_smem>>>(
                     ptr(Cst_), ptr(Sst_), ptr(ta_.trp), ptr(ta_.tj), ptr(ta_.rp), ptr(ta_.ec), ptr(ta_.ev),
-                    ptr(roff_), ptr(wid_), na, ss0_);
-                staircase::spmm_stair<1><<<dim3((w0 + SBD_FM_TR - 1) / SBD_FM_TR, (r1 - r0 + 63) / 64), 2 * SBD_FM_TR,
-                                           ss_smem>>>(ptr(Cst_), ptr(Sst_), ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp),
-                                                      ptr(tb_.ec), ptr(tb_.ev), ptr(roff_), ptr(wid_), na, r0 / 64);
-            }
+                    ptr(roff_), ptr(wid_), na, static_cast<long long>(ss0b_), ny0_);
+            if (ss1e_ > ss1b_)
+                staircase::spmm_stair<1><<<static_cast<unsigned>(ss1e_ - ss1b_), 2 * SBD_FM_TR, ss_smem>>>(
+                    ptr(Cst_), ptr(Sst_), ptr(tb_.trp), ptr(tb_.tj), ptr(tb_.rp), ptr(tb_.ec), ptr(tb_.ev),
+                    ptr(roff_), ptr(wid_), na, static_cast<long long>(ss1b_), ny1_);
         });
         timed(1, [&] {
             for (size_t b0 = c2b_; b0 < c2e_; b0 += 1u << 30) {
@@ -965,13 +1004,22 @@ public:
     }
 
     /// Times of the parts (same-spin, cross bra-driven, cross ket-driven, remainder, communication) over the
-    /// runs so far, on this rank.
+    /// runs so far, on rank 0 and the slowest rank of each part. Collective: every rank calls it.
     void PrintTimes() const
     {
         if (nrun_ == 0) return;
+        double tmax[5];
+        std::copy(tsum_, tsum_ + 5, tmax);
+        for (MPI_Comm c : {this->b_comm_, this->t_comm_, this->h_comm_})
+            MPI_Allreduce(MPI_IN_PLACE, tmax, 5, MPI_DOUBLE, MPI_MAX, c);
+        if (me_ != 0) return;
         std::printf(" factored_mult (GDB) per multiplication over %d: same-spin %.4f s, cross bra-driven %.4f s, "
                     "cross ket-driven %.4f s, remainder %.4f s, communication %.4f s\n", nrun_, tsum_[0] / nrun_,
                     tsum_[1] / nrun_, tsum_[2] / nrun_, tsum_[3] / nrun_, tsum_[4] / nrun_);
+        if (nproc_ > 1)
+            std::printf(" factored_mult (GDB) slowest rank of each part: same-spin %.4f s, cross bra-driven %.4f s, "
+                        "cross ket-driven %.4f s, remainder %.4f s, communication %.4f s\n", tmax[0] / nrun_,
+                        tmax[1] / nrun_, tmax[2] / nrun_, tmax[3] / nrun_, tmax[4] / nrun_);
     }
 
 private:
@@ -1066,7 +1114,8 @@ private:
     size_t nloc_ = 0, loff_ = 0;                // this rank's determinants: [loff_, loff_ + nloc_) of the list
     std::vector<int> gcnt_, gdsp_;              // b_comm's counts and offsets
     int nproc_ = 1, me_ = 0;                    // ranks over h_comm x b_comm x t_comm, and this one
-    int ss0_ = 0, ss1_ = 0;                     // this rank's shares: same-spin 128-row bands,
+    size_t ss0b_ = 0, ss0e_ = 0, ss1b_ = 0, ss1e_ = 0;  // this rank's shares: same-spin blocks of each grid,
+    int ny0_ = 1, ny1_ = 1;                     // (their grids' second dimensions)
     size_t c2b_ = 0, c2e_ = 0, c1b_ = 0, c1e_ = 0;  // bra- and ket-driven cross blocks,
     size_t rb_ = 0, re_ = 0;                    // remainder determinants
     thrust::device_vector<double> Wall_;        // the whole of C, with b_comm over one rank

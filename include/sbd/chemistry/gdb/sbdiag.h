@@ -446,7 +446,7 @@ namespace sbd {
 #ifdef SBD_THRUST
 	sbd::Davidson(hii, w, *thrust_mult,
 			max_it,max_nb,eps,max_time,sbd_data.cpu_subspace);
-	if( use_stair && mpi_rank == 0 ) stair_mult.PrintTimes();
+	if( use_stair ) stair_mult.PrintTimes();  // collective
 #else
 	Davidson(hii,w,det,bit_length,static_cast<size_t>(L),
 		 idxmap,exidx,I0,I1,I2,
