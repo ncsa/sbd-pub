@@ -577,6 +577,20 @@ public:
         MPI_Comm_rank(t_comm, &rt);
         nproc_ = sh * sb * st;
         me_ = (rh * sb + rb) * st + rt;
+        if (nproc_ > 1) {
+            // the gather of C and the sums of sigma pass device memory to MPI
+#ifdef SBD_NON_CUDA_AWARE_MPI
+            throw std::runtime_error("factored_mult (GDB): several ranks need GPU-aware MPI "
+                                     "(SBD_NON_CUDA_AWARE_MPI=OFF)");
+#elif defined(CRAY_MPICH_VERSION)
+            const char* gpu = std::getenv("MPICH_GPU_SUPPORT_ENABLED");  // Cray's MPIX_Query_cuda_support returns 0
+            if (!gpu || std::strcmp(gpu, "1") != 0)
+                throw std::runtime_error("factored_mult (GDB): several ranks need MPICH_GPU_SUPPORT_ENABLED=1");
+#elif defined(MPIX_CUDA_AWARE_SUPPORT)
+            if (!MPIX_Query_cuda_support())
+                throw std::runtime_error("factored_mult (GDB): several ranks need MPI with CUDA support enabled");
+#endif
+        }
         if (norbs > 64) throw std::runtime_error("factored_mult (GDB): at most 64 orbitals");
         this->bit_length_ = bit_length;
         this->norbs_ = norbs;
