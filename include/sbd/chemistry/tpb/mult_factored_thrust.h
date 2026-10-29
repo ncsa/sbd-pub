@@ -60,6 +60,9 @@ namespace factored {
 #define SBD_FM_LD 72    // row stride (doubles) of the V, C and X tiles: 64 + 8 avoids bank conflicts
 #define SBD_FM_LDC 65   // row stride of the same-spin C tiles; odd so transposed fills spread over banks
 #define SBD_FM_TR 128   // rows per same-spin tile (columns per tile: 64)
+#ifndef SBD_FM_SMEM_LIMIT
+#define SBD_FM_SMEM_LIMIT 0  // bytes of shared memory a cross-term block may use; 0: the device's limit
+#endif
 
 __device__ __forceinline__ void fm_cp_async8(double* dst, const double* src, bool valid)
 {
@@ -88,8 +91,9 @@ __device__ __forceinline__ void fm_load_v_tile(double* stage, const double* Vs, 
 }
 
 /**
-   Cross term. One block per (bra a, 64-column tile of b'). The C tile C[a'_k, b'-tile] (K x 64)
-   stays in shared memory; the sign of each excitation is folded into the V row it reads (Vs holds
+   Cross term. One block per (segment of the excitation list of bra a, 64-column tile of b'); a list
+   too long for shared memory is split into segments whose sums add into the same sigma row. The C
+   tile C[a'_k, b'-tile] (K x 64) stays in shared memory; the sign of each excitation is folded into the V row it reads (Vs holds
    V, -V and a zero row for padding), so the C tile and the 32 x 64 V tiles (two-stage ring, which
    also holds the X tile) arrive by cp.async. For each 64-row chunk of the rows the tile can use
    (rlist), 4 warps of 32 x 32 form X with mma.sync m8n8k4 f64, and the entries with E_rs b' in the
@@ -100,7 +104,7 @@ __device__ __forceinline__ void fm_load_v_tile(double* stage, const double* Vs, 
 static __global__ void __launch_bounds__(128)
 fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv,
             const long long* __restrict__ kptr, const int* __restrict__ kket,
-            const int* __restrict__ krow, const int* __restrict__ aidx,
+            const int* __restrict__ krow, const int* __restrict__ kbra, const int* __restrict__ sidx,
             const long long* __restrict__ goff, const unsigned* __restrict__ gent,
             const int* __restrict__ cbase, const int* __restrict__ rlist, long long nb,
             long long a0, double* sigma,  // sigma holds this rank's bras a0.. (rows a - a0)
@@ -108,9 +112,10 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
 {
     extern __shared__ double sm[];
     const int bt = blockIdx.x + bt0;
-    const long long a = aidx[blockIdx.y];
-    const long long kp = kptr[a];
-    const int K = (int)(kptr[a + 1] - kp);  // multiple of 4, padded with the zero row
+    const int sg = sidx[blockIdx.y];
+    const long long a = kbra[sg];
+    const long long kp = kptr[sg];
+    const int K = (int)(kptr[sg + 1] - kp);  // multiple of 4, padded with the zero row
     const int c0 = cbase[bt], nch = cbase[bt + 1] - c0;
     const int T = (K + 31) / 32;            // 32-deep V tiles per chunk
     double* Bs = sm;                        // K x LD
@@ -594,8 +599,9 @@ inline std::vector<int> ColumnTilesPerTileRow(const SpinStrings &s)
 }
 
 /**
-   Tables of the cross term: per bra alpha string its excitation list padded to a multiple of 4
-   (C rows kket, signed V rows krow), the signed integral rows Vs, and per 64-wide tile of beta kets
+   Tables of the cross term: per bra alpha string its excitation list, in segments (sptr) of at most
+   kseg entries, each padded to a multiple of 4 (C rows kket, signed V rows krow, bra kbra), the
+   signed integral rows Vs, and per 64-wide tile of beta kets
    the rs rows it can use (rlist, in 64-row chunks from cbase) with its scatter entries (gent from
    goff, one range per chunk).
 */
@@ -605,9 +611,11 @@ struct CrossTables {
     int max_chunks = 0;
     thrust::device_vector<double> Vs;
     thrust::device_vector<long long> kptr, goff;
-    thrust::device_vector<int> kket, krow, cbase, rlist;
+    thrust::device_vector<int> kket, krow, kbra, cbase, rlist;
     thrust::device_vector<unsigned> gent;
-    std::vector<int> Kp;  // padded excitation count of each bra (host)
+    int kseg = 0;           // longest segment that fits the shared memory of a block
+    std::vector<int> Kp;    // padded excitation count of each segment (host)
+    std::vector<size_t> sptr;  // segments of bra a: sptr[a] .. sptr[a + 1] (host)
     std::vector<thrust::device_vector<int>> bucket_ids;
     std::vector<size_t> bucket_smem;
     std::vector<int> bucket_group;   // index into fm_kp_bounds
@@ -628,7 +636,7 @@ inline size_t fm_cross_smem(int km, int max_chunks)
 }
 
 inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinStrings &sb, int L,
-                             const std::vector<double> &eri)
+                             const std::vector<double> &eri, size_t smem_limit)
 {
     const int nrs = L * L;
     const int nrc = nrs / 64 + 1;  // > nrs / 64, so column nrs (padding) exists and is zero
@@ -641,25 +649,6 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
             Vs[static_cast<size_t>(nrs + pq) * x.ldv + rs] = -v;
         }
     x.Vs = Vs;
-
-    // alpha side
-    const size_t na = sa.n;
-    std::vector<long long> kptr(na + 1, 0);
-    std::vector<int> Kp(na);
-    for (size_t a = 0; a < na; a++) {
-        Kp[a] = static_cast<int>((sa.eptr[a + 1] - sa.eptr[a] + 3) / 4 * 4);
-        kptr[a + 1] = kptr[a] + Kp[a];
-    }
-    std::vector<int> kket(kptr[na], 0), krow(kptr[na], 2 * nrs);
-    for (size_t a = 0; a < na; a++)
-        for (int64_t e = sa.eptr[a]; e < sa.eptr[a + 1]; e++) {
-            const long long at = kptr[a] + (e - sa.eptr[a]);
-            kket[at] = sa.eket[e];
-            krow[at] = sa.esg[e] > 0 ? sa.epq[e] : nrs + sa.epq[e];
-        }
-    x.kptr = kptr;
-    x.kket = kket;
-    x.krow = krow;
 
     // beta side: rows used per 64-wide tile of kets, scatter entries grouped by chunk
     const size_t nb = sb.n;
@@ -705,12 +694,47 @@ inline void BuildCrossTables(CrossTables &x, const SpinStrings &sa, const SpinSt
     x.rlist = rlist;
     x.goff = goff;
     x.gent = gent;
-    x.Kp = Kp;
     x.total_chunks = cbase[x.nbt];
+
+    // alpha side: lists longer than the shared memory allows are cut into near-equal segments
+    while (fm_cross_smem(x.kseg + 4, x.max_chunks) <= smem_limit) x.kseg += 4;
+    if (x.kseg == 0) throw std::runtime_error("factored_mult: shared memory too small for the cross term");
+    const size_t na = sa.n;
+    x.sptr.assign(na + 1, 0);
+    std::vector<int> nseg(na);
+    for (size_t a = 0; a < na; a++) {
+        nseg[a] = static_cast<int>(std::max<int64_t>(1, (sa.eptr[a + 1] - sa.eptr[a] + x.kseg - 1) / x.kseg));
+        x.sptr[a + 1] = x.sptr[a] + nseg[a];
+    }
+    const size_t ns = x.sptr[na];
+    std::vector<long long> kptr(ns + 1, 0);
+    std::vector<int> Kp(ns), kbra(ns);
+    std::vector<int64_t> e0(ns + 1);  // first excitation of each segment
+    for (size_t a = 0; a < na; a++) {
+        const int64_t n = sa.eptr[a + 1] - sa.eptr[a];
+        for (int j = 0; j <= nseg[a]; j++) e0[x.sptr[a] + j] = sa.eptr[a] + n * j / nseg[a];
+        for (size_t g = x.sptr[a]; g < x.sptr[a + 1]; g++) {
+            Kp[g] = static_cast<int>((e0[g + 1] - e0[g] + 3) / 4 * 4);
+            kptr[g + 1] = kptr[g] + Kp[g];
+            kbra[g] = static_cast<int>(a);
+        }
+    }
+    std::vector<int> kket(kptr[ns], 0), krow(kptr[ns], 2 * nrs);
+    for (size_t g = 0; g < ns; g++)
+        for (int64_t e = e0[g]; e < e0[g + 1]; e++) {
+            const long long at = kptr[g] + (e - e0[g]);
+            kket[at] = sa.eket[e];
+            krow[at] = sa.esg[e] > 0 ? sa.epq[e] : nrs + sa.epq[e];
+        }
+    x.kptr = kptr;
+    x.kket = kket;
+    x.krow = krow;
+    x.kbra = kbra;
+    x.Kp = Kp;
 }
 
-// launches for the bras a0 <= a < a1 that this rank computes, grouped by padded excitation count
-// so that the shared memory of a launch fits its bras
+// launches for the segments of the bras a0 <= a < a1 that this rank computes, grouped by padded
+// excitation count so that the shared memory of a launch fits its segments
 inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
 {
     x.bucket_ids.clear();
@@ -724,11 +748,11 @@ inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
         std::vector<int> ids;
         int km = 0;
         double kp = 0.0;
-        for (size_t a = a0; a < a1; a++)
-            if (x.Kp[a] > lo && x.Kp[a] <= hi) {
-                ids.push_back(static_cast<int>(a));
-                km = std::max(km, x.Kp[a]);
-                kp += x.Kp[a];
+        for (size_t sg = x.sptr[a0]; sg < x.sptr[a1]; sg++)
+            if (x.Kp[sg] > lo && x.Kp[sg] <= hi) {
+                ids.push_back(static_cast<int>(sg));
+                km = std::max(km, x.Kp[sg]);
+                kp += x.Kp[sg];
             }
         lo = hi;
         if (ids.empty()) continue;
@@ -737,7 +761,7 @@ inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
         x.bucket_group.push_back(g);
         x.bucket_kp.push_back(kp);
     }
-    for (size_t a = a0; a < a1; a++) ksum += x.Kp[a];
+    for (size_t sg = x.sptr[a0]; sg < x.sptr[a1]; sg++) ksum += x.Kp[sg];
     x.flops = 2.0 * 64 * 64 * static_cast<double>(x.total_chunks) * ksum;
 }
 
@@ -892,26 +916,30 @@ public:
         factored::BuildSpinStrings(sb_, L_, h1, eri);
         factored::BuildSpinTiles(tb_, sb_, 0.0);  // the alpha tiles cover the computed rows (SplitRows)
         tcnt_ = factored::ColumnTilesPerTileRow(sa_);
-        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);
+        int dev = 0, optin = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        size_t smem_limit = static_cast<size_t>(optin);
+#if SBD_FM_SMEM_LIMIT > 0
+        smem_limit = std::min<size_t>(smem_limit, SBD_FM_SMEM_LIMIT);  // to test the segments on a larger GPU
+#endif
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri, smem_limit);
 
         // Shared memory of the largest cross-term launch on any rank, so that every rank sets the
-        // same limit and the occupancy of each group of bras can be queried for the work estimate.
-        std::vector<int> km_all;  // largest padded excitation count in each group, over all bras
+        // same limit and the occupancy of each group of segments can be queried for the work estimate.
+        std::vector<int> km_all;  // largest padded excitation count in each group, over all segments
         for (size_t g = 0, lo = 0; g < sizeof(factored::fm_kp_bounds) / sizeof(int); g++) {
             const int hi = factored::fm_kp_bounds[g];
             int km = 0;
-            for (size_t a = 0; a < na_; a++)
-                if (cross_.Kp[a] > static_cast<int>(lo) && cross_.Kp[a] <= hi) km = std::max(km, cross_.Kp[a]);
+            for (int kp : cross_.Kp)
+                if (kp > static_cast<int>(lo) && kp <= hi) km = std::max(km, kp);
             km_all.push_back(km);
             lo = hi;
         }
         size_t smem = 0;
         for (int km : km_all)
             if (km > 0) smem = std::max(smem, factored::fm_cross_smem(km, cross_.max_chunks));
-        int dev = 0, optin = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-        if (smem > static_cast<size_t>(optin))
+        if (smem > smem_limit)
             throw std::runtime_error("factored_mult: excitation lists too long for shared memory");
         cudaFuncSetAttribute(factored::fused_cross, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              static_cast<int>(smem));
@@ -926,6 +954,12 @@ public:
                         na_, nb_, P_, static_cast<long long>(sa_.hptr[na_]),
                         static_cast<long long>(sb_.hptr[nb_]), 64.0 * cross_.total_chunks / cross_.nbt,
                         cross_.flops);
+        if (rank_ == 0 && cross_.sptr[na_] > na_) {
+            size_t nsplit = 0;
+            for (size_t a = 0; a < na_; a++) nsplit += cross_.sptr[a + 1] - cross_.sptr[a] > 1;
+            std::printf(" factored_mult: %zu excitation lists longer than %d entries (the shared memory of a "
+                        "block) run as %zu segments in all\n", nsplit, cross_.kseg, cross_.sptr[na_]);
+        }
 
         std::vector<unsigned long long> xa(sa_.x.begin(), sa_.x.end()), xb(sb_.x.begin(), sb_.x.end());
         xa_ = xa;
@@ -1180,7 +1214,7 @@ public:
                         const unsigned ny = static_cast<unsigned>(std::min<size_t>(65535, count - y0));
                         factored::fused_cross<<<dim3(nbt, ny), 128, cross_.bucket_smem[k]>>>(
                             C - crow0 * ldc, ptr(cross_.Vs), cross_.ldv, ptr(cross_.kptr), ptr(cross_.kket),
-                            ptr(cross_.krow), ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase),
+                            ptr(cross_.krow), ptr(cross_.kbra), ids + y0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase),
                             ptr(cross_.rlist), nb, c0, S, ldc, ccol0, bt0);
                     }
                 });
@@ -1308,10 +1342,13 @@ private:
     {
         std::vector<double> pre(na_ + 1, 0.0);
         for (size_t a = 0; a < na_; a++) {
-            const int kp = cross_.Kp[a];
-            size_t g = 0;
-            while (kp > factored::fm_kp_bounds[g]) g++;
-            pre[a + 1] = pre[a] + cg_[g] * kp + ca_ * tcnt_[a / SBD_FM_TR] / SBD_FM_TR + cr_;
+            pre[a + 1] = pre[a] + ca_ * tcnt_[a / SBD_FM_TR] / SBD_FM_TR + cr_;
+            for (size_t sg = cross_.sptr[a]; sg < cross_.sptr[a + 1]; sg++) {
+                const int kp = cross_.Kp[sg];
+                size_t g = 0;
+                while (kp > factored::fm_kp_bounds[g]) g++;
+                pre[a + 1] += cg_[g] * kp;
+            }
         }
         double even = 0.0, before = 0.0, after = 0.0;
         for (int q = 0; q < P_; q++) {
