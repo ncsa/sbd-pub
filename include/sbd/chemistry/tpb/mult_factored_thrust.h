@@ -37,6 +37,8 @@ and h_comm of size 1), real coefficients, at most 64 orbitals.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -49,6 +51,11 @@ and h_comm of size 1), real coefficients, at most 64 orbitals.
 #include <thrust/transform.h>
 
 #include "sbd/framework/nvtx.h"
+
+#include <mpi.h>
+#if defined(OPEN_MPI) && OPEN_MPI
+#include <mpi-ext.h>
+#endif
 
 namespace sbd {
 namespace factored {
@@ -997,6 +1004,26 @@ public:
             if (!all_one_node)
                 throw std::runtime_error("factored_mult: ranks on more than one node need a build with "
                                          "SBD_USE_NCCL=ON (the MPI_Allgather gather is too slow between nodes)");
+#ifdef SBD_NON_CUDA_AWARE_MPI
+            // Without NCCL the gather and row exchange pass device memory to MPI; copying them through
+            // host memory instead left 2 GPUs no faster than 1 (job 3479048).
+            throw std::runtime_error("factored_mult: several ranks need a build with SBD_USE_NCCL=ON or "
+                                     "with GPU-aware MPI (SBD_NON_CUDA_AWARE_MPI=OFF)");
+#else
+            // A GPU-aware build still fails if MPI's GPU support is off at run time: Cray MPICH without
+            // MPICH_GPU_SUPPORT_ENABLED=1 hangs on an A100 and aborts on GH200. Cray's MPIX_Query_cuda_support
+            // returns 0 even when it is on, so read the variable there; ask Open MPI.
+#if defined(CRAY_MPICH_VERSION)
+            const char* gpu = std::getenv("MPICH_GPU_SUPPORT_ENABLED");
+            if (!gpu || std::strcmp(gpu, "1") != 0)
+                throw std::runtime_error("factored_mult: several ranks need MPICH_GPU_SUPPORT_ENABLED=1 "
+                                         "or a build with SBD_USE_NCCL=ON");
+#elif defined(MPIX_CUDA_AWARE_SUPPORT)
+            if (!MPIX_Query_cuda_support())
+                throw std::runtime_error("factored_mult: several ranks need MPI with CUDA support enabled "
+                                         "or a build with SBD_USE_NCCL=ON");
+#endif
+#endif
 #endif
             if (maxrows_ * nb_ > static_cast<size_t>(INT32_MAX))
                 throw std::runtime_error("factored_mult: a rank's part of the vector exceeds 2^31 elements");
