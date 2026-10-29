@@ -161,26 +161,28 @@ spmm_stair(const double* __restrict__ C, double* sigma, const int* __restrict__ 
 }
 
 /**
-   Cross term, bra-driven (factored::fused_cross on the staircase). One block per (bra a, 64-wide tile
-   bt of kets' beta columns) from the lists ba / bt; the bra's kets (kptr: alpha ranks kket, signed V
-   rows krow, sorted by width, padded to a multiple of 4 with ket -1 and the zero row) wider than the tile start
-   are used. Outputs b >= w(a) are dropped. Shared memory: 16 bytes (K_eff) + factored::fm_cross_smem + K ints,
+   Cross term, bra-driven (factored::fused_cross on the staircase). One block per (segment s, 64-wide tile
+   bt of kets' beta columns) from the lists bs / bt; a segment is a bra's kets (sbra[s] = a), or a part of them
+   when they exceed the shared memory of a block; its kets (kptr: alpha ranks kket, signed V rows krow, sorted
+   by width, padded to a multiple of 4 with ket -1 and the zero row) wider than the tile start are used. Outputs b >= w(a) are dropped. Shared memory: 16 bytes (K_eff) + factored::fm_cross_smem + K ints,
    all dynamic.
 */
 static __global__ void __launch_bounds__(128)
 cross_bra(const double* __restrict__ C, const double* __restrict__ Vs, int ldv,
           const long long* __restrict__ kptr, const int* __restrict__ kket, const int* __restrict__ krow,
-          const int* __restrict__ ba, const int* __restrict__ btl, const long long* __restrict__ goff,
+          const int* __restrict__ sbra, const int* __restrict__ bs, const int* __restrict__ btl,
+          const long long* __restrict__ goff,
           const unsigned* __restrict__ gent, const int* __restrict__ cbase, const int* __restrict__ rlist,
           const long long* __restrict__ roff, const int* __restrict__ wid, double* sigma)
 {
     extern __shared__ double smb[];
     int& keff_s = *(int*)smb;
     double* sm = smb + 2;
-    const long long a = ba[blockIdx.x];
+    const int sg = bs[blockIdx.x];
+    const long long a = sbra[sg];
     const int bt = btl[blockIdx.x];
-    const long long kp = kptr[a];
-    const int K = (int)(kptr[a + 1] - kp);
+    const long long kp = kptr[sg];
+    const int K = (int)(kptr[sg + 1] - kp);
     const long long b0 = (long long)bt * 64;
     const int c0 = cbase[bt], nch = cbase[bt + 1] - c0;
     double* Bs = sm;
@@ -735,7 +737,19 @@ public:
         factored::BuildSpinStrings(sb_, L_, h1, eri);
         factored::BuildSpinTiles(ta_, sa_, I0);   // the core energy once, on the alpha side
         factored::BuildSpinTiles(tb_, sb_, 0.0);
-        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri);  // V and the bra-driven beta tables
+        int dev = 0, optin = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+        size_t smem_limit = static_cast<size_t>(optin);
+#if SBD_FM_SMEM_LIMIT > 0
+        smem_limit = std::min<size_t>(smem_limit, SBD_FM_SMEM_LIMIT);  // to test the segments on a larger GPU
+#endif
+        factored::BuildCrossTables(cross_, sa_, sb_, L_, eri, smem_limit);  // V and the bra-driven beta tables
+        // the longest ket list a cross_bra block holds in shared memory; longer lists run as segments
+        auto smem2 = [&](int k) { return 16 + factored::fm_cross_smem(k, cross_.max_chunks) + static_cast<size_t>(k) * sizeof(int); };
+        int kseg = 0;
+        while (smem2(kseg + 4) <= smem_limit) kseg += 4;
+        if (kseg == 0) throw std::runtime_error("factored_mult (GDB): no excitation list fits in shared memory");
         staircase::BuildOutTables(out_, sb_, L_);                // the ket-driven beta tables
 
         // the cross term's alpha pairs (bra a = E_pq ket a'): bra-driven if w(a') <= w(a), ket-driven
@@ -753,9 +767,10 @@ public:
             }
         }
         auto by_width = [&](const std::pair<int, int> &p, const std::pair<int, int> &q) { return wid[p.first] > wid[q.first]; };
-        std::vector<long long> kp2(na_ + 1, 0), kp1(na_ + 1, 0);
-        std::vector<int> kk2, kr2, kb1, kr1, b2a, b2t, b1k, b1g, b1t;
+        std::vector<long long> kp2(1, 0), kp1(na_ + 1, 0);
+        std::vector<int> kk2, kr2, s2a, kb1, kr1, b2s, b2t, b1k, b1g, b1t;
         int kmax = 0;
+        size_t nsplit = 0;
         double flop2 = 0.0, flop1 = 0.0;
         std::vector<double> cost2, cost1;  // estimated cost of each bra-driven and ket-driven block
         std::vector<int> cb(cross_.nbt + 1), cbo(cross_.nbt + 1);
@@ -766,19 +781,24 @@ public:
         for (size_t a = 0; a < na_; a++) {
             auto &l = bra_k[a];
             std::stable_sort(l.begin(), l.end(), by_width);
-            const int K = static_cast<int>((l.size() + 3) / 4 * 4);
-            for (auto &p : l) { kk2.push_back(p.first); kr2.push_back(p.second); }
-            for (size_t k = l.size(); k < static_cast<size_t>(K); k++) { kk2.push_back(-1); kr2.push_back(2 * nrs); }
-            kp2[a + 1] = kp2[a] + K;
-            if (!l.empty()) {
+            const size_t nl = l.size(), nseg = (nl + kseg - 1) / kseg;  // near-equal segments of at most kseg
+            nsplit += nseg > 1;
+            for (size_t j = 0; j < nseg; j++) {
+                const size_t e0 = nl * j / nseg, e1 = nl * (j + 1) / nseg;
+                const int K = static_cast<int>((e1 - e0 + 3) / 4 * 4);
+                for (size_t e = e0; e < e1; e++) { kk2.push_back(l[e].first); kr2.push_back(l[e].second); }
+                for (size_t k = e1 - e0; k < static_cast<size_t>(K); k++) { kk2.push_back(-1); kr2.push_back(2 * nrs); }
+                const int sg = static_cast<int>(s2a.size());
+                s2a.push_back(static_cast<int>(a));
+                kp2.push_back(kp2.back() + K);
                 kmax = std::max(kmax, K);
-                const int tiles = (wid[l[0].first] + 63) / 64;
+                const int tiles = (wid[l[e0].first] + 63) / 64;
                 for (int t = 0; t < tiles; t++) {
-                    b2a.push_back(static_cast<int>(a));
+                    b2s.push_back(sg);
                     b2t.push_back(t);
-                    int keff = 0;
-                    while (keff < static_cast<int>(l.size()) && wid[l[keff].first] > 64 * t) keff++;
-                    const double f = 2.0 * 64 * 64 * ((keff + 3) / 4 * 4) * (cb[t + 1] - cb[t]);
+                    size_t keff = e0;
+                    while (keff < e1 && wid[l[keff].first] > 64 * t) keff++;
+                    const double f = 2.0 * 64 * 64 * ((keff - e0 + 3) / 4 * 4) * (cb[t + 1] - cb[t]);
                     flop2 += f;
                     cost2.push_back(f);
                 }
@@ -862,14 +882,12 @@ public:
             const auto sr = Share(cr);
             rb_ = sr.first; re_ = sr.second;
         }
-        k2ptr_ = kp2; k2ket_ = kk2; k2row_ = kr2; b2a_ = b2a; b2t_ = b2t;
+        k2ptr_ = kp2; k2ket_ = kk2; k2row_ = kr2; s2a_ = s2a; b2s_ = b2s; b2t_ = b2t;
         k1ptr_ = kp1; k1bra_ = kb1; k1row_ = kr1; b1k_ = b1k; b1g_ = b1g; b1t_ = b1t;
-        smem2_ = 16 + factored::fm_cross_smem(kmax, cross_.max_chunks) + static_cast<size_t>(kmax) * sizeof(int);
-        int dev = 0, optin = 0;
-        cudaGetDevice(&dev);
-        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-        if (smem2_ > static_cast<size_t>(optin))
-            throw std::runtime_error("factored_mult (GDB): excitation lists too long for shared memory");
+        smem2_ = smem2(kmax);
+        if (me_ == 0 && nsplit > 0)
+            std::printf(" factored_mult (GDB): %zu excitation lists longer than %d entries (the shared memory of a "
+                        "block) run as %zu segments in all\n", nsplit, kseg, s2a.size());
         cudaFuncSetAttribute(staircase::cross_bra, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem2_));
         cudaFuncSetAttribute(staircase::cross_ket, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              static_cast<int>(CROSS_KET_SMEM));
@@ -916,7 +934,7 @@ public:
                     "(%.2fx the list) holding %.1f%% of it, remainder %zu; cross-term GEMM %.3e flop bra-driven "
                     "(%zu blocks) + %.3e ket-driven (%zu blocks); %d rank(s); setup %.1f s\n",
                     n_, na_, nb_, ncell_, static_cast<double>(ncell_) / n_, 100.0 * in_list / n_, nrem_, flop2,
-                    b2a.size(), flop1, b1k.size(), nproc_,
+                    b2s.size(), flop1, b1k.size(), nproc_,
                     1e-6 * std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start).count());
     }
 
@@ -964,8 +982,8 @@ public:
             for (size_t b0 = c2b_; b0 < c2e_; b0 += 1u << 30) {
                 const unsigned nbk = static_cast<unsigned>(std::min<size_t>(1u << 30, c2e_ - b0));
                 staircase::cross_bra<<<nbk, 128, smem2_>>>(
-                    ptr(Cst_), ptr(cross_.Vs), cross_.ldv, ptr(k2ptr_), ptr(k2ket_), ptr(k2row_), ptr(b2a_) + b0,
-                    ptr(b2t_) + b0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
+                    ptr(Cst_), ptr(cross_.Vs), cross_.ldv, ptr(k2ptr_), ptr(k2ket_), ptr(k2row_), ptr(s2a_),
+                    ptr(b2s_) + b0, ptr(b2t_) + b0, ptr(cross_.goff), ptr(cross_.gent), ptr(cross_.cbase), ptr(cross_.rlist),
                     ptr(roff_), ptr(wid_), ptr(Sst_));
             }
         });
@@ -1128,7 +1146,7 @@ private:
     thrust::device_vector<long long> roff_, where_, rptr_;
     thrust::device_vector<signed char> sgn_;
     thrust::device_vector<long long> k2ptr_, k1ptr_;
-    thrust::device_vector<int> k2ket_, k2row_, b2a_, b2t_, k1bra_, k1row_, b1k_, b1g_, b1t_;
+    thrust::device_vector<int> k2ket_, k2row_, s2a_, b2s_, b2t_, k1bra_, k1row_, b1k_, b1g_, b1t_;
     size_t smem2_ = 0;
     int w0_ = 0, active_rows_ = 0;  // the widest row's width; rows with any staircase cells
     thrust::device_vector<long long> hap_, hbp_, eap_, ebp_;
