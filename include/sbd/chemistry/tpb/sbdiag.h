@@ -429,8 +429,9 @@ namespace sbd {
           thrust::device_vector<double> A(1, 0.0);
           nccl_allreduce(A, ncclSum, a_nccl_comm);
       }
-      printf("[%s,%d] NCCL communicators have been created.\n",
-             __FILE__, __LINE__);
+      if( mpi_rank == 0 )
+        printf("[%s,%d] NCCL communicators have been created.\n",
+               __FILE__, __LINE__);
 #endif
 
 #ifdef SBD_THRUST
@@ -472,6 +473,9 @@ namespace sbd {
 	                       // allocated later: the eigensolver's vectors on the GPU and the diagonal
 	                       sizeof(double) * (helper[0].braAlphaEnd - helper[0].braAlphaStart) * bdet.size()
 	                       * static_cast<size_t>(sbd_data.cpu_subspace ? 5 : 2 * max_nb + 5));
+#ifdef SBD_USE_NCCL
+	    factored_mult.SetNcclComms(b_nccl_comm, a_nccl_comm);
+#endif
 	}
 	if( !use_factored || sbd_data.factored_mult_check ) {
 	    init_device_mult();

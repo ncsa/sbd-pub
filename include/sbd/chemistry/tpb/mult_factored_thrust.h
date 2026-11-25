@@ -65,12 +65,37 @@ namespace factored {
 // ---------------------------------------------------------------------------------------------
 
 #define SBD_FM_LD 72    // row stride (doubles) of the V, C and X tiles: 64 + 8 avoids bank conflicts
+#if defined(__HIP_PLATFORM_AMD__)
+#define SBD_FM_LDC 64   // AMD: 2 x 64 x 64 doubles = 64 KiB, the per-block limit
+#else
 #define SBD_FM_LDC 65   // row stride of the same-spin C tiles; odd so transposed fills spread over banks
+#endif
 #define SBD_FM_TR 128   // rows per same-spin tile (columns per tile: 64)
 #ifndef SBD_FM_SMEM_LIMIT
 #define SBD_FM_SMEM_LIMIT 0  // bytes of shared memory a cross-term block may use; 0: the device's limit
 #endif
 
+#if defined(__HIP_PLATFORM_AMD__)
+// AMD (HIP) versions of the PTX helpers below. Correctness first: plain loads instead of cp.async, and
+// mma.sync m8n8k4 f64 emulated with 32-wide shuffles in PTX's fragment layout (lane l: g = l / 4, t = l % 4;
+// A[g][t] and B[t][g] in, D[g][2t], D[g][2t + 1] accumulated). A 64-lane wavefront runs two such groups.
+__device__ __forceinline__ void fm_cp_async8(double* dst, const double* src, bool valid)
+{
+    *dst = valid ? *src : 0.0;  // zero-fills when not valid, like cp.async with src-size 0
+}
+__device__ __forceinline__ void fm_cp_commit() {}
+__device__ __forceinline__ void fm_cp_wait0() {}
+__device__ __forceinline__ void fm_cp_wait1() {}
+__device__ __forceinline__ void fm_dmma(double& d0, double& d1, double a, double b)
+{
+    const int l = static_cast<int>(threadIdx.x) & 31, g = l >> 2, t = l & 3;
+    for (int k = 0; k < 4; k++) {
+        const double ag = __shfl(a, g * 4 + k, 32);           // A[g][k]
+        d0 += ag * __shfl(b, (2 * t) * 4 + k, 32);             // B[k][2t]
+        d1 += ag * __shfl(b, (2 * t + 1) * 4 + k, 32);         // B[k][2t + 1]
+    }
+}
+#else
 __device__ __forceinline__ void fm_cp_async8(double* dst, const double* src, bool valid)
 {
     unsigned d = (unsigned)__cvta_generic_to_shared(dst);
@@ -85,6 +110,8 @@ __device__ __forceinline__ void fm_dmma(double& d0, double& d1, double a, double
     asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {%0, %1}, {%2}, {%3}, {%0, %1};\n"
                  : "+d"(d0), "+d"(d1) : "d"(a), "d"(b));
 }
+
+#endif  // __HIP_PLATFORM_AMD__
 
 // V tile t of a chunk (rows k of the tile, 64 rs columns) into a ring stage, by cp.async
 __device__ __forceinline__ void fm_load_v_tile(double* stage, const double* Vs, const int* rl,
@@ -167,6 +194,31 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
             const double* As = ring + (t & 1) * 32 * SBD_FM_LD + wm * 32 + q8;
             const double* Bt = Bs + (t * 32) * SBD_FM_LD + wn * 32 + q8;
             const int kc = min(32, K - t * 32);
+#if defined(__HIP_PLATFORM_AMD__)
+            // AMD: the same outputs per lane as mma.sync m8n8k4 (X[wm*32 + i*8 + q8][wn*32 + j*8 + 2*r4 + {0,1}]),
+            // computed directly from shared memory: per 4-deep step, 16 A + 32 B loads feed 128 FMAs.
+            const double* Bn = Bs + (t * 32) * SBD_FM_LD + wn * 32 + 2 * r4;
+            for (int kk = 0; kk < kc; kk += 4) {
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    double av[4], bv[4][2];
+#pragma unroll
+                    for (int i = 0; i < 4; i++) av[i] = As[(kk + k) * SBD_FM_LD + i * 8];
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        bv[j][0] = Bn[(kk + k) * SBD_FM_LD + j * 8];
+                        bv[j][1] = Bn[(kk + k) * SBD_FM_LD + j * 8 + 1];
+                    }
+#pragma unroll
+                    for (int i = 0; i < 4; i++)
+#pragma unroll
+                        for (int j = 0; j < 4; j++) {
+                            acc[i][j][0] = fma(av[i], bv[j][0], acc[i][j][0]);
+                            acc[i][j][1] = fma(av[i], bv[j][1], acc[i][j][1]);
+                        }
+                }
+            }
+#else
             for (int kk = 0; kk < kc; kk += 4) {
                 double fa[4], fb[4];
 #pragma unroll
@@ -178,6 +230,7 @@ fused_cross(const double* __restrict__ C, const double* __restrict__ Vs, int ldv
 #pragma unroll
                     for (int j = 0; j < 4; j++) fm_dmma(acc[i][j][0], acc[i][j][1], fa[i], fb[j]);
             }
+#endif  // __HIP_PLATFORM_AMD__
             __syncthreads();  // stage (t & 1) free for the load two tiles ahead / for X
         }
         double* Xs = ring;
@@ -789,6 +842,15 @@ inline void BuildCrossBuckets(CrossTables &x, size_t a0, size_t a1)
 template <typename ElemT>
 class MultTPBFactored : public MultBase<ElemT> {
 public:
+#ifdef SBD_USE_NCCL
+    // The eigensolver's collectives (DavidsonCublas) use MultBase's NCCL communicators; the standard
+    // multiplication receives them in Init, so hand the same ones to this one.
+    void SetNcclComms(ncclComm_t b_nccl_comm, ncclComm_t a_nccl_comm)
+    {
+        this->b_nccl_comm_ = b_nccl_comm;
+        this->a_nccl_comm_ = a_nccl_comm;
+    }
+#endif
     MultTPBFactored() {}
     ~MultTPBFactored()
     {
@@ -1006,12 +1068,14 @@ public:
             // nodes at different GPUs, so it uses all four NICs of a node, 84 GB/s per GPU on two GH200
             // nodes against 24 GB/s for MPI_Allgather; Davidson at 1e9 determinants on 8 GPUs took
             // 51.5 s against 120.9 s.
-            MPI_Comm node;
-            MPI_Comm_split_type(b_comm, MPI_COMM_TYPE_SHARED, rank_, MPI_INFO_NULL, &node);
-            int on_node = 0;
-            MPI_Comm_size(node, &on_node);
-            MPI_Comm_free(&node);
-            int one_node = on_node == P_, all_one_node = 0;
+            // MPICH 5.0.x reports a local size of 1 from MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) on some
+            // systems, so every rank would look like its own node. Compare host names with rank 0's instead.
+            char host[MPI_MAX_PROCESSOR_NAME + 1] = {0}, root_host[MPI_MAX_PROCESSOR_NAME + 1] = {0};
+            int host_len = 0;
+            MPI_Get_processor_name(host, &host_len);
+            std::memcpy(root_host, host, sizeof(root_host));
+            MPI_Bcast(root_host, MPI_MAX_PROCESSOR_NAME + 1, MPI_CHAR, 0, b_comm);
+            int one_node = std::strcmp(host, root_host) == 0, all_one_node = 0;
             MPI_Allreduce(&one_node, &all_one_node, 1, MPI_INT, MPI_LAND, b_comm);
 #ifndef SBD_USE_NCCL
             if (!all_one_node)
